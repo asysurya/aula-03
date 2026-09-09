@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
 import { db } from "@/lib/db";
+import { hardDeleteCloudFilesByIds } from "@/lib/hard-delete";
 
 type ConversationKind = "classroom" | "group" | "dm";
 
@@ -226,8 +227,15 @@ export async function DELETE(
     );
   }
 
-  // Cascades: attachments + reactions + readReceipts (onDelete: Cascade set on those).
+  // HARD DELETE: pesan + relasinya + file lampiran (baris CloudFile DAN
+  // blob di MEGA/lokal) — tidak menyisakan file tersembunyi.
+  const attachments = await db.messageAttachment.findMany({
+    where: { messageId: id },
+    select: { fileId: true },
+  });
+  await db.messageAttachment.deleteMany({ where: { messageId: id } });
   await db.message.delete({ where: { id } });
+  await hardDeleteCloudFilesByIds(attachments.map((a) => a.fileId));
 
   return NextResponse.json({ ok: true });
 }

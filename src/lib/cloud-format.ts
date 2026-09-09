@@ -87,6 +87,9 @@ export interface CloudFileItem {
   uploadedBy: string;
   uploader?: { id: string; name: string; username: string };
   visibility: Visibility;
+  // true untuk file MEGA mentah dari mount MEGA Cloud (tanpa baris
+  // CloudFile di DB) — URL preview perlu parameter ?name=.
+  raw?: boolean;
 }
 
 // Granted-user entry returned by the permissions endpoints.
@@ -200,4 +203,42 @@ export interface AssignmentDetailResponse {
     studentCount: number;
     total: number;
   } | null;
+}
+
+// Infer mimetype dari ekstensi nama file — dipakai saat menampilkan file
+// MEGA mentah (mount MEGA Cloud) yang tidak punya baris CloudFile di DB.
+const EXT_MIME: Record<string, string> = {
+  png: "image/png",
+  jpg: "image/jpeg",
+  jpeg: "image/jpeg",
+  gif: "image/gif",
+  webp: "image/webp",
+  svg: "image/svg+xml",
+  bmp: "image/bmp",
+  pdf: "application/pdf",
+  txt: "text/plain",
+  md: "text/markdown",
+  csv: "text/csv",
+  json: "application/json",
+  mp3: "audio/mpeg",
+  wav: "audio/wav",
+  ogg: "audio/ogg",
+  m4a: "audio/mp4",
+  mp4: "video/mp4",
+  webm: "video/webm",
+  mov: "video/quicktime",
+  doc: "application/msword",
+  docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  xls: "application/vnd.ms-excel",
+  xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  ppt: "application/vnd.ms-powerpoint",
+  pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  zip: "application/zip",
+  rar: "application/vnd.rar",
+  "7z": "application/x-7z-compressed",
+};
+
+export function mimetypeFromName(name: string): string {
+  const ext = (name.split(".").pop() ?? "").toLowerCase();
+  return EXT_MIME[ext] ?? "application/octet-stream";
 }

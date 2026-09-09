@@ -12,7 +12,7 @@ import {
   type ClassroomRole,
   type UserRole,
 } from "@/lib/cloud-perms";
-import { deleteFile } from "@/lib/storage";
+import { hardDeleteCloudFilesByIds } from "@/lib/hard-delete";
 
 // PATCH /api/cloud/folders/[id] — rename a folder.
 // Body: { name: string } (1-120 chars, not empty). Allowed for ADMIN/GURU,
@@ -146,31 +146,102 @@ export async function DELETE(
     select: { id: true, storageKey: true, submission: { select: { id: true } } },
   });
 
-  // Clear submission links for any files tied to submissions.
-  const filesWithSubs = filesInFolders.filter((f) => f.submission);
-  if (filesWithSubs.length > 0) {
-    await db.submission.updateMany({
-      where: { fileId: { in: filesWithSubs.map((f) => f.id) } },
-      data: { fileId: null },
+  // ── HARD DELETE support ──
+  // File jawaban form (FormAnswer) & gambar soal (FormQuestion) memiliki
+  // folderId=null — TIDAK tercakup query di atas dan tadinya dibiarkan
+  // yatim di DB + MEGA saat tugas dihapus. Kumpulkan SEBELUM baris
+  // assignment/form/attempt terhapus oleh cascade.
+  const orphanFileIds: string[] = [];
+  const assignmentsInFolders = await db.assignment.findMany({
+    where: { folderId: { in: allFolderIds } },
+    select: { id: true },
+  });
+  if (assignmentsInFolders.length > 0) {
+    const assignmentIds = assignmentsInFolders.map((a) => a.id);
+    const forms = await db.form.findMany({
+      where: { assignmentId: { in: assignmentIds } },
+      select: { id: true },
+    });
+    if (forms.length > 0) {
+      const formIds = forms.map((f) => f.id);
+      const attempts = await db.formAttempt.findMany({
+        where: { formId: { in: formIds } },
+        select: { id: true },
+      });
+      if (attempts.length > 0) {
+        const attemptIds = attempts.map((a) => a.id);
+        const answerFiles = await db.formAnswer.findMany({
+          where: { attemptId: { in: attemptIds }, fileId: { not: null } },
+          select: { fileId: true },
+        });
+        orphanFileIds.push(
+          ...answerFiles.map((a) => a.fileId as string)
+        );
+      }
+      const questionImages = await db.formQuestion.findMany({
+        where: { formId: { in: formIds }, imageFileId: { not: null } },
+        select: { imageFileId: true },
+      });
+      orphanFileIds.push(
+        ...questionImages.map((q) => q.imageFileId as string)
+      );
+    }
+  }
+
+  // ── HARD DELETE, urutan aman (anak dulu, induk belakangan) ──
+  // Semua relasi ke CloudFolder/Assignment/CloudFile/SharedDoc memakai
+  // NoAction (Prisma MongoDB menolak delete bila masih direferensikan —
+  // P2014), jadi baris-baris yang menunjuk HARUS dihapus lebih dulu.
+
+  // 1. Submission milik assignment di folder ini (menunjuk Assignment
+  //    dan CloudFile dengan NoAction).
+  if (assignmentsInFolders.length > 0) {
+    await db.submission.deleteMany({
+      where: {
+        assignmentId: { in: assignmentsInFolders.map((a) => a.id) },
+      },
     });
   }
 
-  // Delete the folder rows (cascades FolderAccess, child folders, files,
-  // docs, assignment+submissions via onDelete: Cascade).
-  await db.cloudFolder.deleteMany({
-    where: { id: { in: allFolderIds } },
+  // 2. SharedDoc di folder ini: hapus kolaboratornya dulu (NoAction),
+  //    lalu dokumennya.
+  const docsInFolders = await db.sharedDoc.findMany({
+    where: { folderId: { in: allFolderIds } },
+    select: { id: true },
+  });
+  if (docsInFolders.length > 0) {
+    const docIds = docsInFolders.map((d) => d.id);
+    await db.docCollaborator.deleteMany({
+      where: { docId: { in: docIds } },
+    });
+    await db.sharedDoc.deleteMany({ where: { id: { in: docIds } } });
+  }
+
+  // 3. Assignment (cascade: Form → FormQuestion/FormAttempt → FormAnswer).
+  if (assignmentsInFolders.length > 0) {
+    await db.assignment.deleteMany({
+      where: { id: { in: assignmentsInFolders.map((a) => a.id) } },
+    });
+  }
+
+  // 4. FolderAccess untuk folder-folder ini.
+  await db.folderAccess.deleteMany({
+    where: { folderId: { in: allFolderIds } },
   });
 
-  // Best-effort delete of underlying storage blobs.
-  const storageKeys = Array.from(
-    new Set(filesInFolders.map((f) => f.storageKey))
-  );
-  for (const key of storageKeys) {
-    try {
-      await deleteFile(key);
-    } catch {
-      // Non-fatal.
-    }
+  // 5. Hard delete SEMUA file di dalam folder ini + file jawaban form /
+  //    gambar soal (orphan): bersihkan FileAccess/MessageAttachment/
+  //    referensi Submission → hapus baris CloudFile → hapus blob MEGA/lokal.
+  const allFileIds = [
+    ...filesInFolders.map((f) => f.id),
+    ...orphanFileIds,
+  ];
+  await hardDeleteCloudFilesByIds(allFileIds);
+
+  // 6. Terakhir: folder itu sendiri — dari yang paling dalam (anak dulu)
+  //    supaya relasi CloudFolder.parent (NoAction) tidak melanggar.
+  for (const fid of [...allFolderIds].reverse()) {
+    await db.cloudFolder.delete({ where: { id: fid } }).catch(() => {});
   }
 
   return Response.json({ ok: true, deletedFolderCount: allFolderIds.length });

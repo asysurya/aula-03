@@ -25,7 +25,8 @@ Dibangun dengan Next.js · Prisma · MongoDB · Tailwind CSS · shadcn/ui
 - **Dokumen bersama** — editor teks kolaboratif dengan autosave
 - **Tugas & pengumpulan** — guru membuat tugas, siswa mengumpulkan file jawaban
 - **Storage MEGA** — semua file otomatis tersimpan ke akun MEGA (gratis 20 GB), dikelola dari Admin Panel
-- **Fallback aman** — jika MEGA tidak tersedia, file disimpan lokal sementara
+- **Mount MEGA Cloud** 🗻 — akun MEGA tampil sebagai folder berlogo MEGA di root Cloud; guru/admin bisa membrowse isi aslinya (folder, file, kuota) + preview tanpa download
+- **Session MEGA ter-cache** — login hanya sekali per proses server (anti rate-limit/EBLOCKED)
 
 ### 📝 Form Tugas Anti-nyontek ⭐
 Guru dapat membuat tugas berbentuk **form** dengan proteksi anti-nyontek:
@@ -49,6 +50,7 @@ Mekanisme anti-nyontek:
 
 ### 👥 Lainnya
 - **Manajemen anggota** — daftar siswa/guru per kelas, profil, bio
+- **Hard delete** — hapus tugas/file/pesan benar-benar menghapus baris DB **dan** blob di MEGA (cascade aman: jawaban form, gambar soal, lampiran chat ikut bersih)
 - **Admin panel** — kelola user, kelas, koneksi database, akun cloud MEGA
 - **Tema gelap Discord/Slack-style** dengan aksen emerald
 - **Auth username + password** (bcrypt, session cookie)

@@ -1,5 +1,6 @@
 import { NextRequest } from "next/server";
 import { db } from "@/lib/db";
+import { hardDeleteCloudFilesByIds } from "@/lib/hard-delete";
 import { requireUser } from "@/lib/session";
 import {
   errorResponse,
@@ -12,7 +13,6 @@ import {
   type ClassroomRole,
   type UserRole,
 } from "@/lib/cloud-perms";
-import { deleteFile } from "@/lib/storage";
 
 // PATCH /api/cloud/files/[id] — rename a file.
 // Body: { name: string } (1-200 chars, not empty). Only uploader/admin/guru
@@ -130,16 +130,8 @@ export async function DELETE(
     return errorResponse("FORBIDDEN", 403);
   }
 
-  // Submission link must be cleared first (fileId is unique+nullable).
-  if (file.submission) {
-    await db.submission.update({
-      where: { id: file.submission.id },
-      data: { fileId: null },
-    });
-  }
-
-  await db.cloudFile.delete({ where: { id } });
-  await deleteFile(file.storageKey);
+  // Hard delete: baris DB + blob MEGA/lokal + semua referensi — permanen.
+  await hardDeleteCloudFilesByIds([id]);
 
   return Response.json({ ok: true });
 }

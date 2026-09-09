@@ -83,7 +83,10 @@ export function FilePreview({
 
 function PreviewInner({ file }: { file: CloudFileItem }) {
   const kind = classify(file.mimetype, file.name);
-  const url = filePublicUrl(file.storageKey);
+  // File MEGA mentah (mount) butuh ?name= agar server tahu nama + mimetype.
+  const url =
+    filePublicUrl(file.storageKey) +
+    (file.raw ? `?name=${encodeURIComponent(file.name)}` : "");
 
   return (
     <>

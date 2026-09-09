@@ -5,6 +5,8 @@ import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
 import { folderClassroomId, getClassroomRole } from "@/lib/cloud-utils";
 import { canViewFile, type UserRole, type ClassroomRole } from "@/lib/cloud-perms";
+import { parseMegaKey } from "@/lib/mega-storage";
+import { mimetypeFromName } from "@/lib/cloud-format";
 
 // Serve uploaded files. Authenticated users can read; images also viewable inline.
 // The requester must have `canViewFile` permission over the file. Files with no
@@ -15,7 +17,7 @@ import { canViewFile, type UserRole, type ClassroomRole } from "@/lib/cloud-perm
 //   - if expired (expiresAt < now) → 410 Gone + delete blob + delete CloudFile
 //     row (cascades to MessageAttachment).
 export async function GET(
-  _req: NextRequest,
+  req: NextRequest,
   { params }: { params: Promise<{ key: string }> }
 ) {
   const session = await getServerSession(authOptions);
@@ -40,7 +42,35 @@ export async function GET(
     },
   });
   if (!file) {
-    return new NextResponse("Not found", { status: 404 });
+    // ── Mode "mount MEGA": node MEGA mentah tanpa baris CloudFile ──
+    // (dipakai saat guru/admin membrowse file di MEGA Cloud mount).
+    // Hanya ADMIN/GURU yang boleh — file mentah bisa berisi jawaban privat.
+    const mega = parseMegaKey(key);
+    const rawRole = (session.user as any).role as string;
+    if (!mega || (rawRole !== "ADMIN" && rawRole !== "GURU")) {
+      return new NextResponse("Not found", { status: 404 });
+    }
+    const rawName =
+      req.nextUrl.searchParams.get("name") ?? "file";
+    const rawMime = mimetypeFromName(rawName);
+    const rawData = await getFile(key);
+    if (!rawData) return new NextResponse("Not found", { status: 404 });
+    const rawInline =
+      rawMime.startsWith("image/") ||
+      rawMime.startsWith("video/") ||
+      rawMime.startsWith("audio/") ||
+      rawMime === "application/pdf" ||
+      rawMime.startsWith("text/");
+    const rawHeaders = new Headers();
+    rawHeaders.set("Content-Type", rawMime);
+    rawHeaders.set(
+      "Content-Disposition",
+      `${rawInline ? "inline" : "attachment"}; filename="${encodeURIComponent(rawName)}"`
+    );
+    rawHeaders.set("Cache-Control", "private, max-age=600");
+    return new NextResponse(new Uint8Array(rawData.bytes), {
+      headers: rawHeaders,
+    });
   }
 
   // Temp chat file expiry handling: if expiresAt is set and in the past,

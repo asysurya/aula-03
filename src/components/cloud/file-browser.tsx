@@ -73,6 +73,8 @@ import { FileUpload } from "@/components/cloud/file-upload";
 import { FileIcon } from "@/components/cloud/file-icon";
 import { AssignmentDetail } from "@/components/cloud/assignment-detail";
 import { FilePreview } from "@/components/cloud/file-preview";
+import { MegaMountView } from "@/components/cloud/mega-mount";
+import { MegaLogo } from "@/components/cloud/mega-logo";
 import {
   formatBytes,
   mimeToIcon,
@@ -154,6 +156,8 @@ export function FileBrowser({
   const [selectedFiles, setSelectedFiles] = useState<Set<string>>(new Set());
   const [clipboard, setClipboard] = useState<Clipboard>(null);
   const [previewFile, setPreviewFile] = useState<CloudFileItem | null>(null);
+  // Mount MEGA Cloud (guru/admin) — browse isi akun MEGA langsung.
+  const [megaOpen, setMegaOpen] = useState(false);
 
   // Single-item action dialogs.
   const [renameTarget, setRenameTarget] = useState<
@@ -216,6 +220,17 @@ export function FileBrowser({
     setPrevFolderKey(currentFolderKey);
     setSelectedFolders(new Set());
     setSelectedFiles(new Set());
+    // Pindah folder/classroom otomatis menutup mount MEGA.
+    setMegaOpen(false);
+  }
+
+  // ── Mount MEGA Cloud (guru/admin) — early return ──
+  if (megaOpen) {
+    return (
+      <div className="h-full">
+        <MegaMountView onExit={() => setMegaOpen(false)} />
+      </div>
+    );
   }
 
   // ── Assignment folder detection ──────────────────────────────────
@@ -235,6 +250,9 @@ export function FileBrowser({
   const files = data?.files ?? [];
   const docs = data?.docs ?? [];
   const ancestors = data?.ancestors ?? [];
+
+  // Kartu mount MEGA hanya di root & untuk guru/admin.
+  const showMegaCard = !folderId && isTeacher(me, classroomId);
 
   const totalSelected = selectedFolders.size + selectedFiles.size;
 
@@ -631,14 +649,17 @@ export function FileBrowser({
               Coba lagi
             </Button>
           </div>
-        ) : folders.length === 0 && files.length === 0 && docs.length === 0 ? (
+        ) : !showMegaCard &&
+          folders.length === 0 &&
+          files.length === 0 &&
+          docs.length === 0 ? (
           <div className="text-center py-12 text-sm text-muted-foreground">
             <Folder className="size-8 mx-auto mb-2 opacity-50" />
             Folder kosong. Unggah file atau buat sub-folder.
           </div>
         ) : (
           <>
-            {folders.length > 0 ? (
+            {folders.length > 0 || showMegaCard ? (
               <section
                 onMouseDown={(e) => {
                   if (e.target === e.currentTarget) clearSelection();
@@ -653,6 +674,9 @@ export function FileBrowser({
                     if (e.target === e.currentTarget) clearSelection();
                   }}
                 >
+                  {showMegaCard ? (
+                    <MegaMountCard onClick={() => setMegaOpen(true)} />
+                  ) : null}
                   {folders.map((f) => (
                     <FolderCard
                       key={f.id}
@@ -848,6 +872,44 @@ export function FileBrowser({
 }
 
 // ───────────────────────── Folder card ─────────────────────────
+
+// ── Kartu mount MEGA Cloud di root (guru/admin) ──────────────────
+function MegaMountCard({ onClick }: { onClick: () => void }) {
+  return (
+    <Card
+      role="button"
+      tabIndex={0}
+      onClick={onClick}
+      onDoubleClick={onClick}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          onClick();
+        }
+      }}
+      className="p-4 gap-2 transition-colors cursor-pointer select-none hover:bg-red-500/5 hover:border-red-500/40"
+      title="Buka mount MEGA Cloud (guru/admin)"
+    >
+      <div className="flex items-start gap-3">
+        <div className="rounded-md bg-red-500/10 p-2 shrink-0">
+          <MegaLogo className="size-5" />
+        </div>
+        <div className="flex-1 min-w-0">
+          <p className="font-medium truncate">MEGA Cloud</p>
+          <div className="flex items-center gap-1.5 mt-1 flex-wrap">
+            <Badge className="bg-red-500 text-white border-transparent">
+              Mount
+            </Badge>
+            <span className="text-[11px] text-muted-foreground">
+              Storage awan kelas
+            </span>
+          </div>
+        </div>
+        <ChevronRight className="size-4 text-muted-foreground opacity-50 mt-1" />
+      </div>
+    </Card>
+  );
+}
 
 function FolderCard({
   folder,

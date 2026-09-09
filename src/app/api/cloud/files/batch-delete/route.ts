@@ -6,7 +6,7 @@ import {
   canDeleteFile,
   type UserRole,
 } from "@/lib/cloud-perms";
-import { deleteFile } from "@/lib/storage";
+import { hardDeleteCloudFilesByIds } from "@/lib/hard-delete";
 
 // POST /api/cloud/files/batch-delete
 // Body: { fileIds: string[] }
@@ -59,29 +59,9 @@ export async function POST(req: NextRequest) {
     }
   }
 
-  // Clear submission links for any files tied to submissions.
-  const filesWithSubs = files.filter((f) => f.submission);
-  if (filesWithSubs.length > 0) {
-    await db.submission.updateMany({
-      where: { fileId: { in: filesWithSubs.map((f) => f.id) } },
-      data: { fileId: null },
-    });
-  }
-
-  // Delete rows.
-  await db.cloudFile.deleteMany({
-    where: { id: { in: fileIds } },
-  });
-
-  // Delete blobs (best-effort, sequential).
-  const storageKeys = Array.from(new Set(files.map((f) => f.storageKey)));
-  for (const key of storageKeys) {
-    try {
-      await deleteFile(key);
-    } catch {
-      // Storage deletion failure is non-fatal for the DB row removal.
-    }
-  }
+  // Hard delete: bersihkan referensi → hapus baris CloudFile → hapus blob
+  // MEGA/lokal. Permanen, tidak menyisakan file tersembunyi.
+  await hardDeleteCloudFilesByIds(fileIds);
 
   return Response.json({
     ok: true,
