@@ -5,7 +5,7 @@ import { format } from "date-fns";
 import {
   Clock,
   CornerUpLeft,
-  Download,
+  Eye,
   Loader2,
   MoreHorizontal,
   Pencil,
@@ -18,7 +18,8 @@ import { toast } from "sonner";
 import { UserAvatar } from "@/components/shared/user-avatar";
 import { OnlineDot } from "@/components/shared/online-dot";
 import { FileIcon } from "@/components/cloud/file-icon";
-import { mimeToIcon } from "@/lib/cloud-format";
+import { FilePreview } from "@/components/cloud/file-preview";
+import { mimeToIcon, type CloudFileItem } from "@/lib/cloud-format";
 import { formatBytes, isImageMime } from "@/lib/file-constants";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
@@ -55,61 +56,87 @@ interface MessageBubbleProps {
   onScrollToMessage?: (id: string) => void;
 }
 
+// Lampiran pesan — klik = PRATINJAU (dialog, semua tipe: pdf/docx/xlsx/
+// gambar/video/audio/teks), bukan memaksa unduh. Tombol unduh tetap ada
+// di dalam pratinjau.
 function Attachments({ attachments }: { attachments: ChatAttachment[] }) {
+  const [previewFile, setPreviewFile] = useState<CloudFileItem | null>(null);
   if (!attachments || attachments.length === 0) return null;
+
+  function toPreviewItem(
+    a: ChatAttachment,
+    fallbackName: string,
+    fallbackOwner: string
+  ): CloudFileItem {
+    const { file } = a;
+    return {
+      id: file.id,
+      name: file.name,
+      size: file.size,
+      mimetype: file.mimetype,
+      storageKey: file.storageKey,
+      cloudAccountId: null,
+      createdAt: new Date().toISOString(),
+      uploadedBy: "",
+      uploader: { id: "", name: fallbackName, username: fallbackOwner },
+      visibility: "ALL",
+      raw: false,
+    };
+  }
+
   return (
-    <div className="flex flex-wrap gap-2 mt-1.5">
-      {attachments.map((a) => {
-        const { file } = a;
-        const url = `/api/storage/${file.storageKey}`;
-        const isImg = isImageMime(file.mimetype);
-        if (isImg) {
+    <>
+      <div className="flex flex-wrap gap-2 mt-1.5">
+        {attachments.map((a) => {
+          const { file } = a;
+          const url = `/api/storage/${file.storageKey}`;
+          const isImg = isImageMime(file.mimetype);
+          if (isImg) {
+            return (
+              <button
+                key={a.id}
+                type="button"
+                onClick={() => setPreviewFile(toPreviewItem(a, file.name, "chat"))}
+                className="block group relative rounded-md overflow-hidden border border-border cursor-zoom-in"
+                title={`Pratinjau ${file.name}`}
+              >
+                {/* image thumbnail */}
+                <img
+                  src={url}
+                  alt={file.name}
+                  className="h-[140px] w-[140px] object-cover group-hover:opacity-90 transition-opacity"
+                />
+                <span className="absolute bottom-1 right-1 inline-flex items-center gap-0.5 rounded-full bg-black/70 text-white text-[9px] px-1.5 py-0.5 backdrop-blur-sm">
+                  <Clock className="h-2.5 w-2.5" /> 24j
+                </span>
+              </button>
+            );
+          }
           return (
-            <a
+            <button
               key={a.id}
-              href={url}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="block group relative rounded-md overflow-hidden border border-border"
-              title={file.name}
+              type="button"
+              onClick={() => setPreviewFile(toPreviewItem(a, file.name, "chat"))}
+              className="flex items-center gap-2 rounded-md border border-border bg-card/60 px-2 py-1.5 max-w-[220px] hover:bg-accent/60 transition-colors text-left"
+              title={`Pratinjau ${file.name} (tanpa unduh)`}
             >
-              {/* image thumbnail */}
-              <img
-                src={url}
-                alt={file.name}
-                className="h-[140px] w-[140px] object-cover group-hover:opacity-90 transition-opacity"
+              <FileIcon
+                name={mimeToIcon(file.mimetype)}
+                className="h-5 w-5 shrink-0 text-muted-foreground"
               />
-              <span className="absolute bottom-1 right-1 inline-flex items-center gap-0.5 rounded-full bg-black/70 text-white text-[9px] px-1.5 py-0.5 backdrop-blur-sm">
-                <Clock className="h-2.5 w-2.5" /> 24j
-              </span>
-            </a>
+              <div className="min-w-0 flex-1">
+                <p className="text-xs font-medium truncate">{file.name}</p>
+                <p className="text-[10px] text-muted-foreground flex items-center gap-1">
+                  <Clock className="h-2.5 w-2.5" /> 24j · {formatBytes(file.size)}
+                </p>
+              </div>
+              <Eye className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+            </button>
           );
-        }
-        return (
-          <a
-            key={a.id}
-            href={url}
-            target="_blank"
-            rel="noopener noreferrer"
-            download={file.name}
-            className="flex items-center gap-2 rounded-md border border-border bg-card/60 px-2 py-1.5 max-w-[220px] hover:bg-accent/60 transition-colors"
-            title={file.name}
-          >
-            <FileIcon
-              name={mimeToIcon(file.mimetype)}
-              className="h-5 w-5 shrink-0 text-muted-foreground"
-            />
-            <div className="min-w-0 flex-1">
-              <p className="text-xs font-medium truncate">{file.name}</p>
-              <p className="text-[10px] text-muted-foreground flex items-center gap-1">
-                <Clock className="h-2.5 w-2.5" /> 24j · {formatBytes(file.size)}
-              </p>
-            </div>
-            <Download className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-          </a>
-        );
-      })}
-    </div>
+        })}
+      </div>
+      <FilePreview file={previewFile} onClose={() => setPreviewFile(null)} />
+    </>
   );
 }
 

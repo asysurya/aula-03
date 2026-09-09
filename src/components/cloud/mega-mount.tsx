@@ -108,6 +108,10 @@ interface MegaTreeResponse {
     spaceTotal: number | null;
     spaceUsedLabel: string | null;
     spaceTotalLabel: string | null;
+    /** Hak akses mount utk user ini: "READ" = baca-saja. */
+    mountMode?: "READ" | "WRITE";
+    mountVisibleTo?: "ADMIN" | "GURU" | "ALL";
+    canWrite?: boolean;
   };
   nodeId: string;
   path: { id: string; name: string }[];
@@ -123,11 +127,12 @@ interface MegaClipboard {
 // ───────────────────────── Component ─────────────────────────
 
 /**
- * Tampilan "mount MEGA Cloud" — file explorer PENUH seperti cloud biasa:
- * multi-select, copy/potong/tempel, rename, pindah, hapus permanen,
- * unggah (chunked utk file besar), unduh, pratinjau all-format,
- * context menu klik-kanan, shortcut keyboard, dan drag-and-drop.
- * Hanya guru/admin (dipaksa di API-nya).
+ * Tampilan "mount MEGA Cloud" — file explorer PENUH seperti drive pada
+ * umumnya: 1 klik = pilih, 2 klik = buka; multi-select (Ctrl / Shift /
+ * checkbox / Ctrl+A); copy/potong/tempel, rename, pindah, hapus permanen,
+ * unggah (chunked utk file besar), unduh, pratinjau all-format + layar
+ * penuh, context menu klik-kanan, shortcut keyboard, dan drag-and-drop.
+ * Hak akses (siapa boleh membuka + baca-saja) diatur admin per-akun.
  */
 export function MegaMountView({
   onExit,
@@ -139,6 +144,7 @@ export function MegaMountView({
 
   // ── Explorer state ──
   const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [anchorId, setAnchorId] = useState<string | null>(null); // awal seleksi Shift
   const [clipboard, setClipboard] = useState<MegaClipboard | null>(null);
   const [renameTarget, setRenameTarget] = useState<MegaEntry | null>(null);
   const [moveTarget, setMoveTarget] = useState<MegaEntry | null>(null);
@@ -169,6 +175,9 @@ export function MegaMountView({
 
   const accountId = data?.account.id;
   const entries = data?.entries ?? [];
+  // Hak akses efektif untuk user ini (dari pengaturan admin per-akun).
+  const canWrite = data?.account.canWrite ?? true;
+  const isReadOnly = !canWrite;
 
   const opsMut = useMutation({
     mutationFn: async (payload: Record<string, unknown>) => {
@@ -226,17 +235,42 @@ export function MegaMountView({
   const downloadUrl = (entry: MegaEntry) =>
     `/api/storage/mega:${accountId}:${entry.nodeId}?name=${encodeURIComponent(entry.name)}`;
 
-  // ── Selection helpers ──
+  // ── Selection helpers (perilaku drive standar) ──
+  // 1 klik = pilih (ganti seleksi) · Ctrl/Cmd+klik = toggle ·
+  // Shift+klik = rentang dari item jangkar. Checkbox = toggle.
+  function selectEntry(
+    nodeId: string,
+    mode: "single" | "toggle" | "range"
+  ) {
+    if (mode === "range" && anchorId) {
+      const ids = entries.map((e) => e.nodeId);
+      const from = ids.indexOf(anchorId);
+      const to = ids.indexOf(nodeId);
+      if (from !== -1 && to !== -1) {
+        const [start, end] = from <= to ? [from, to] : [to, from];
+        const rangeIds = new Set(ids.slice(start, end + 1));
+        setSelected(rangeIds);
+        return;
+      }
+    }
+    if (mode === "toggle") {
+      setSelected((prev) => {
+        const next = new Set(prev);
+        if (next.has(nodeId)) next.delete(nodeId);
+        else next.add(nodeId);
+        return next;
+      });
+    } else {
+      setSelected(new Set([nodeId]));
+    }
+    setAnchorId(nodeId);
+  }
   function toggleSelect(nodeId: string, additive: boolean) {
-    setSelected((prev) => {
-      const next = new Set(additive ? prev : undefined);
-      if (prev.has(nodeId) && additive) next.delete(nodeId);
-      else next.add(nodeId);
-      return next;
-    });
+    selectEntry(nodeId, additive ? "toggle" : "single");
   }
   function clearSelection() {
     setSelected(new Set());
+    setAnchorId(null);
   }
   const selectedEntries = entries.filter((e) => selected.has(e.nodeId));
   const totalSelected = selectedEntries.length;
@@ -274,21 +308,21 @@ export function MegaMountView({
 
   // ── Copy / Cut / Paste ──
   function onCopySelection() {
-    if (totalSelected === 0) return;
+    if (totalSelected === 0 || isReadOnly) return;
     setClipboard({ mode: "copy", entries: selectedEntries });
     toast.success(
       `${totalSelected} item disalin. Buka folder tujuan lalu Tempel.`
     );
   }
   function onCutSelection() {
-    if (totalSelected === 0) return;
+    if (totalSelected === 0 || isReadOnly) return;
     setClipboard({ mode: "cut", entries: selectedEntries });
     toast.success(
       `${totalSelected} item dipotong. Buka folder tujuan lalu Tempel.`
     );
   }
-  async function onPaste() {
-    if (!clipboard || clipboard.entries.length === 0) return;
+  async function pasteInto(targetParentId: string | null) {
+    if (!clipboard || clipboard.entries.length === 0 || isReadOnly) return;
     let okCount = 0;
     let failCount = 0;
     for (const entry of clipboard.entries) {
@@ -297,18 +331,18 @@ export function MegaMountView({
           await opsMut.mutateAsync({
             action: "copy",
             nodeId: entry.nodeId,
-            targetParentId: nodeId,
+            targetParentId,
           });
         } else {
           // cut → move; jangan pindahkan folder ke dalam dirinya sendiri
-          if (entry.isFolder && entry.nodeId === nodeId) {
+          if (entry.isFolder && entry.nodeId === targetParentId) {
             failCount++;
             continue;
           }
           await opsMut.mutateAsync({
             action: "move",
             nodeId: entry.nodeId,
-            targetParentId: nodeId,
+            targetParentId,
           });
         }
         okCount++;
@@ -327,10 +361,13 @@ export function MegaMountView({
     if (clipboard.mode === "cut") setClipboard(null);
     clearSelection();
   }
+  async function onPaste() {
+    await pasteInto(nodeId);
+  }
 
   // ── Delete multi ──
   function askDeleteSelection() {
-    if (totalSelected === 0) return;
+    if (totalSelected === 0 || isReadOnly) return;
     setDeleteTargets(selectedEntries);
   }
   async function doDelete(targets: MegaEntry[]) {
@@ -352,7 +389,7 @@ export function MegaMountView({
     clearSelection();
   }
 
-  // ── Keyboard shortcuts ──
+  // ── Keyboard shortcuts (drive standar) ──
   function onKeyDown(e: React.KeyboardEvent<HTMLDivElement>) {
     const target = e.target as HTMLElement | null;
     if (
@@ -370,14 +407,18 @@ export function MegaMountView({
       }
       return;
     }
-    if ((e.key === "Delete" || e.key === "Backspace") && totalSelected > 0) {
-      e.preventDefault();
-      askDeleteSelection();
-      return;
-    }
-    if (e.key === "F2" && totalSelected === 1) {
+    if (e.key === "F2" && totalSelected === 1 && !isReadOnly) {
       e.preventDefault();
       setRenameTarget(selectedEntries[0]);
+      return;
+    }
+    if (
+      (e.key === "Delete" || e.key === "Backspace") &&
+      totalSelected > 0 &&
+      !isReadOnly
+    ) {
+      e.preventDefault();
+      askDeleteSelection();
       return;
     }
     if (e.key === "Enter" && totalSelected === 1) {
@@ -385,6 +426,12 @@ export function MegaMountView({
       openEntry(selectedEntries[0]);
       return;
     }
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "a") {
+      e.preventDefault();
+      setSelected(new Set(entries.map((en) => en.nodeId)));
+      return;
+    }
+    if (isReadOnly) return; // sisanya = operasi tulis
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "c" && totalSelected > 0) {
       e.preventDefault();
       onCopySelection();
@@ -398,11 +445,6 @@ export function MegaMountView({
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "v" && clipboard) {
       e.preventDefault();
       void onPaste();
-      return;
-    }
-    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "a") {
-      e.preventDefault();
-      setSelected(new Set(entries.map((en) => en.nodeId)));
       return;
     }
   }
@@ -430,6 +472,14 @@ export function MegaMountView({
             <h2 className="font-semibold leading-tight truncate">
               MEGA Cloud
             </h2>
+            {isReadOnly ? (
+              <Badge
+                className="bg-amber-500/15 text-amber-600 dark:text-amber-400 border-0 text-[10px]"
+                title="Hak akses diatur admin — kamu hanya bisa melihat, pratinjau, dan mengunduh"
+              >
+                Baca-saja
+              </Badge>
+            ) : null}
             {data?.account.status === "connected" ? (
               <Badge className="bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 border-0 text-[10px]">
                 Terhubung
@@ -485,90 +535,99 @@ export function MegaMountView({
 
       {/* Toolbar explorer */}
       <div className="border-b border-border px-4 py-2 flex items-center gap-1.5 flex-wrap">
-        <Button
-          size="sm"
-          className="gap-1.5"
-          onClick={() => uploadInputRef.current?.click()}
-          disabled={uploadMut.isPending || !data}
-        >
-          {uploadMut.isPending ? (
-            <Loader2 className="size-4 animate-spin" />
-          ) : (
-            <FilePlus2 className="size-4" />
-          )}
-          Unggah
-        </Button>
-        <input
-          ref={uploadInputRef}
-          type="file"
-          multiple
-          className="hidden"
-          onChange={(e) => {
-            Array.from(e.target.files ?? []).forEach(onPickUpload);
-            e.target.value = "";
-          }}
-        />
-        <Button
-          size="sm"
-          variant="outline"
-          className="gap-1.5"
-          onClick={() => setMkdirOpen(true)}
-          disabled={!data}
-        >
-          <FolderPlus className="size-4" />
-          <span className="hidden sm:inline">Folder Baru</span>
-        </Button>
-        <span className="w-px h-5 bg-border mx-1" aria-hidden />
-        <Button
-          size="sm"
-          variant="ghost"
-          className="gap-1.5"
-          onClick={onCopySelection}
-          disabled={totalSelected === 0 || opsPending}
-          title="Salin (Ctrl+C)"
-        >
-          <Copy className="size-4" />
-          <span className="hidden sm:inline">Salin</span>
-        </Button>
-        <Button
-          size="sm"
-          variant="ghost"
-          className="gap-1.5"
-          onClick={onCutSelection}
-          disabled={totalSelected === 0 || opsPending}
-          title="Potong (Ctrl+X)"
-        >
-          <Scissors className="size-4" />
-          <span className="hidden sm:inline">Potong</span>
-        </Button>
-        <Button
-          size="sm"
-          variant={clipboard ? "secondary" : "ghost"}
-          className="gap-1.5"
-          onClick={onPaste}
-          disabled={!clipboard || opsPending}
-          title="Tempel ke folder ini (Ctrl+V)"
-        >
-          <ClipboardPaste className="size-4" />
-          Tempel
-          {clipboard ? (
-            <Badge variant="secondary" className="ml-1 text-[10px]">
-              {clipboard.entries.length}
-            </Badge>
-          ) : null}
-        </Button>
-        <span className="w-px h-5 bg-border mx-1" aria-hidden />
-        <Button
-          size="sm"
-          variant="ghost"
-          className="gap-1.5 text-destructive hover:text-destructive"
-          onClick={askDeleteSelection}
-          disabled={totalSelected === 0 || opsPending}
-          title="Hapus permanen (Del)"
-        >
-          <Trash2 className="size-4" />
-          <span className="hidden sm:inline">Hapus</span>
-        </Button>
+        {isReadOnly ? (
+          <p className="text-[11px] text-muted-foreground flex items-center gap-1.5">
+            <Eye className="size-3" />
+            Mode baca-saja — pratinjau &amp; unduh tersedia, perubahan dinonaktifkan.
+          </p>
+        ) : (
+          <>
+          <Button
+            size="sm"
+            className="gap-1.5"
+            onClick={() => uploadInputRef.current?.click()}
+            disabled={uploadMut.isPending || !data}
+          >
+            {uploadMut.isPending ? (
+              <Loader2 className="size-4 animate-spin" />
+            ) : (
+              <FilePlus2 className="size-4" />
+            )}
+            Unggah
+          </Button>
+          <input
+            ref={uploadInputRef}
+            type="file"
+            multiple
+            className="hidden"
+            onChange={(e) => {
+              Array.from(e.target.files ?? []).forEach(onPickUpload);
+              e.target.value = "";
+            }}
+          />
+          <Button
+            size="sm"
+            variant="outline"
+            className="gap-1.5"
+            onClick={() => setMkdirOpen(true)}
+            disabled={!data}
+          >
+            <FolderPlus className="size-4" />
+            <span className="hidden sm:inline">Folder Baru</span>
+          </Button>
+          <span className="w-px h-5 bg-border mx-1" aria-hidden />
+          <Button
+            size="sm"
+            variant="ghost"
+            className="gap-1.5"
+            onClick={onCopySelection}
+            disabled={totalSelected === 0 || opsPending}
+            title="Salin (Ctrl+C)"
+          >
+            <Copy className="size-4" />
+            <span className="hidden sm:inline">Salin</span>
+          </Button>
+          <Button
+            size="sm"
+            variant="ghost"
+            className="gap-1.5"
+            onClick={onCutSelection}
+            disabled={totalSelected === 0 || opsPending}
+            title="Potong (Ctrl+X)"
+          >
+            <Scissors className="size-4" />
+            <span className="hidden sm:inline">Potong</span>
+          </Button>
+          <Button
+            size="sm"
+            variant={clipboard ? "secondary" : "ghost"}
+            className="gap-1.5"
+            onClick={onPaste}
+            disabled={!clipboard || opsPending}
+            title="Tempel ke folder ini (Ctrl+V)"
+          >
+            <ClipboardPaste className="size-4" />
+            Tempel
+            {clipboard ? (
+              <Badge variant="secondary" className="ml-1 text-[10px]">
+                {clipboard.entries.length}
+              </Badge>
+            ) : null}
+          </Button>
+          <span className="w-px h-5 bg-border mx-1" aria-hidden />
+          <Button
+            size="sm"
+            variant="ghost"
+            className="gap-1.5 text-destructive hover:text-destructive"
+            onClick={askDeleteSelection}
+            disabled={totalSelected === 0 || opsPending}
+            title="Hapus permanen (Del)"
+          >
+            <Trash2 className="size-4" />
+            <span className="hidden sm:inline">Hapus</span>
+          </Button>
+          </>
+        )}
 
         {uploadProgress ? (
           <div className="ml-2 flex items-center gap-2 min-w-[160px] max-w-[240px] flex-1">
@@ -585,6 +644,11 @@ export function MegaMountView({
               <>
                 <CheckSquare className="size-3 text-primary" />
                 {totalSelected} dipilih
+              </>
+            ) : isReadOnly ? (
+              <>
+                <Eye className="size-3" />
+                1 klik memilih · 2 klik membuka
               </>
             ) : (
               <>
@@ -645,6 +709,7 @@ export function MegaMountView({
             }`}
             onDragOver={(e) => {
               e.preventDefault();
+              if (isReadOnly) return;
               if (e.dataTransfer.types.includes("Files")) setDragOver(true);
             }}
             onDragLeave={(e) => {
@@ -654,6 +719,7 @@ export function MegaMountView({
             onDrop={(e) => {
               e.preventDefault();
               setDragOver(false);
+              if (isReadOnly) return;
               const files = Array.from(e.dataTransfer.files ?? []);
               files.forEach((f) => {
                 if (f.size > 100 * 1024 * 1024) {
@@ -712,10 +778,12 @@ export function MegaMountView({
                       entry={entry}
                       accountId={accountId ?? ""}
                       selected={isSelected}
+                      canWrite={canWrite}
                       onOpen={() => openEntry(entry)}
                       onToggleSelect={(additive) =>
                         toggleSelect(entry.nodeId, additive)
                       }
+                      onSelectRange={() => selectEntry(entry.nodeId, "range")}
                       onPreview={() => setPreviewFile(entryToFileItem(entry))}
                       onRename={() => setRenameTarget(entry)}
                       onMove={() => setMoveTarget(entry)}
@@ -730,11 +798,10 @@ export function MegaMountView({
                       }}
                       onPasteInto={() => {
                         if (entry.isFolder) {
-                          setNodeId(entry.nodeId);
-                          toast.info("Folder dibuka — tekan Tempel (Ctrl+V) di sini.");
+                          void pasteInto(entry.nodeId);
                         }
                       }}
-                      canPaste={!!clipboard}
+                      canPaste={!!clipboard && canWrite}
                       downloadUrl={downloadUrl(entry)}
                     />
                   );
@@ -866,8 +933,10 @@ function MegaRow({
   entry,
   accountId,
   selected,
+  canWrite,
   onOpen,
   onToggleSelect,
+  onSelectRange,
   onPreview,
   onRename,
   onMove,
@@ -881,8 +950,10 @@ function MegaRow({
   entry: MegaEntry;
   accountId: string;
   selected: boolean;
+  canWrite: boolean;
   onOpen: () => void;
   onToggleSelect: (additive: boolean) => void;
+  onSelectRange: () => void;
   onPreview: () => void;
   onRename: () => void;
   onMove: () => void;
@@ -900,22 +971,38 @@ function MegaRow({
       })
     : "";
 
+  // ── Perilaku klik standar explorer/drive ──
+  // 1 klik = pilih · Ctrl/Cmd+klik = toggle · Shift+klik = rentang ·
+  // 2 klik = buka (folder) / pratinjau (file).
+  function handleClick(e: React.MouseEvent) {
+    if (e.shiftKey) {
+      e.preventDefault(); // cegah seleksi teks bawaan browser
+      onSelectRange();
+      return;
+    }
+    onToggleSelect(e.ctrlKey || e.metaKey);
+  }
+  function handleDoubleClick(e: React.MouseEvent) {
+    onOpen();
+  }
+  // Klik kanan: pastikan baris ini terpilih dulu sebelum menu muncul.
+  function handleContextMenu(e: React.MouseEvent) {
+    if (!selected) onToggleSelect(false);
+  }
+
   return (
     <ContextMenu>
       <ContextMenuTrigger asChild>
         <div
-          className={`w-full flex items-center gap-2 px-3 py-2.5 rounded-lg text-left transition-colors group cursor-pointer ${
+          className={`w-full flex items-center gap-2 px-3 py-2.5 rounded-lg text-left transition-colors group cursor-pointer select-none ${
             selected
               ? "bg-primary/10 ring-1 ring-inset ring-primary/30"
               : "hover:bg-secondary/60"
           }`}
-          onClick={(e) => {
-            if (e.ctrlKey || e.metaKey) {
-              onToggleSelect(true);
-            } else {
-              onOpen();
-            }
-          }}
+          onClick={handleClick}
+          onDoubleClick={handleDoubleClick}
+          onContextMenu={handleContextMenu}
+          title={`${entry.name} — 2 klik untuk ${entry.isFolder ? "membuka" : "pratinjau"}`}
         >
           {/* Checkbox select */}
           <button
@@ -944,14 +1031,7 @@ function MegaRow({
             </span>
           )}
 
-          <span
-            className="flex-1 min-w-0 cursor-pointer"
-            onClick={(e) => {
-              if (e.ctrlKey || e.metaKey) return;
-              e.stopPropagation();
-              onOpen();
-            }}
-          >
+          <span className="flex-1 min-w-0">
             <span className="block text-sm font-medium truncate">
               {entry.name}
             </span>
@@ -963,6 +1043,7 @@ function MegaRow({
 
           <RowMenu
             entry={entry}
+            canWrite={canWrite}
             onPreview={onPreview}
             onRename={onRename}
             onMove={onMove}
@@ -992,31 +1073,35 @@ function MegaRow({
             </a>
           </ContextMenuItem>
         ) : null}
-        <ContextMenuSeparator />
-        <ContextMenuItem onClick={onCopyOne}>
-          <Copy className="size-4" /> Salin
-        </ContextMenuItem>
-        <ContextMenuItem onClick={onCutOne}>
-          <Scissors className="size-4" /> Potong
-        </ContextMenuItem>
-        <ContextMenuItem onClick={onRename}>
-          <Pencil className="size-4" /> Ganti nama (F2)
-        </ContextMenuItem>
-        <ContextMenuItem onClick={onMove}>
-          <FolderInput className="size-4" /> Pindahkan…
-        </ContextMenuItem>
-        {entry.isFolder && canPaste ? (
-          <ContextMenuItem onClick={onPasteInto}>
-            <ClipboardPaste className="size-4" /> Buka & siap tempel
-          </ContextMenuItem>
+        {canWrite ? (
+          <>
+            <ContextMenuSeparator />
+            <ContextMenuItem onClick={onCopyOne}>
+              <Copy className="size-4" /> Salin
+            </ContextMenuItem>
+            <ContextMenuItem onClick={onCutOne}>
+              <Scissors className="size-4" /> Potong
+            </ContextMenuItem>
+            <ContextMenuItem onClick={onRename}>
+              <Pencil className="size-4" /> Ganti nama (F2)
+            </ContextMenuItem>
+            <ContextMenuItem onClick={onMove}>
+              <FolderInput className="size-4" /> Pindahkan…
+            </ContextMenuItem>
+            {entry.isFolder && canPaste ? (
+              <ContextMenuItem onClick={onPasteInto}>
+                <ClipboardPaste className="size-4" /> Tempel ke sini
+              </ContextMenuItem>
+            ) : null}
+            <ContextMenuSeparator />
+            <ContextMenuItem
+              className="text-destructive focus:text-destructive"
+              onClick={onDelete}
+            >
+              <Trash2 className="size-4" /> Hapus permanen
+            </ContextMenuItem>
+          </>
         ) : null}
-        <ContextMenuSeparator />
-        <ContextMenuItem
-          className="text-destructive focus:text-destructive"
-          onClick={onDelete}
-        >
-          <Trash2 className="size-4" /> Hapus permanen
-        </ContextMenuItem>
       </ContextMenuContent>
     </ContextMenu>
   );
@@ -1026,6 +1111,7 @@ function MegaRow({
 
 function RowMenu({
   entry,
+  canWrite,
   onPreview,
   onRename,
   onMove,
@@ -1035,6 +1121,7 @@ function RowMenu({
   downloadUrl,
 }: {
   entry: MegaEntry;
+  canWrite: boolean;
   onPreview: () => void;
   onRename: () => void;
   onMove: () => void;
@@ -1071,28 +1158,32 @@ function RowMenu({
                   <Download className="size-4" /> Unduh
                 </a>
               </DropdownMenuItem>
-              <DropdownMenuSeparator />
             </>
           )}
-          <DropdownMenuItem onClick={onCopyOne}>
-            <Copy className="size-4" /> Salin
-          </DropdownMenuItem>
-          <DropdownMenuItem onClick={onCutOne}>
-            <Scissors className="size-4" /> Potong
-          </DropdownMenuItem>
-          <DropdownMenuItem onClick={onRename}>
-            <Pencil className="size-4" /> Rename
-          </DropdownMenuItem>
-          <DropdownMenuItem onClick={onMove}>
-            <FolderInput className="size-4" /> Pindahkan
-          </DropdownMenuItem>
-          <DropdownMenuSeparator />
-          <DropdownMenuItem
-            className="text-destructive focus:text-destructive"
-            onClick={onDelete}
-          >
-            <Trash2 className="size-4" /> Hapus permanen
-          </DropdownMenuItem>
+          {canWrite ? (
+            <>
+              {entry.isFolder ? null : <DropdownMenuSeparator />}
+              <DropdownMenuItem onClick={onCopyOne}>
+                <Copy className="size-4" /> Salin
+              </DropdownMenuItem>
+              <DropdownMenuItem onClick={onCutOne}>
+                <Scissors className="size-4" /> Potong
+              </DropdownMenuItem>
+              <DropdownMenuItem onClick={onRename}>
+                <Pencil className="size-4" /> Rename
+              </DropdownMenuItem>
+              <DropdownMenuItem onClick={onMove}>
+                <FolderInput className="size-4" /> Pindahkan
+              </DropdownMenuItem>
+              <DropdownMenuSeparator />
+              <DropdownMenuItem
+                className="text-destructive focus:text-destructive"
+                onClick={onDelete}
+              >
+                <Trash2 className="size-4" /> Hapus permanen
+              </DropdownMenuItem>
+            </>
+          ) : null}
         </DropdownMenuContent>
       </DropdownMenu>
     </span>

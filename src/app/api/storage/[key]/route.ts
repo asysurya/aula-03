@@ -7,6 +7,7 @@ import { authOptions } from "@/lib/auth";
 import { folderClassroomId, getClassroomRole } from "@/lib/cloud-utils";
 import { canViewFile, type UserRole, type ClassroomRole } from "@/lib/cloud-perms";
 import { parseMegaKey } from "@/lib/mega-storage";
+import { canViewMount } from "@/lib/mount-access";
 import { mimetypeFromName } from "@/lib/cloud-format";
 import { fileCacheGet, fileCacheSet } from "@/lib/file-cache";
 
@@ -245,10 +246,18 @@ export async function GET(
   });
   if (!file) {
     // ── Mode "mount MEGA": node MEGA mentah tanpa baris CloudFile ──
-    // Hanya ADMIN/GURU yang boleh — file mentah bisa berisi jawaban privat.
+    // Hak akses mengikuti pengaturan mount akun tsb. (Admin Panel):
+    // admin saja / guru+admin / semua user.
     const mega = parseMegaKey(key);
     const rawRole = (session.user as any).role as string;
-    if (!mega || (rawRole !== "ADMIN" && rawRole !== "GURU")) {
+    if (!mega) {
+      return new NextResponse("Not found", { status: 404 });
+    }
+    const mountAccount = await db.cloudAccount.findUnique({
+      where: { id: mega.accountId },
+      select: { id: true, mountVisibleTo: true, mountMode: true },
+    });
+    if (!mountAccount || !canViewMount(mountAccount, rawRole)) {
       return new NextResponse("Not found", { status: 404 });
     }
     const rawName = req.nextUrl.searchParams.get("name") ?? "file";

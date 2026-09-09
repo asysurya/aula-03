@@ -154,6 +154,10 @@ export function FileBrowser({
 
   const [selectedFolders, setSelectedFolders] = useState<Set<string>>(new Set());
   const [selectedFiles, setSelectedFiles] = useState<Set<string>>(new Set());
+  // Jangkar seleksi Shift (item terakhir yang diklik tanpa Shift).
+  const [anchor, setAnchor] = useState<
+    { kind: "folder" | "file"; id: string } | null
+  >(null);
   const [clipboard, setClipboard] = useState<Clipboard>(null);
   const [previewFile, setPreviewFile] = useState<CloudFileItem | null>(null);
   // Mount MEGA Cloud (guru/admin) — browse isi akun MEGA langsung.
@@ -200,6 +204,24 @@ export function FileBrowser({
     },
   });
 
+  // Hak akses mount MEGA (diatur admin per-akun): kartu MEGA di root hanya
+  // tampil bagi user yang diizinkan (admin saja / guru+admin / semua user).
+  const { data: megaAccess } = useQuery<{
+    visible: boolean;
+    accountId?: string;
+    accountName?: string;
+    canWrite?: boolean;
+    reason?: string | null;
+  }>({
+    queryKey: ["mega-access"],
+    queryFn: async () => {
+      const res = await fetch("/api/cloud/mega/access", { cache: "no-store" });
+      if (!res.ok) return { visible: false };
+      return res.json();
+    },
+    staleTime: 30_000,
+  });
+
   function invalidateAll() {
     // Invalidate the current folder + classroom root + (best-effort) others.
     qc.invalidateQueries({ queryKey: ["cloud", "folder"] });
@@ -208,6 +230,7 @@ export function FileBrowser({
   const clearSelection = useCallback(() => {
     setSelectedFolders(new Set());
     setSelectedFiles(new Set());
+    setAnchor(null);
   }, []);
 
   // Reset selection whenever the user navigates into another folder — a stale
@@ -251,8 +274,9 @@ export function FileBrowser({
   const docs = data?.docs ?? [];
   const ancestors = data?.ancestors ?? [];
 
-  // Kartu mount MEGA hanya di root & untuk guru/admin.
-  const showMegaCard = !folderId && isTeacher(me, classroomId);
+  // Kartu mount MEGA hanya di root & bagi user yang diizinkan (hak akses
+  // per-akun dari Admin Panel — bisa admin saja / guru+admin / semua user).
+  const showMegaCard = !folderId && (megaAccess?.visible ?? false);
 
   const totalSelected = selectedFolders.size + selectedFiles.size;
 
@@ -288,6 +312,7 @@ export function FileBrowser({
       setSelectedFolders(new Set([folder.id]));
       setSelectedFiles(new Set());
     }
+    setAnchor({ kind: "folder", id: folder.id });
   }
   function selectFile(file: CloudFileItem, multi: boolean) {
     if (multi) {
@@ -301,6 +326,42 @@ export function FileBrowser({
       setSelectedFiles(new Set([file.id]));
       setSelectedFolders(new Set());
     }
+    setAnchor({ kind: "file", id: file.id });
+  }
+
+  /** Shift+klik: pilih rentang dari jangkar s.d. item ini (folder lalu
+   *  file, sesuai urutan tampilan). */
+  function selectRangeTo(kind: "folder" | "file", id: string) {
+    const ordered: { kind: "folder" | "file"; id: string }[] = [
+      ...folders.map((f) => ({ kind: "folder" as const, id: f.id })),
+      ...files.map((f) => ({ kind: "file" as const, id: f.id })),
+    ];
+    if (!anchor) {
+      if (kind === "folder") {
+        setSelectedFolders(new Set([id]));
+        setSelectedFiles(new Set());
+      } else {
+        setSelectedFiles(new Set([id]));
+        setSelectedFolders(new Set());
+      }
+      setAnchor({ kind, id });
+      return;
+    }
+    const key = (x: { kind: string; id: string }) => `${x.kind}:${x.id}`;
+    const from = ordered.findIndex((x) => key(x) === key(anchor));
+    const to = ordered.findIndex((x) => key(x) === `${kind}:${id}`);
+    if (from === -1 || to === -1) {
+      clearSelection();
+      return;
+    }
+    const [start, end] = from <= to ? [from, to] : [to, from];
+    const slice = ordered.slice(start, end + 1);
+    setSelectedFolders(
+      new Set(slice.filter((x) => x.kind === "folder").map((x) => x.id))
+    );
+    setSelectedFiles(
+      new Set(slice.filter((x) => x.kind === "file").map((x) => x.id))
+    );
   }
 
   function selectAll() {
@@ -341,8 +402,7 @@ export function FileBrowser({
     if (selectedFiles.size > 0) {
       setCopyTarget({ kind: "file", ids: Array.from(selectedFiles) });
     } else if (selectedFolders.size > 0) {
-      // Folder copy not supported in this iteration; show a hint.
-      toast.info("Salin folder belum didukung. Pindahkan saja, atau pilih file.");
+      setCopyTarget({ kind: "folder", ids: Array.from(selectedFolders) });
     }
   }
   function onToolbarDelete() {
@@ -377,7 +437,18 @@ export function FileBrowser({
   }
   function onCopy() {
     if (totalSelected === 0) return;
-    if (selectedFiles.size > 0) {
+    if (selectedFiles.size > 0 && selectedFolders.size > 0) {
+      // Clipboard menyiji jenis — file diutamakan (folder ikut saat hanya folder
+      // yang dipilih). Beri info supaya tidak membingungkan.
+      setClipboard({
+        mode: "copy",
+        kind: "file",
+        ids: Array.from(selectedFiles),
+      });
+      toast.success(
+        `${selectedFiles.size} file disalin (folder tidak ikut). Tempel di folder tujuan.`
+      );
+    } else if (selectedFiles.size > 0) {
       setClipboard({
         mode: "copy",
         kind: "file",
@@ -385,15 +456,23 @@ export function FileBrowser({
       });
       toast.success(`${selectedFiles.size} file disalin. Tempel di folder tujuan.`);
     } else if (selectedFolders.size > 0) {
-      toast.info("Salin folder belum didukung.");
+      setClipboard({
+        mode: "copy",
+        kind: "folder",
+        ids: Array.from(selectedFolders),
+      });
+      toast.success(
+        `${selectedFolders.size} folder disalin (rekursif). Tempel di folder tujuan.`
+      );
     }
     clearSelection();
   }
 
-  // ── Keyboard shortcuts (Delete / Enter / Escape) ───────────────
-  // Attached to the wrapper div via onKeyDown so it only fires when the
-  // browser pane has focus. We bail out when the user is typing in an input
-  // or textarea (e.g. rename dialog) — those handle their own keys.
+  // ── Keyboard shortcuts (drive standar) ───────────────────
+  // Del = hapus · Enter = buka · Esc = batal · F2 = rename ·
+  // Ctrl+A = pilih semua · Ctrl+C/X = salin/potong · Ctrl+V = tempel.
+  // Dipasang di wrapper div via onKeyDown — hanya aktif saat panel cloud
+  // punya fokus; dibatalkan saat user sedang mengetik di input/dialog.
   function onKeyDown(e: React.KeyboardEvent<HTMLDivElement>) {
     const target = e.target as HTMLElement | null;
     if (
@@ -411,6 +490,29 @@ export function FileBrowser({
       }
       return;
     }
+    // Ctrl+A — pilih semua (berlaku walau belum ada seleksi).
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "a") {
+      e.preventDefault();
+      selectAll();
+      return;
+    }
+    // Ctrl+C / Ctrl+X — butuh seleksi.
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "c" && totalSelected > 0) {
+      e.preventDefault();
+      onCopy();
+      return;
+    }
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "x" && totalSelected > 0) {
+      e.preventDefault();
+      onCut();
+      return;
+    }
+    // Ctrl+V — butuh clipboard.
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "v" && clipboard) {
+      e.preventDefault();
+      void onPaste();
+      return;
+    }
     if (totalSelected === 0) return;
     if (e.key === "Delete" || e.key === "Backspace") {
       e.preventDefault();
@@ -418,6 +520,9 @@ export function FileBrowser({
     } else if (e.key === "Enter") {
       e.preventDefault();
       openSelectedItem();
+    } else if (e.key === "F2" && totalSelected === 1) {
+      e.preventDefault();
+      onToolbarRename();
     }
   }
 
@@ -675,30 +780,32 @@ export function FileBrowser({
                   }}
                 >
                   {showMegaCard ? (
-                    <MegaMountCard onClick={() => setMegaOpen(true)} />
-                  ) : null}
-                  {folders.map((f) => (
-                    <FolderCard
-                      key={f.id}
-                      folder={f}
-                      me={me}
-                      classroomId={classroomId}
-                      selected={selectedFolders.has(f.id)}
-                      onSelect={(multi) => selectFolder(f, multi)}
-                      onOpen={() => openCloudFolder(f.id, classroomId)}
-                      onRename={() => setRenameTarget({ kind: "folder", item: f })}
-                      onMove={(ids) => setMoveTarget({ kind: "folder", ids })}
-                      onCopy={() =>
-                        toast.info("Salin folder belum didukung.")
-                      }
-                      onDelete={() =>
-                        setDeleteTarget({ files: [], folders: [f] })
-                      }
-                      onPermissions={() =>
-                        setPermTarget({ kind: "folder", item: f })
-                      }
+                    <MegaMountCard
+                      onClick={() => setMegaOpen(true)}
+                      readOnly={megaAccess ? !megaAccess.canWrite : false}
                     />
-                  ))}
+                  ) : null}
+                {folders.map((f) => (
+                  <FolderCard
+                    key={f.id}
+                    folder={f}
+                    me={me}
+                    classroomId={classroomId}
+                    selected={selectedFolders.has(f.id)}
+                    onSelect={(multi) => selectFolder(f, multi)}
+                    onSelectRange={() => selectRangeTo("folder", f.id)}
+                    onOpen={() => openCloudFolder(f.id, classroomId)}
+                    onRename={() => setRenameTarget({ kind: "folder", item: f })}
+                    onMove={(ids) => setMoveTarget({ kind: "folder", ids })}
+                    onCopy={() => setCopyTarget({ kind: "folder", ids: [f.id] })}
+                    onDelete={() =>
+                      setDeleteTarget({ files: [], folders: [f] })
+                    }
+                    onPermissions={() =>
+                      setPermTarget({ kind: "folder", item: f })
+                    }
+                  />
+                ))}
                 </div>
               </section>
             ) : null}
@@ -743,6 +850,7 @@ export function FileBrowser({
                       classroomId={classroomId}
                       selected={selectedFiles.has(f.id)}
                       onSelect={(multi) => selectFile(f, multi)}
+                      onSelectRange={() => selectRangeTo("file", f.id)}
                       onOpen={() => setPreviewFile(f)}
                       onRename={() => setRenameTarget({ kind: "file", item: f })}
                       onMove={(ids) => setMoveTarget({ kind: "file", ids })}
@@ -828,14 +936,24 @@ export function FileBrowser({
       {copyTarget ? (
         <FolderPickerDialog
           title="Salin ke folder"
-          description="Pilih folder tujuan untuk menyalin file terpilih."
+          description={
+            copyTarget.kind === "folder"
+              ? "Pilih folder tujuan — folder (beserta isinya, rekursif) akan disalin."
+              : "Pilih folder tujuan untuk menyalin file terpilih."
+          }
           classroomId={classroomId}
-          excludeIds={[]}
+          excludeIds={copyTarget.kind === "folder" ? copyTarget.ids : []}
           currentFolderId={folderId}
           onClose={() => setCopyTarget(null)}
           onConfirm={async (targetId) => {
-            const endpoint = "/api/cloud/files/copy";
-            const body = { fileIds: copyTarget.ids, targetFolderId: targetId };
+            const endpoint =
+              copyTarget.kind === "folder"
+                ? "/api/cloud/folders/copy"
+                : "/api/cloud/files/copy";
+            const body =
+              copyTarget.kind === "folder"
+                ? { folderIds: copyTarget.ids, targetFolderId: targetId }
+                : { fileIds: copyTarget.ids, targetFolderId: targetId };
             const res = await fetch(endpoint, {
               method: "POST",
               headers: { "Content-Type": "application/json" },
@@ -846,7 +964,12 @@ export function FileBrowser({
               toast.error(json?.error || "Gagal menyalin");
               return false;
             }
-            toast.success(`${copyTarget.ids.length} file disalin.`);
+            const n = copyTarget.ids.length;
+            toast.success(
+              copyTarget.kind === "folder"
+                ? `${n} folder disalin (file di dalamnya ikut).`
+                : `${n} file disalin.`
+            );
             setCopyTarget(null);
             clearSelection();
             invalidateAll();
@@ -873,8 +996,14 @@ export function FileBrowser({
 
 // ───────────────────────── Folder card ─────────────────────────
 
-// ── Kartu mount MEGA Cloud di root (guru/admin) ──────────────────
-function MegaMountCard({ onClick }: { onClick: () => void }) {
+// ── Kartu mount MEGA Cloud di root (sesuai hak akses per-akun) ──
+function MegaMountCard({
+  onClick,
+  readOnly,
+}: {
+  onClick: () => void;
+  readOnly?: boolean;
+}) {
   return (
     <Card
       role="button"
@@ -888,7 +1017,7 @@ function MegaMountCard({ onClick }: { onClick: () => void }) {
         }
       }}
       className="p-4 gap-2 transition-colors cursor-pointer select-none hover:bg-red-500/5 hover:border-red-500/40"
-      title="Buka mount MEGA Cloud (guru/admin)"
+      title="Buka mount MEGA Cloud"
     >
       <div className="flex items-start gap-3">
         <div className="rounded-md bg-red-500/10 p-2 shrink-0">
@@ -900,6 +1029,11 @@ function MegaMountCard({ onClick }: { onClick: () => void }) {
             <Badge className="bg-red-500 text-white border-transparent">
               Mount
             </Badge>
+            {readOnly ? (
+              <Badge className="bg-amber-500/15 text-amber-600 dark:text-amber-400 border-transparent">
+                Baca-saja
+              </Badge>
+            ) : null}
             <span className="text-[11px] text-muted-foreground">
               Storage awan kelas
             </span>
@@ -917,6 +1051,7 @@ function FolderCard({
   classroomId,
   selected,
   onSelect,
+  onSelectRange,
   onOpen,
   onRename,
   onMove,
@@ -929,6 +1064,7 @@ function FolderCard({
   classroomId: string;
   selected: boolean;
   onSelect: (multi: boolean) => void;
+  onSelectRange: () => void;
   onOpen: () => void;
   onRename: () => void;
   onMove: (ids: string[]) => void;
@@ -943,7 +1079,13 @@ function FolderCard({
   // Permissions (visibility + grants) UI is admin + owner only.
   const canShowPermissions = canManagePermissions(me, folder.createdBy);
 
+  // 1 klik = pilih · Ctrl/Cmd+klik = toggle · Shift+klik = rentang.
   function handleClick(e: React.MouseEvent) {
+    if (e.shiftKey) {
+      e.preventDefault();
+      onSelectRange();
+      return;
+    }
     onSelect(e.ctrlKey || e.metaKey);
   }
   function handleDoubleClick() {
@@ -1085,6 +1227,7 @@ function FileRow({
   classroomId,
   selected,
   onSelect,
+  onSelectRange,
   onOpen,
   onRename,
   onMove,
@@ -1097,6 +1240,7 @@ function FileRow({
   classroomId: string;
   selected: boolean;
   onSelect: (multi: boolean) => void;
+  onSelectRange: () => void;
   onOpen: () => void;
   onRename: () => void;
   onMove: (ids: string[]) => void;
@@ -1112,7 +1256,13 @@ function FileRow({
   // Permissions (visibility + grants) UI is admin + owner only.
   const canShowPermissions = canManagePermissions(me, file.uploadedBy);
 
+  // 1 klik = pilih · Ctrl/Cmd+klik = toggle · Shift+klik = rentang.
   function handleClick(e: React.MouseEvent) {
+    if (e.shiftKey) {
+      e.preventDefault();
+      onSelectRange();
+      return;
+    }
     onSelect(e.ctrlKey || e.metaKey);
   }
   function handleDoubleClick() {

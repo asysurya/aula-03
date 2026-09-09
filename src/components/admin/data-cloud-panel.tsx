@@ -51,6 +51,10 @@ import { toast } from "sonner";
 import { formatDistanceToNow, format } from "date-fns";
 import { id as idLocale } from "date-fns/locale";
 import { formatBytes } from "@/lib/cloud-format";
+import {
+  mountVisibleToLabel,
+  mountModeLabel,
+} from "@/lib/mount-access";
 import { cn } from "@/lib/utils";
 
 // ────────────────────────────── Types ──────────────────────────────
@@ -89,6 +93,9 @@ interface CloudAccount {
   fileCount: number;
   createdAt: string;
   updatedAt: string;
+  // Hak akses mount (file explorer akun cloud di halaman Cloud)
+  mountVisibleTo?: "ADMIN" | "GURU" | "ALL";
+  mountMode?: "READ" | "WRITE";
   // S3-compatible
   endpoint: string | null;
   region: string | null;
@@ -656,6 +663,32 @@ function CloudAccountsSection() {
     onError: (e: Error) => toast.error(e.message),
   });
 
+  // Patch hak akses mount (siapa boleh membuka + mode baca/tulis).
+  const mountAccessMut = useMutation({
+    mutationFn: async (payload: {
+      id: string;
+      mountVisibleTo?: "ADMIN" | "GURU" | "ALL";
+      mountMode?: "READ" | "WRITE";
+    }) => {
+      const { id, ...body } = payload;
+      const res = await fetch(`/api/admin/cloud-accounts/${id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) {
+        const e = await res.json().catch(() => ({}));
+        throw new Error(e.error || "Gagal menyimpan hak akses");
+      }
+      return res.json();
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["admin-cloud-accounts"] });
+      toast.success("Hak akses mount diperbarui");
+    },
+    onError: (e: Error) => toast.error(e.message),
+  });
+
   // Sync one account: migrate local files to this MEGA account.
   const syncMut = useMutation({
     mutationFn: async (id: string) => {
@@ -842,6 +875,59 @@ function CloudAccountsSection() {
                       <div className="h-1.5 rounded-full bg-muted" />
                     )}
                   </div>
+
+                  {/* Hak akses mount (khusus MEGA) — siapa boleh membuka
+                      explorer MEGA Cloud + mode baca/tulis */}
+                  {a.provider === "mega" ? (
+                    <div className="rounded-md border border-border bg-muted/30 px-3 py-2 space-y-1.5">
+                      <p className="text-[11px] font-medium text-muted-foreground">
+                        Hak Akses Mount (Explorer MEGA di halaman Cloud)
+                      </p>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <Select
+                          value={a.mountVisibleTo ?? "GURU"}
+                          onValueChange={(v) =>
+                            mountAccessMut.mutate({
+                              id: a.id,
+                              mountVisibleTo: v as "ADMIN" | "GURU" | "ALL",
+                            })
+                          }
+                          disabled={mountAccessMut.isPending}
+                        >
+                          <SelectTrigger size="sm" className="w-[190px] h-7 text-xs">
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="ADMIN">Admin saja</SelectItem>
+                            <SelectItem value="GURU">Guru &amp; Admin</SelectItem>
+                            <SelectItem value="ALL">Semua user (siswa ikut)</SelectItem>
+                          </SelectContent>
+                        </Select>
+                        <Select
+                          value={a.mountMode ?? "WRITE"}
+                          onValueChange={(v) =>
+                            mountAccessMut.mutate({
+                              id: a.id,
+                              mountMode: v as "READ" | "WRITE",
+                            })
+                          }
+                          disabled={mountAccessMut.isPending}
+                        >
+                          <SelectTrigger size="sm" className="w-[150px] h-7 text-xs">
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="READ">Baca-saja</SelectItem>
+                            <SelectItem value="WRITE">Baca &amp; tulis</SelectItem>
+                          </SelectContent>
+                        </Select>
+                      </div>
+                      <p className="text-[10px] text-muted-foreground">
+                        Bisa dibuka: {mountVisibleToLabel(a.mountVisibleTo)} ·
+                        Hak: {mountModeLabel(a.mountMode)}
+                      </p>
+                    </div>
+                  ) : null}
                   <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
                     <span>
                       File:{" "}

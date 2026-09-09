@@ -3,6 +3,7 @@ import bcrypt from "bcryptjs";
 import { z } from "zod";
 import { requireAdmin } from "@/lib/session";
 import { db } from "@/lib/db";
+import { hardDeleteUser } from "@/lib/user-hard-delete";
 
 const patchSchema = z.object({
   name: z.string().min(1).max(60).optional(),
@@ -26,6 +27,14 @@ export async function PATCH(
       { status: 400 }
     );
   }
+  // Prevent self-demotion to a non-admin (lock out protection) — dicek
+  // SEBELUM update supaya proteksi benar-benar berlaku.
+  if (id === admin.id && parsed.data.role && parsed.data.role !== "ADMIN") {
+    return NextResponse.json(
+      { error: "Tidak bisa menurunkan role diri sendiri dari admin" },
+      { status: 400 }
+    );
+  }
   const data: any = {};
   if (parsed.data.name) data.name = parsed.data.name;
   if (parsed.data.role) data.role = parsed.data.role;
@@ -46,13 +55,6 @@ export async function PATCH(
       bio: true,
     },
   });
-  // Prevent self-demotion to a non-admin (lock out protection)
-  if (id === admin.id && parsed.data.role === "STUDENT") {
-    return NextResponse.json(
-      { error: "Tidak bisa menurunkan role diri sendiri dari admin" },
-      { status: 400 }
-    );
-  }
   return NextResponse.json({ user });
 }
 
@@ -68,6 +70,37 @@ export async function DELETE(
       { status: 400 }
     );
   }
-  await db.user.delete({ where: { id } });
-  return NextResponse.json({ ok: true });
+  const target = await db.user.findUnique({
+    where: { id },
+    select: { id: true },
+  });
+  if (!target) {
+    return NextResponse.json({ error: "User tidak ditemukan" }, { status: 404 });
+  }
+
+  try {
+    // Hard delete cascade: semua relasi NoAction dibersihkan dulu
+    // (pesan, DM, membership, submission, folder, file, attempt, dll),
+    // grup buatan user dialihkan ke admin ini supaya obrolan kelas utuh.
+    const result = await hardDeleteUser(id, admin.id);
+    return NextResponse.json({
+      ok: true,
+      deletedMessages: result.deletedMessages,
+      deletedDmThreads: result.deletedDmThreads,
+      reassignedGroups: result.reassignedGroups,
+      deletedFolders: result.deletedFolders,
+      deletedFiles: result.deletedFiles,
+    });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return NextResponse.json(
+      {
+        error:
+          "Gagal menghapus user: " +
+          msg.slice(0, 200) +
+          ". Coba muat ulang lalu ulangi.",
+      },
+      { status: 500 }
+    );
+  }
 }

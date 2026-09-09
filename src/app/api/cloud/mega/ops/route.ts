@@ -3,6 +3,7 @@ import { z } from "zod";
 import { db } from "@/lib/db";
 import { requireUser } from "@/lib/session";
 import { fileCacheDelete } from "@/lib/file-cache";
+import { canWriteMount } from "@/lib/mount-access";
 import {
   megaMkdir,
   megaRename,
@@ -11,18 +12,20 @@ import {
   megaCollectDescendantKeys,
   megaCopyNode,
   describeMegaError,
-  type MegaAccountLike,
 } from "@/lib/mega-storage";
 import { hardDeleteCloudFilesByIds } from "@/lib/hard-delete";
 
 // POST /api/cloud/mega/ops
 //
-// Operasi full-akses pada mount MEGA Cloud (guru/admin):
+// Operasi full-akses pada mount MEGA Cloud:
 //   { action: "mkdir",  accountId?, parentNodeId?, name }
 //   { action: "rename", accountId?, nodeId, name }
 //   { action: "move",   accountId?, nodeId, targetParentId }
 //   { action: "copy",   accountId?, nodeId, targetParentId, name? }
 //   { action: "delete", accountId?, nodeId }
+//
+// Hak akses: akun harus mountMode=WRITE untuk user ini (diatur di Admin
+// Panel). Mount baca-saja (READ) menolak semua operasi tulis.
 //
 // "delete" bersifat PERMANEN (hard delete): node MEGA dihapus + semua baris
 // CloudFile yang menunjuk node itu (atau turunannya) ikut dihapus bersama
@@ -72,20 +75,22 @@ const opsSchema = z.discriminatedUnion("action", [
   }),
 ]);
 
-async function pickAccount(
-  accountId?: string
-): Promise<MegaAccountLike | null> {
-  const account = accountId
-    ? await db.cloudAccount.findFirst({
+/** Ambil akun + field hak akses mount (untuk pengececan mode baca/tulis). */
+async function pickAccountWithAccess(accountId?: string) {
+  const select = {
+    id: true,
+    email: true,
+    password: true,
+    sessionData: true,
+    mountVisibleTo: true,
+    mountMode: true,
+  };
+  return accountId
+    ? db.cloudAccount.findFirst({
         where: { id: accountId, provider: "mega", email: { not: null } },
-        select: {
-          id: true,
-          email: true,
-          password: true,
-          sessionData: true,
-        },
+        select,
       })
-    : await db.cloudAccount.findFirst({
+    : db.cloudAccount.findFirst({
         where: {
           provider: "mega",
           active: true,
@@ -93,14 +98,8 @@ async function pickAccount(
           lastStatus: { not: "error" },
         },
         orderBy: { fileCount: "asc" },
-        select: {
-          id: true,
-          email: true,
-          password: true,
-          sessionData: true,
-        },
+        select,
       });
-  return account;
 }
 
 export async function POST(req: NextRequest) {
@@ -109,12 +108,6 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "UNAUTHORIZED" }, { status: 401 });
   }
   const role = (user as { role?: string }).role;
-  if (role !== "ADMIN" && role !== "GURU") {
-    return NextResponse.json(
-      { error: "FORBIDDEN — hanya guru/admin yang dapat mengelola MEGA Cloud" },
-      { status: 403 }
-    );
-  }
 
   let body: unknown;
   try {
@@ -130,11 +123,24 @@ export async function POST(req: NextRequest) {
   }
   const op = parsed.data;
 
-  const account = await pickAccount("accountId" in op ? op.accountId : undefined);
+  const account = await pickAccountWithAccess(
+    "accountId" in op ? op.accountId : undefined
+  );
   if (!account || !account.email) {
     return NextResponse.json(
       { error: "Belum ada akun MEGA aktif." },
       { status: 404 }
+    );
+  }
+
+  // ── Hak akses mount: operasi tulis hanya untuk mode READ+WRITE ──
+  if (!canWriteMount(account, role)) {
+    return NextResponse.json(
+      {
+        error:
+          "Mount ini baca-saja untukmu (hak akses diatur admin di Admin Panel → Data & Cloud).",
+      },
+      { status: 403 }
     );
   }
 

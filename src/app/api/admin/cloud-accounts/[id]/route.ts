@@ -10,6 +10,9 @@ const patchSchema = z.object({
   password: z.string().max(500).optional(),
   key: z.string().max(500).optional(),
   active: z.boolean().optional(),
+  // ── Hak akses mount (file explorer akun cloud) ──
+  mountVisibleTo: z.enum(["ADMIN", "GURU", "ALL"]).optional(),
+  mountMode: z.enum(["READ", "WRITE"]).optional(),
   // ── S3-compatible ──
   endpoint: z.string().max(300).optional().or(z.literal("")),
   region: z.string().max(60).optional().or(z.literal("")),
@@ -66,6 +69,11 @@ export async function PATCH(
     data.key = d.key.length > 0 ? d.key : null;
   }
   if (d.active !== undefined) data.active = d.active;
+
+  // Hak akses mount — perubahan TIDAK me-reset session/status (bukan
+  // perubahan kredensial).
+  if (d.mountVisibleTo !== undefined) data.mountVisibleTo = d.mountVisibleTo;
+  if (d.mountMode !== undefined) data.mountMode = d.mountMode;
 
   // S3 fields — string kosong berarti "hapus nilai".
   if (d.endpoint !== undefined) {

@@ -156,6 +156,46 @@ function evictSession(key: string): void {
 }
 
 /**
+ * reload() megajs (1.3.10) mendaftarkan listener event 'sc' BARU pada api
+ * TANPA melepas listener lama. Event delete ('d') lalu diproses BERKALI-KALI:
+ * setelah splice pertama berhasil menghapus node, pemrosesan ulang menjalankan
+ * splice(indexOf(file) = -1, 1) yang justru MENGHAPUS ANAK TERAKHIR folder —
+ * inilah akar bug "file mount MEGA menghilang sendiri setelah hapus/salin".
+ *
+ * safeReload melepas semua listener 'sc' lama sebelum reload supaya selalu
+ * ada maksimal SATU listener aktif per session.
+ */
+async function safeReload(storage: Storage): Promise<void> {
+  try {
+    const api = storage.api as unknown as {
+      removeAllListeners?: (ev: string) => unknown;
+    };
+    api.removeAllListeners?.("sc");
+  } catch {
+    /* ignore — struktur api berbeda di versi lain */
+  }
+  await withTimeout(storage.reload(), DEFAULT_TIMEOUT_MS);
+}
+
+/**
+ * Jalankan operasi TULIS (mkdir/rename/move/copy/delete/upload) lalu selalu
+ * evict session cache di akhir. Pembacaan berikutnya (tree/list) membuat
+ * session BARU dari sessionData → tree SEGAR persis kondisi server — tidak
+ * pernah memakai tree lama yang mungkin setengah-termutasi.
+ */
+async function withMutatingSession<T>(
+  account: MegaAccountLike,
+  op: (storage: Storage) => Promise<T>
+): Promise<T> {
+  const key = cacheKey(account);
+  try {
+    return await withSession(account, op);
+  } finally {
+    evictSession(key);
+  }
+}
+
+/**
  * Simpan session (sid + masterKey) ke CloudAccount.sessionData supaya
  * proses lain / lambda baru tidak perlu login password lagi.
  */
@@ -207,7 +247,7 @@ async function restoreSession(
     } as Parameters<typeof Storage.fromJSON>[0]);
     // Muat ulang tree file — ini otomatis memvalidasi sid. Kalau sid
     // kadaluarsa, reload akan error → return null → fallback login password.
-    await withTimeout(restored.reload(), DEFAULT_TIMEOUT_MS);
+    await safeReload(restored);
     return restored;
   } catch {
     return null;
@@ -403,7 +443,7 @@ export async function megaUploadTo(
   if (!account.email && !account.sessionData) {
     throw new Error("MEGA_NO_CREDENTIALS");
   }
-  return withSession(account, async (storage) => {
+  return withMutatingSession(account, async (storage) => {
     const parent = await resolveFolder(storage, parentId);
     const stream = parent.upload({ name, size: bytes.length });
     const donePromise = stream.complete as Promise<MutableFile>;
@@ -471,7 +511,7 @@ async function resolveNode(
 ): Promise<MutableFile | null> {
   let node = findNode(storage, nodeId);
   if (!node) {
-    await withTimeout(storage.reload(), DEFAULT_TIMEOUT_MS);
+    await safeReload(storage);
     node = findNode(storage, nodeId);
   }
   return node;
@@ -547,8 +587,8 @@ export async function megaMkdir(
       DEFAULT_TIMEOUT_MS
     );
     if (!folder.nodeId) throw new Error("MEGA_NO_NODE_ID");
-    // Sinkronkan tree lokal dengan server.
-    await withTimeout(storage.reload(), DEFAULT_TIMEOUT_MS).catch(() => {});
+    // Tree disegarkan lewat evict session (withMutatingSession) — reload()
+    // di sini justru menambah listener 'sc' ganda yang merusak tree.
     return { nodeId: folder.nodeId };
   });
 }
@@ -561,11 +601,10 @@ export async function megaRename(
   nodeId: string,
   name: string
 ): Promise<void> {
-  await withSession(account, async (storage) => {
+  await withMutatingSession(account, async (storage) => {
     const node = await resolveNode(storage, nodeId);
     if (!node) throw new Error("MEGA_NODE_NOT_FOUND");
     await withTimeout(node.rename(name), DEFAULT_TIMEOUT_MS);
-    await withTimeout(storage.reload(), DEFAULT_TIMEOUT_MS).catch(() => {});
   });
 }
 
@@ -577,13 +616,12 @@ export async function megaMove(
   nodeId: string,
   targetParentId: string | null
 ): Promise<void> {
-  await withSession(account, async (storage) => {
+  await withMutatingSession(account, async (storage) => {
     const node = await resolveNode(storage, nodeId);
     if (!node) throw new Error("MEGA_NODE_NOT_FOUND");
     const target = await resolveFolder(storage, targetParentId);
     if (node.nodeId === target.nodeId) return;
     await withTimeout(node.moveTo(target), DEFAULT_TIMEOUT_MS);
-    await withTimeout(storage.reload(), DEFAULT_TIMEOUT_MS).catch(() => {});
   });
 }
 
@@ -595,11 +633,10 @@ export async function megaDeleteNode(
   account: MegaAccountLike,
   nodeId: string
 ): Promise<void> {
-  await withSession(account, async (storage) => {
+  await withMutatingSession(account, async (storage) => {
     const node = await resolveNode(storage, nodeId);
     if (!node) throw new Error("MEGA_NODE_NOT_FOUND");
     await withTimeout(node.delete(true), DEFAULT_TIMEOUT_MS);
-    await withTimeout(storage.reload(), DEFAULT_TIMEOUT_MS).catch(() => {});
   });
 }
 
@@ -667,7 +704,7 @@ async function copyFileNode(
     file.copyTo(target) as Promise<unknown>,
     UPLOAD_TIMEOUT_MS
   );
-  await withTimeout(storage.reload(), DEFAULT_TIMEOUT_MS);
+  await safeReload(storage);
   const freshTarget = target.nodeId ? findNode(storage, target.nodeId) : storage.root;
   const copy = (freshTarget?.children ?? []).find(
     (c) =>
@@ -679,7 +716,7 @@ async function copyFileNode(
   if (!copy) throw new Error("MEGA_COPY_NODE_NOT_FOUND");
   if (wantName && wantName !== copy.name) {
     await withTimeout(copy.rename(wantName), DEFAULT_TIMEOUT_MS);
-    await withTimeout(storage.reload(), DEFAULT_TIMEOUT_MS).catch(() => {});
+    await safeReload(storage).catch(() => {});
   }
   return copy;
 }
@@ -696,7 +733,7 @@ export async function megaCopyNode(
   targetParentId: string | null,
   opts?: { name?: string }
 ): Promise<{ nodeId: string; copiedCount: number }> {
-  return withSession(account, async (storage) => {
+  return withMutatingSession(account, async (storage) => {
     const node = await resolveNode(storage, nodeId);
     if (!node) throw new Error("MEGA_NODE_NOT_FOUND");
     if (node.nodeId === storage.root.nodeId) {
@@ -765,7 +802,7 @@ export async function megaCopyNode(
       }
     };
     await copyChildren(node, newRoot);
-    await withTimeout(storage.reload(), DEFAULT_TIMEOUT_MS).catch(() => {});
+    // Tree disegarkan lewat evict session (withMutatingSession).
     return { nodeId: newRoot.nodeId, copiedCount };
   });
 }

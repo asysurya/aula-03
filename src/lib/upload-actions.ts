@@ -13,6 +13,7 @@ import {
 } from "@/lib/cloud-perms";
 import { ALLOWED_MIMES, MAX_FILE_SIZE, saveFile, deleteFile } from "@/lib/storage";
 import { megaUploadTo, describeMegaError, type MegaAccountLike } from "@/lib/mega-storage";
+import { canWriteMount } from "@/lib/mount-access";
 import { hardDeleteCloudFilesByIds } from "@/lib/hard-delete";
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -254,16 +255,21 @@ export async function uploadMegaFileAction(
   file: UploadBytes,
   params: { parentId?: string | null; accountId?: string | null }
 ): Promise<ActionResult> {
-  if (user.role !== "ADMIN" && user.role !== "GURU") {
-    return fail("FORBIDDEN — hanya guru/admin yang dapat mengunggah ke MEGA Cloud", 403);
-  }
   const invalid = validateStandard(file);
   if (invalid) return invalid;
 
+  const select = {
+    id: true,
+    email: true,
+    password: true,
+    sessionData: true,
+    mountVisibleTo: true,
+    mountMode: true,
+  };
   const account = params.accountId
     ? await db.cloudAccount.findFirst({
         where: { id: params.accountId, provider: "mega", email: { not: null } },
-        select: { id: true, email: true, password: true, sessionData: true },
+        select,
       })
     : await db.cloudAccount.findFirst({
         where: {
@@ -273,10 +279,17 @@ export async function uploadMegaFileAction(
           lastStatus: { not: "error" },
         },
         orderBy: { fileCount: "asc" },
-        select: { id: true, email: true, password: true, sessionData: true },
+        select,
       });
   if (!account || !account.email) {
     return fail("Belum ada akun MEGA aktif.", 404);
+  }
+  // ── Hak akses mount: unggah = operasi TULIS ──
+  if (!canWriteMount(account, user.role)) {
+    return fail(
+      "Mount ini baca-saja untukmu (hak akses diatur admin di Admin Panel → Data & Cloud).",
+      403
+    );
   }
   const accountLike: MegaAccountLike = account;
 

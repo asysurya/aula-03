@@ -2,6 +2,11 @@ import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { requireUser } from "@/lib/session";
 import {
+  canViewMount,
+  normalizeMountMode,
+  normalizeVisibleTo,
+} from "@/lib/mount-access";
+import {
   megaList,
   megaAccountInfo,
   describeMegaError,
@@ -14,8 +19,8 @@ import { formatBytes } from "@/lib/cloud-format";
 //
 // Browse isi akun MEGA ("mount" MEGA Cloud di file browser).
 //
-// Hanya ADMIN & GURU — file di MEGA bisa berisi jawaban privat siswa
-// (jawaban form upload, dsb.) yang tidak boleh dilihat siswa lain.
+// Hak akses diatur per-akun lewat Admin Panel (mountVisibleTo):
+// admin saja / guru+admin / semua user. Pemilik akun (admin) selalu boleh.
 // Menampilkan struktur folder + file asli di akun MEGA.
 //
 // Saat gagal membuka (mis. akun EBLOCKED), status akun di DB di-update
@@ -27,12 +32,6 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: "UNAUTHORIZED" }, { status: 401 });
   }
   const role = (user as { role?: string }).role;
-  if (role !== "ADMIN" && role !== "GURU") {
-    return NextResponse.json(
-      { error: "FORBIDDEN — hanya guru/admin yang dapat membuka MEGA Cloud" },
-      { status: 403 }
-    );
-  }
 
   const url = new URL(req.url);
   const accountIdParam = url.searchParams.get("accountId");
@@ -69,6 +68,17 @@ export async function GET(req: NextRequest) {
     );
   }
 
+  // ── Hak akses mount (diatur per-akun di Admin Panel) ──
+  if (!canViewMount(account, role)) {
+    return NextResponse.json(
+      {
+        error:
+          "FORBIDDEN — kamu tidak punya izin membuka mount akun cloud ini. Minta admin mengatur hak aksesnya.",
+      },
+      { status: 403 }
+    );
+  }
+
   const accountLike: MegaAccountLike = {
     id: account.id,
     email: account.email,
@@ -92,6 +102,11 @@ export async function GET(req: NextRequest) {
         spaceTotal: quota?.spaceTotal ?? null,
         spaceUsedLabel: quota ? formatBytes(quota.spaceUsed) : null,
         spaceTotalLabel: quota ? formatBytes(quota.spaceTotal) : null,
+        // Hak akses efektif untuk user ini (mount read-only? dsb.)
+        mountMode: normalizeMountMode(account.mountMode),
+        mountVisibleTo: normalizeVisibleTo(account.mountVisibleTo),
+        canWrite:
+          normalizeMountMode(account.mountMode) === "WRITE",
       },
       nodeId: listing.nodeId,
       path: listing.path,
@@ -134,5 +149,7 @@ function selectAccount() {
     lastStatus: true,
     fileCount: true,
     active: true,
+    mountVisibleTo: true,
+    mountMode: true,
   };
 }

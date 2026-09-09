@@ -234,7 +234,9 @@ export function UsersPanel() {
             <AlertDialogTitle>Hapus pengguna?</AlertDialogTitle>
             <AlertDialogDescription>
               Yakin menghapus <b>{deleteUser?.name}</b> (@{deleteUser?.username})?
-              Semua pesan, file, dan data terkait akan ikut terhapus. Aksi ini tidak bisa dibatalkan.
+              Semua pesan, file, folder, tugas, dan data terkait akan ikut
+              terhapus permanen. Grup obrolan yang dibuatnya dialihkan ke
+              Anda. Aksi ini tidak bisa dibatalkan.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>

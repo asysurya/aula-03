@@ -18,6 +18,9 @@ export interface SerializedCloudAccount {
   fileCount: number;
   createdAt: Date;
   updatedAt: Date;
+  // Hak akses mount
+  mountVisibleTo: string;
+  mountMode: string;
   // S3-compatible
   endpoint: string | null;
   region: string | null;
@@ -42,6 +45,8 @@ export function serializeCloudAccount(r: {
   fileCount: number;
   createdAt: Date;
   updatedAt: Date;
+  mountVisibleTo?: string | null;
+  mountMode?: string | null;
   endpoint: string | null;
   region: string | null;
   bucket: string | null;
@@ -65,6 +70,8 @@ export function serializeCloudAccount(r: {
     fileCount: r.fileCount,
     createdAt: r.createdAt,
     updatedAt: r.updatedAt,
+    mountVisibleTo: r.mountVisibleTo === "ADMIN" || r.mountVisibleTo === "ALL" ? r.mountVisibleTo : "GURU",
+    mountMode: r.mountMode === "READ" ? "READ" : "WRITE",
     endpoint: r.endpoint,
     region: r.region,
     bucket: r.bucket,

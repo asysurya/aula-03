@@ -359,6 +359,14 @@ model CloudAccount {
   // login password lagi (anti rate-limit / EBLOCKED).
   sessionData   String?
 
+  // ── Hak akses "mount" (file explorer akun cloud di halaman Cloud) ──
+  // mountVisibleTo: siapa yang boleh MEMBUKA mount (tree/preview/unduh).
+  //   ADMIN = admin saja · GURU = guru + admin · ALL = semua user (siswa ikut).
+  // mountMode: READ = baca-saja (preview/unduh) · WRITE = kelola penuh
+  //   (unggah/mkdir/rename/move/copy/tempel/hapus).
+  mountVisibleTo String @default("GURU")
+  mountMode      String @default("WRITE")
+
   active        Boolean   @default(true)
   lastStatus    String    @default("unknown")
   lastCheckedAt DateTime?
