@@ -32,7 +32,7 @@ export async function POST(req: Request) {
       lastStatus: { not: "error" },
     },
     orderBy: { fileCount: "asc" },
-    select: { id: true, email: true, password: true, fileCount: true },
+    select: { id: true, email: true, password: true, sessionData: true, fileCount: true },
   });
 
   if (accounts.length === 0) {
@@ -72,6 +72,7 @@ export async function POST(req: Request) {
       id: account.id,
       email: account.email!,
       password: account.password!,
+      sessionData: account.sessionData,
     };
     try {
       const data = await getFile(file.storageKey);
@@ -104,22 +105,20 @@ export async function POST(req: Request) {
     }
   }
 
-  // Refresh quota for all accounts (best-effort).
+  // Refresh quota for all accounts (best-effort) — status jujur sukses/gagal.
   for (const account of accounts) {
     try {
       const result = await testMegaAccount(account.email!, account.password!);
-      if (result.ok) {
-        await db.cloudAccount.update({
-          where: { id: account.id },
-          data: {
-            lastStatus: "connected",
-            lastError: null,
-            lastCheckedAt: new Date(),
-            spaceTotal: result.spaceTotal ?? null,
-            spaceUsed: result.spaceUsed ?? null,
-          },
-        });
-      }
+      await db.cloudAccount.update({
+        where: { id: account.id },
+        data: {
+          lastStatus: result.ok ? "connected" : "error",
+          lastError: result.ok ? null : result.error ?? null,
+          lastCheckedAt: new Date(),
+          spaceTotal: result.ok ? result.spaceTotal ?? null : null,
+          spaceUsed: result.ok ? result.spaceUsed ?? null : null,
+        },
+      });
     } catch {
       /* ignore */
     }

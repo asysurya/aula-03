@@ -96,16 +96,12 @@ export async function POST(req: NextRequest) {
     stored = await saveFile(file.name, mimetype, bytes);
   } catch (e) {
     const msg = e instanceof Error ? e.message : "SAVE_FAILED";
-    if (msg === "MEGA_NOT_CONFIGURED") {
-      return errorResponse("MEGA belum dikonfigurasi. Admin harus menambahkan akun MEGA di Admin Panel → Data & Cloud.", 400);
+    if (msg === "FILE_TOO_LARGE") {
+      return errorResponse("FILE_TOO_LARGE", 413, { maxBytes: MAX_FILE_SIZE });
     }
-    if (msg === "MEGA_TIMEOUT") {
-      return errorResponse("Upload ke MEGA timeout. File mungkin terlalu besar atau koneksi lambat. Coba lagi.", 504);
-    }
-    if (msg.includes("EBLOCKED") || msg.includes("User blocked")) {
-      return errorResponse("Akun MEGA diblokir sementara (rate limit). Tunggu 5-10 menit lalu coba lagi.", 429);
-    }
-    return errorResponse("Gagal mengunggah file ke MEGA: " + msg, 500);
+    // Pesan error dari saveFile sudah ramah-user (deskripsi MEGA/S3 lengkap
+    // dalam bahasa Indonesia) — tampilkan langsung.
+    return errorResponse(msg, 502);
   }
 
   const row = await db.cloudFile.create({

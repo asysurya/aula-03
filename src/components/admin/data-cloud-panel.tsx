@@ -79,6 +79,7 @@ interface CloudAccount {
   email: string | null;
   hasPassword: boolean;
   hasKey: boolean;
+  hasSession?: boolean;
   active: boolean;
   lastStatus: ConnStatus;
   lastCheckedAt: string | null;
@@ -88,6 +89,11 @@ interface CloudAccount {
   fileCount: number;
   createdAt: string;
   updatedAt: string;
+  // S3-compatible
+  endpoint: string | null;
+  region: string | null;
+  bucket: string | null;
+  hasSecret?: boolean;
 }
 
 // ─────────────────────────── Status badge ───────────────────────────
@@ -137,9 +143,9 @@ function InfoBanner() {
       <Info className="h-4 w-4 text-emerald-600 dark:text-emerald-400 shrink-0 mt-0.5" />
       <div className="space-y-1 text-emerald-900 dark:text-emerald-100">
         <p>
-          File cloud diunggah ke akun <b>MEGA</b> aktif (round-robin) dan otomatis
-          jatuh ke <b>penyimpanan lokal</b> jika tidak ada akun MEGA terhubung
-          atau upload gagal.
+          File cloud diunggah ke akun <b>MEGA</b> aktif; bila MEGA gagal
+          (mis. akun diblokir) atau belum diatur, otomatis jatuh ke akun{" "}
+          <b>S3-compatible</b> (Cloudflare R2 / Backblaze B2 / Spaces).
         </p>
         <p className="text-emerald-700 dark:text-emerald-300/80">
           Koneksi <b>MongoDB</b> di sini hanya untuk monitoring/status — DB
@@ -722,7 +728,7 @@ function CloudAccountsSection() {
           <div>
             <h3 className="font-semibold leading-tight">Cloud Storage Accounts</h3>
             <p className="text-xs text-muted-foreground">
-              {accounts.length} akun · MEGA storage
+              {accounts.length} akun · MEGA + S3 (R2/B2/Spaces)
             </p>
           </div>
         </div>
@@ -758,7 +764,8 @@ function CloudAccountsSection() {
         <Card className="border-dashed">
           <CardContent className="py-8 text-center text-sm text-muted-foreground">
             <Cloud className="h-6 w-6 mx-auto mb-2 opacity-40" />
-            Belum ada akun cloud. Upload akan disimpan lokal.
+            Belum ada akun cloud. Tambahkan MEGA atau S3 (Cloudflare R2 —
+            gratis 10 GB, tidak pernah memblokir server).
           </CardContent>
         </Card>
       ) : (
@@ -780,18 +787,45 @@ function CloudAccountsSection() {
                         variant="secondary"
                         className={cn(
                           "font-mono text-[10px] uppercase",
-                          a.provider === "mega" && "bg-red-500/10 text-red-600 dark:text-red-400"
+                          a.provider === "mega"
+                            ? "bg-red-500/10 text-red-600 dark:text-red-400"
+                            : "bg-amber-500/10 text-amber-600 dark:text-amber-400"
                         )}
                       >
-                        {a.provider}
+                        {a.provider === "s3" ? "S3" : a.provider}
                       </Badge>
+                      {a.provider === "mega" && a.hasSession ? (
+                        <Badge
+                          variant="secondary"
+                          className="font-mono text-[10px] bg-emerald-500/10 text-emerald-600 dark:text-emerald-400"
+                          title="Session MEGA tersimpan — login password hanya sekali"
+                        >
+                          session-aktif
+                        </Badge>
+                      ) : null}
                     </div>
                     <StatusBadge status={a.lastStatus} />
                   </div>
                 </CardHeader>
                 <CardContent className="space-y-2.5 pt-0">
                   <div className="text-xs text-muted-foreground space-y-0.5">
-                    {a.email ? <p>{a.email}</p> : <p className="italic">email belum diisi</p>}
+                    {a.provider === "s3" ? (
+                      <p className="truncate" title={a.endpoint ?? ""}>
+                        {a.bucket ? (
+                          <>
+                            <span className="font-mono">{a.bucket}</span>
+                            {a.region ? ` · ${a.region}` : ""}
+                            {a.endpoint ? ` · ${a.endpoint}` : " (AWS S3)"}
+                          </>
+                        ) : (
+                          <span className="italic">bucket belum diisi</span>
+                        )}
+                      </p>
+                    ) : a.email ? (
+                      <p>{a.email}</p>
+                    ) : (
+                      <p className="italic">email belum diisi</p>
+                    )}
                   </div>
                   {/* Quota progress */}
                   <div className="space-y-1">
@@ -851,21 +885,23 @@ function CloudAccountsSection() {
                         )}
                         Tes Akun
                       </Button>
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        className="h-7 gap-1.5"
-                        onClick={() => syncMut.mutate(a.id)}
-                        disabled={syncingId === a.id || syncingAll || a.lastStatus === "error"}
-                        title="Pindahkan file lokal ke akun MEGA ini"
-                      >
-                        {syncingId === a.id ? (
-                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                        ) : (
-                          <RefreshCw className="h-3.5 w-3.5" />
-                        )}
-                        Sync
-                      </Button>
+                      {a.provider === "mega" ? (
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          className="h-7 gap-1.5"
+                          onClick={() => syncMut.mutate(a.id)}
+                          disabled={syncingId === a.id || syncingAll || a.lastStatus === "error"}
+                          title="Pindahkan file lokal ke akun MEGA ini"
+                        >
+                          {syncingId === a.id ? (
+                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                          ) : (
+                            <RefreshCw className="h-3.5 w-3.5" />
+                          )}
+                          Sync
+                        </Button>
+                      ) : null}
                       <Button
                         variant="ghost"
                         size="icon"
@@ -951,21 +987,40 @@ function CreateCloudAccountDialog({
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [key, setKey] = useState("");
+  // S3
+  const [endpoint, setEndpoint] = useState("");
+  const [region, setRegion] = useState("");
+  const [bucket, setBucket] = useState("");
+  const [accessKeyId, setAccessKeyId] = useState("");
+  const [secretAccessKey, setSecretAccessKey] = useState("");
   const [testNow, setTestNow] = useState(true);
 
   const mut = useMutation({
     mutationFn: async () => {
+      const body: Record<string, unknown> =
+        provider === "s3"
+          ? {
+              name,
+              provider,
+              endpoint: endpoint || undefined,
+              region: region || undefined,
+              bucket: bucket || undefined,
+              accessKeyId: accessKeyId || undefined,
+              secretAccessKey: secretAccessKey || undefined,
+              testNow,
+            }
+          : {
+              name,
+              provider,
+              email: email || undefined,
+              password: password || undefined,
+              key: key || undefined,
+              testNow,
+            };
       const res = await fetch("/api/admin/cloud-accounts", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          name,
-          provider,
-          email: email || undefined,
-          password: password || undefined,
-          key: key || undefined,
-          testNow,
-        }),
+        body: JSON.stringify(body),
       });
       if (!res.ok) {
         const e = await res.json().catch(() => ({}));
@@ -976,7 +1031,9 @@ function CreateCloudAccountDialog({
     onSuccess: () => {
       toast.success(testNow ? "Akun dibuat, sedang dites…" : "Akun dibuat. Klik Tes Akun untuk verifikasi.");
       qc.invalidateQueries({ queryKey: ["admin-cloud-accounts"] });
-      setName(""); setProvider("mega"); setEmail(""); setPassword(""); setKey(""); setTestNow(true);
+      setName(""); setProvider("mega"); setEmail(""); setPassword(""); setKey("");
+      setEndpoint(""); setRegion(""); setBucket(""); setAccessKeyId(""); setSecretAccessKey("");
+      setTestNow(true);
       onOpenChange(false);
     },
     onError: (e: Error) => toast.error(e.message),
@@ -984,11 +1041,13 @@ function CreateCloudAccountDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent>
+      <DialogContent className="sm:max-w-lg max-h-[90vh] overflow-y-auto">
         <DialogHeader>
           <DialogTitle>Tambah Akun Cloud</DialogTitle>
           <DialogDescription>
-            Akun MEGA akan dipakai untuk menyimpan file cloud Aula (round-robin).
+            MEGA (login email/password) atau S3-compatible (Cloudflare R2,
+            Backblaze B2, DO Spaces, Wasabi, MinIO) — dipakai untuk menyimpan
+            file cloud Aula.
           </DialogDescription>
         </DialogHeader>
         <form
@@ -1000,55 +1059,131 @@ function CreateCloudAccountDialog({
         >
           <div className="space-y-1.5">
             <Label>Nama akun</Label>
-            <Input value={name} onChange={(e) => setName(e.target.value)} required placeholder="cth: MEGA Pribadi" />
+            <Input value={name} onChange={(e) => setName(e.target.value)} required placeholder="cth: MEGA Pribadi / R2 Utama" />
           </div>
           <div className="space-y-1.5">
             <Label>Provider</Label>
             <Select value={provider} onValueChange={setProvider}>
               <SelectTrigger><SelectValue /></SelectTrigger>
               <SelectContent>
-                <SelectItem value="mega">MEGA</SelectItem>
+                <SelectItem value="mega">MEGA (email + password)</SelectItem>
+                <SelectItem value="s3">S3-compatible (R2 / B2 / Spaces)</SelectItem>
               </SelectContent>
             </Select>
-          </div>
-          <div className="space-y-1.5">
-            <Label>Email MEGA</Label>
-            <Input
-              type="text"
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              autoCapitalize="none"
-              autoCorrect="off"
-              spellCheck={false}
-              placeholder="email@contoh.com"
-            />
-          </div>
-          <div className="space-y-1.5">
-            <Label>Password MEGA</Label>
-            <Input
-              type="password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              placeholder="••••••••"
-            />
             <p className="text-xs text-muted-foreground">
-              Disimpan plaintext di DB. Enkripsi di production (lihat DEPLOY.md).
+              Akun MEGA kena blokir/rate-limit? Pakai S3 — Cloudflare R2
+              gratis 10 GB dan tidak pernah memblokir server.
             </p>
           </div>
-          <div className="space-y-1.5">
-            <Label>Master Key (opsional)</Label>
-            <Input
-              value={key}
-              onChange={(e) => setKey(e.target.value)}
-              autoCapitalize="none"
-              spellCheck={false}
-              className="font-mono text-xs"
-              placeholder="biarkan kosong"
-            />
-          </div>
+
+          {provider === "mega" ? (
+            <>
+              <div className="space-y-1.5">
+                <Label>Email MEGA</Label>
+                <Input
+                  type="text"
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  autoCapitalize="none"
+                  autoCorrect="off"
+                  spellCheck={false}
+                  placeholder="email@contoh.com"
+                />
+              </div>
+              <div className="space-y-1.5">
+                <Label>Password MEGA</Label>
+                <Input
+                  type="password"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  placeholder="••••••••"
+                />
+                <p className="text-xs text-muted-foreground">
+                  Disimpan plaintext di DB. Enkripsi di production (lihat DEPLOY.md).
+                </p>
+              </div>
+              <div className="space-y-1.5">
+                <Label>Master Key (opsional)</Label>
+                <Input
+                  value={key}
+                  onChange={(e) => setKey(e.target.value)}
+                  autoCapitalize="none"
+                  spellCheck={false}
+                  className="font-mono text-xs"
+                  placeholder="biarkan kosong"
+                />
+              </div>
+            </>
+          ) : (
+            <>
+              <div className="space-y-1.5">
+                <Label>Endpoint (kosongkan untuk AWS S3)</Label>
+                <Input
+                  value={endpoint}
+                  onChange={(e) => setEndpoint(e.target.value)}
+                  autoCapitalize="none"
+                  spellCheck={false}
+                  className="font-mono text-xs"
+                  placeholder="https://<accountid>.r2.cloudflarestorage.com"
+                />
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div className="space-y-1.5">
+                  <Label>Region</Label>
+                  <Input
+                    value={region}
+                    onChange={(e) => setRegion(e.target.value)}
+                    autoCapitalize="none"
+                    className="font-mono text-xs"
+                    placeholder="auto"
+                  />
+                </div>
+                <div className="space-y-1.5">
+                  <Label>Bucket</Label>
+                  <Input
+                    value={bucket}
+                    onChange={(e) => setBucket(e.target.value)}
+                    autoCapitalize="none"
+                    className="font-mono text-xs"
+                    placeholder="aula-files"
+                    required
+                  />
+                </div>
+              </div>
+              <div className="space-y-1.5">
+                <Label>Access Key ID</Label>
+                <Input
+                  value={accessKeyId}
+                  onChange={(e) => setAccessKeyId(e.target.value)}
+                  autoCapitalize="none"
+                  spellCheck={false}
+                  className="font-mono text-xs"
+                  placeholder="AKIA…"
+                  required
+                />
+              </div>
+              <div className="space-y-1.5">
+                <Label>Secret Access Key</Label>
+                <Input
+                  type="password"
+                  value={secretAccessKey}
+                  onChange={(e) => setSecretAccessKey(e.target.value)}
+                  className="font-mono text-xs"
+                  placeholder="••••••••"
+                  required
+                />
+              </div>
+              <p className="text-xs text-muted-foreground">
+                R2: buat bucket di dashboard Cloudflare → R2 → Manage API
+                tokens → Object Read &amp; Write. Nilai “Access Key ID” dan
+                “Secret Access Key”-nya diisi di sini.
+              </p>
+            </>
+          )}
+
           <label className="flex items-center gap-2 text-sm cursor-pointer">
             <Switch checked={testNow} onCheckedChange={setTestNow} />
-            <span>Tes koneksi otomatis setelah dibuat (butuh ~6-20 detik)</span>
+            <span>Tes koneksi otomatis setelah dibuat</span>
           </label>
           <DialogFooter>
             <Button type="button" variant="ghost" onClick={() => onOpenChange(false)}>
@@ -1078,12 +1213,27 @@ function EditCloudAccountDialog({
   const [email, setEmail] = useState(account.email ?? "");
   const [password, setPassword] = useState("");
   const [key, setKey] = useState("");
+  // S3
+  const [endpoint, setEndpoint] = useState(account.endpoint ?? "");
+  const [region, setRegion] = useState(account.region ?? "");
+  const [bucket, setBucket] = useState(account.bucket ?? "");
+  const [accessKeyId, setAccessKeyId] = useState("");
+  const [secretAccessKey, setSecretAccessKey] = useState("");
 
   const mut = useMutation({
     mutationFn: async () => {
-      const body: Record<string, unknown> = { name, email };
-      if (password.length > 0) body.password = password;
-      if (key.length > 0) body.key = key;
+      const body: Record<string, unknown> = { name };
+      if (account.provider === "s3") {
+        body.endpoint = endpoint;
+        body.region = region;
+        body.bucket = bucket;
+        if (accessKeyId.length > 0) body.accessKeyId = accessKeyId;
+        if (secretAccessKey.length > 0) body.secretAccessKey = secretAccessKey;
+      } else {
+        body.email = email;
+        if (password.length > 0) body.password = password;
+        if (key.length > 0) body.key = key;
+      }
       const res = await fetch(`/api/admin/cloud-accounts/${account.id}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
@@ -1096,7 +1246,7 @@ function EditCloudAccountDialog({
       return res.json();
     },
     onSuccess: () => {
-      toast.success("Perubahan disimpan");
+      toast.success("Perubahan disimpan — tekan Tes Akun untuk verifikasi ulang");
       qc.invalidateQueries({ queryKey: ["admin-cloud-accounts"] });
       onOpenChange(false);
     },
@@ -1105,10 +1255,12 @@ function EditCloudAccountDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent>
+      <DialogContent className="sm:max-w-lg max-h-[90vh] overflow-y-auto">
         <DialogHeader>
           <DialogTitle>Edit Akun Cloud</DialogTitle>
-          <DialogDescription>@{account.provider}</DialogDescription>
+          <DialogDescription>
+            {account.provider === "s3" ? "Provider S3-compatible" : "Provider MEGA"}
+          </DialogDescription>
         </DialogHeader>
         <form
           onSubmit={(e) => {
@@ -1121,39 +1273,102 @@ function EditCloudAccountDialog({
             <Label>Nama</Label>
             <Input value={name} onChange={(e) => setName(e.target.value)} required />
           </div>
-          <div className="space-y-1.5">
-            <Label>Email</Label>
-            <Input
-              type="email"
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              autoCapitalize="none"
-              spellCheck={false}
-            />
-          </div>
-          <div className="space-y-1.5">
-            <Label>Password baru (opsional)</Label>
-            <Input
-              type="password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              placeholder={account.hasPassword ? "•••••••• (tidak diubah)" : "belum diisi"}
-            />
-            <p className="text-xs text-muted-foreground">
-              Kosongkan jika tidak ingin mengubah password.
-            </p>
-          </div>
-          <div className="space-y-1.5">
-            <Label>Master Key (opsional)</Label>
-            <Input
-              value={key}
-              onChange={(e) => setKey(e.target.value)}
-              autoCapitalize="none"
-              spellCheck={false}
-              className="font-mono text-xs"
-              placeholder={account.hasKey ? "(tidak diubah)" : "belum diisi"}
-            />
-          </div>
+
+          {account.provider === "s3" ? (
+            <>
+              <div className="space-y-1.5">
+                <Label>Endpoint</Label>
+                <Input
+                  value={endpoint}
+                  onChange={(e) => setEndpoint(e.target.value)}
+                  autoCapitalize="none"
+                  spellCheck={false}
+                  className="font-mono text-xs"
+                  placeholder="https://<accountid>.r2.cloudflarestorage.com"
+                />
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div className="space-y-1.5">
+                  <Label>Region</Label>
+                  <Input
+                    value={region}
+                    onChange={(e) => setRegion(e.target.value)}
+                    autoCapitalize="none"
+                    className="font-mono text-xs"
+                    placeholder="auto"
+                  />
+                </div>
+                <div className="space-y-1.5">
+                  <Label>Bucket</Label>
+                  <Input
+                    value={bucket}
+                    onChange={(e) => setBucket(e.target.value)}
+                    autoCapitalize="none"
+                    className="font-mono text-xs"
+                    required
+                  />
+                </div>
+              </div>
+              <div className="space-y-1.5">
+                <Label>Access Key ID baru (opsional)</Label>
+                <Input
+                  value={accessKeyId}
+                  onChange={(e) => setAccessKeyId(e.target.value)}
+                  autoCapitalize="none"
+                  spellCheck={false}
+                  className="font-mono text-xs"
+                  placeholder="(tidak diubah)"
+                />
+              </div>
+              <div className="space-y-1.5">
+                <Label>Secret Access Key baru (opsional)</Label>
+                <Input
+                  type="password"
+                  value={secretAccessKey}
+                  onChange={(e) => setSecretAccessKey(e.target.value)}
+                  className="font-mono text-xs"
+                  placeholder="(tidak diubah)"
+                />
+              </div>
+            </>
+          ) : (
+            <>
+              <div className="space-y-1.5">
+                <Label>Email</Label>
+                <Input
+                  type="email"
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  autoCapitalize="none"
+                  spellCheck={false}
+                />
+              </div>
+              <div className="space-y-1.5">
+                <Label>Password baru (opsional)</Label>
+                <Input
+                  type="password"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  placeholder={account.hasPassword ? "•••••••• (tidak diubah)" : "belum diisi"}
+                />
+                <p className="text-xs text-muted-foreground">
+                  Kosongkan jika tidak ingin mengubah password.
+                </p>
+              </div>
+              <div className="space-y-1.5">
+                <Label>Master Key (opsional)</Label>
+                <Input
+                  value={key}
+                  onChange={(e) => setKey(e.target.value)}
+                  autoCapitalize="none"
+                  spellCheck={false}
+                  className="font-mono text-xs"
+                  placeholder={account.hasKey ? "(tidak diubah)" : "belum diisi"}
+                />
+              </div>
+            </>
+          )}
+
           <div className="flex items-center justify-between text-xs text-muted-foreground">
             <span>File tersimpan: <b className="text-foreground">{account.fileCount}</b></span>
             <span>

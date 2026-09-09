@@ -79,6 +79,7 @@ export async function POST(
     id: account.id,
     email: account.email,
     password: account.password,
+    sessionData: account.sessionData,
   };
 
   let synced = 0;
@@ -131,22 +132,21 @@ export async function POST(
     /* ignore */
   }
 
-  // Re-test quota after sync (best-effort).
+  // Re-test quota after sync (best-effort) — status di-update jujur
+  // (sukses ATAU gagal) supaya panel tidak menampilkan status basi.
   try {
     const { testMegaAccount } = await import("@/lib/mega-storage");
     const result = await testMegaAccount(account.email, account.password);
-    if (result.ok) {
-      await db.cloudAccount.update({
-        where: { id: account.id },
-        data: {
-          lastStatus: "connected",
-          lastError: null,
-          lastCheckedAt: new Date(),
-          spaceTotal: result.spaceTotal ?? null,
-          spaceUsed: result.spaceUsed ?? null,
-        },
-      });
-    }
+    await db.cloudAccount.update({
+      where: { id: account.id },
+      data: {
+        lastStatus: result.ok ? "connected" : "error",
+        lastError: result.ok ? null : result.error ?? null,
+        lastCheckedAt: new Date(),
+        spaceTotal: result.ok ? result.spaceTotal ?? null : null,
+        spaceUsed: result.ok ? result.spaceUsed ?? null : null,
+      },
+    });
   } catch {
     /* ignore */
   }

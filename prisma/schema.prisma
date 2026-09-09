@@ -346,6 +346,19 @@ model CloudAccount {
   email         String?
   password      String?
   key           String?
+
+  // ── Provider "s3" (Cloudflare R2 / Backblaze B2 / DO Spaces / Wasabi / MinIO) ──
+  endpoint      String? // cth: https://<accountid>.r2.cloudflarestorage.com
+  region        String? // cth: auto / us-east-1
+  bucket        String?
+  accessKeyId   String?
+  secretAccessKey String?
+
+  // ── MEGA session persistence (login 1x → simpan sid+masterKey) ──
+  // Berisi JSON Storage.toJSON() — supaya proses berikutnya tidak perlu
+  // login password lagi (anti rate-limit / EBLOCKED).
+  sessionData   String?
+
   active        Boolean   @default(true)
   lastStatus    String    @default("unknown")
   lastCheckedAt DateTime?

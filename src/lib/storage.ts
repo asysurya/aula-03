@@ -3,23 +3,34 @@ import { promises as fs } from "fs";
 import path from "path";
 import { db } from "@/lib/db";
 import {
-  megaUpload,
+  megaUploadTo,
   megaDownload,
   megaDelete,
   parseMegaKey,
+  describeMegaError,
   type MegaAccountLike,
 } from "@/lib/mega-storage";
+import {
+  s3Upload,
+  s3Download,
+  s3Delete,
+  parseS3Key,
+  type S3AccountLike,
+} from "@/lib/s3-storage";
 
 // Storage abstraction.
-// - Default: local filesystem (`/uploads`).
-// - If an active MEGA CloudAccount (provider=mega, lastStatus=connected) exists,
-//   uploads route to MEGA (round-robin by lowest fileCount). On any MEGA error
-//   the upload falls back to local filesystem so the app never breaks.
-// - getFile/deleteFile dispatch by storageKey prefix:
-//     `mega:<accountId>:<nodeId>` → MEGA
-//     anything else → local filesystem
+// - Provider didukung: MEGA (provider "mega") dan S3-compatible
+//   (provider "s3" — Cloudflare R2 / B2 / Spaces / Wasabi / MinIO / AWS).
+// - saveFile memilih MEGA dulu (jika ada & aktif); bila MEGA gagal
+//   (mis. akun diblokir EBLOCKED) atau tidak dikonfigurasi → otomatis
+//   fallback ke S3. Tidak ada fallback lokal: file harus tersimpan di cloud
+//   agar tetap ada setelah deploy ulang.
+// - getFile/deleteFile dispatch berdasarkan prefix storageKey:
+//     `mega:<accountId>:<nodeId>`  → MEGA
+//     `s3:<accountId>:<objectKey>` → S3
+//     lainnya                      → local filesystem (file lama / staging sync)
 //
-// See DEPLOY.md (MongoDB + MEGA Storage section) for production notes.
+// See DEPLOY.md (MongoDB + Cloud Storage section) for production notes.
 
 const UPLOAD_DIR = path.join(process.cwd(), "uploads");
 const MAX_SIZE = 100 * 1024 * 1024; // 100 MB
@@ -71,11 +82,7 @@ export interface SaveFileResult {
  * and only accounts that explicitly failed testing are skipped.
  * Returns null when no active account is available.
  */
-async function pickMegaAccount(): Promise<{
-  id: string;
-  email: string | null;
-  password: string | null;
-} | null> {
+async function pickMegaAccount(): Promise<MegaAccountLike | null> {
   const account = await db.cloudAccount.findFirst({
     where: {
       provider: "mega",
@@ -85,8 +92,74 @@ async function pickMegaAccount(): Promise<{
       lastStatus: { not: "error" },
     },
     orderBy: { fileCount: "asc" },
-    select: { id: true, email: true, password: true },
+    select: {
+      id: true,
+      email: true,
+      password: true,
+      sessionData: true,
+    },
   });
+  return account;
+}
+
+/**
+ * Pick the next S3-compatible account (fallback / alternatif MEGA).
+ * Syarat sama: aktif + status bukan "error" + konfigurasi lengkap.
+ */
+async function pickS3Account(): Promise<S3AccountLike | null> {
+  const account = await db.cloudAccount.findFirst({
+    where: {
+      provider: "s3",
+      active: true,
+      bucket: { not: null },
+      accessKeyId: { not: null },
+      secretAccessKey: { not: null },
+      lastStatus: { not: "error" },
+    },
+    orderBy: { fileCount: "asc" },
+    select: {
+      id: true,
+      endpoint: true,
+      region: true,
+      bucket: true,
+      accessKeyId: true,
+      secretAccessKey: true,
+    },
+  });
+  return account;
+}
+
+async function loadMegaAccountLike(
+  accountId: string
+): Promise<MegaAccountLike | null> {
+  const account = await db.cloudAccount.findUnique({
+    where: { id: accountId },
+    select: { id: true, email: true, password: true, sessionData: true },
+  });
+  if (!account) return null;
+  return {
+    id: account.id,
+    email: account.email,
+    password: account.password,
+    sessionData: account.sessionData,
+  };
+}
+
+async function loadS3AccountLike(
+  accountId: string
+): Promise<S3AccountLike | null> {
+  const account = await db.cloudAccount.findUnique({
+    where: { id: accountId },
+    select: {
+      id: true,
+      endpoint: true,
+      region: true,
+      bucket: true,
+      accessKeyId: true,
+      secretAccessKey: true,
+    },
+  });
+  if (!account) return null;
   return account;
 }
 
@@ -127,12 +200,11 @@ async function deleteLocal(storageKey: string): Promise<void> {
 export { saveLocal, getLocal, deleteLocal };
 
 /**
- * Save a file. MEGA is REQUIRED — uploads go directly to MEGA (round-robin
- * across active accounts). No local fallback: if no MEGA account is
- * configured or the upload fails, an error is thrown.
+ * Save a file ke cloud. Preferensi: MEGA → S3. Bila keduanya gagal /
+ * tidak ada, error dilempar dengan pesan yang bisa ditindaklanjuti.
  *
- * The only exception is the sync feature, which uses saveLocal directly
- * to stage files before migrating them to MEGA.
+ * Catatan error: "MEGA_NOT_CONFIGURED" dipertahankan sebagai nama error
+ * bila TIDAK ADA akun cloud sama sekali (pesan lengkap menyebut S3).
  */
 export async function saveFile(
   name: string,
@@ -143,21 +215,57 @@ export async function saveFile(
     throw new Error("FILE_TOO_LARGE");
   }
 
-  // MEGA is required — no local fallback.
-  const account = await pickMegaAccount();
-  if (!account || !account.email || !account.password) {
-    throw new Error("MEGA_NOT_CONFIGURED");
+  // ── 1. Coba MEGA dulu ──
+  const mega = await pickMegaAccount();
+  if (mega) {
+    try {
+      const result = await megaUploadTo(mega, null, name, bytes, mimetype);
+      try {
+        await db.cloudAccount.update({
+          where: { id: mega.id },
+          data: { fileCount: { increment: 1 } },
+        });
+      } catch {
+        /* ignore counter errors */
+      }
+      return {
+        storageKey: result.storageKey,
+        size: result.size,
+        cloudAccountId: mega.id,
+      };
+    } catch (e) {
+      // Akun MEGA bermasalah (diblokir / rate limit) → coba S3.
+      // Kalau S3 juga tidak ada, lempar error MEGA yang asli.
+      const s3 = await pickS3Account();
+      if (!s3) {
+        throw new Error(describeMegaError(e));
+      }
+      // jatuh ke blok S3 di bawah
+      return await saveToS3(s3, name, bytes, mimetype);
+    }
   }
-  const accountLike: MegaAccountLike = {
-    id: account.id,
-    email: account.email,
-    password: account.password,
-  };
-  const result = await megaUpload(accountLike, name, bytes, mimetype);
-  // Bump fileCount (best-effort).
+
+  // ── 2. Tidak ada MEGA → S3 ──
+  const s3 = await pickS3Account();
+  if (s3) {
+    return await saveToS3(s3, name, bytes, mimetype);
+  }
+
+  throw new Error(
+    "CLOUD_NOT_CONFIGURED: belum ada akun cloud aktif. Tambahkan akun MEGA atau S3 (Cloudflare R2 / Backblaze B2 / Spaces) lewat Admin Panel → Data & Cloud."
+  );
+}
+
+async function saveToS3(
+  s3: S3AccountLike,
+  name: string,
+  bytes: Buffer,
+  mimetype: string
+): Promise<SaveFileResult> {
+  const result = await s3Upload(s3, name, bytes, mimetype);
   try {
     await db.cloudAccount.update({
-      where: { id: account.id },
+      where: { id: s3.id },
       data: { fileCount: { increment: 1 } },
     });
   } catch {
@@ -166,38 +274,35 @@ export async function saveFile(
   return {
     storageKey: result.storageKey,
     size: result.size,
-    cloudAccountId: account.id,
+    cloudAccountId: s3.id,
   };
 }
 
 /**
- * Read file bytes by storageKey. Dispatches MEGA vs local automatically.
+ * Read file bytes by storageKey. Dispatches MEGA / S3 / local automatically.
  */
 export async function getFile(storageKey: string): Promise<{
   bytes: Buffer;
 } | null> {
   const mega = parseMegaKey(storageKey);
   if (mega) {
-    const account = await db.cloudAccount.findUnique({
-      where: { id: mega.accountId },
-      select: { id: true, email: true, password: true },
-    });
-    if (!account || !account.email || !account.password) return null;
-    const buf = await megaDownload(
-      {
-        id: account.id,
-        email: account.email,
-        password: account.password,
-      },
-      mega.nodeId
-    );
+    const account = await loadMegaAccountLike(mega.accountId);
+    if (!account) return null;
+    const buf = await megaDownload(account, mega.nodeId);
+    return buf ? { bytes: buf } : null;
+  }
+  const s3 = parseS3Key(storageKey);
+  if (s3) {
+    const account = await loadS3AccountLike(s3.accountId);
+    if (!account) return null;
+    const buf = await s3Download(account, s3.objectKey);
     return buf ? { bytes: buf } : null;
   }
   return getLocal(storageKey);
 }
 
 /**
- * Delete file by storageKey. Dispatches MEGA vs local automatically.
+ * Delete file by storageKey. Dispatches MEGA / S3 / local automatically.
  * Also decrements the owning cloudAccount.fileCount when applicable.
  */
 export async function deleteFile(storageKey: string): Promise<void> {
@@ -205,18 +310,36 @@ export async function deleteFile(storageKey: string): Promise<void> {
   if (mega) {
     const account = await db.cloudAccount.findUnique({
       where: { id: mega.accountId },
-      select: { id: true, email: true, password: true, fileCount: true },
+      select: { id: true, fileCount: true },
     });
-    if (account && account.email && account.password) {
-      await megaDelete(
-        {
-          id: account.id,
-          email: account.email,
-          password: account.password,
-        },
-        mega.nodeId
-      );
-      // Decrement counter (floor at 0).
+    if (account) {
+      const accountLike = await loadMegaAccountLike(mega.accountId);
+      if (accountLike) {
+        await megaDelete(accountLike, mega.nodeId);
+      }
+      try {
+        const next = Math.max(0, (account.fileCount ?? 0) - 1);
+        await db.cloudAccount.update({
+          where: { id: account.id },
+          data: { fileCount: next },
+        });
+      } catch {
+        /* ignore */
+      }
+    }
+    return;
+  }
+  const s3 = parseS3Key(storageKey);
+  if (s3) {
+    const account = await db.cloudAccount.findUnique({
+      where: { id: s3.accountId },
+      select: { id: true, fileCount: true },
+    });
+    const accountLike = await loadS3AccountLike(s3.accountId);
+    if (accountLike) {
+      await s3Delete(accountLike, s3.objectKey);
+    }
+    if (account) {
       try {
         const next = Math.max(0, (account.fileCount ?? 0) - 1);
         await db.cloudAccount.update({

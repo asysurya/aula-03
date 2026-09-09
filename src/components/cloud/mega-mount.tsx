@@ -1,23 +1,59 @@
 "use client";
 
-import { useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useRef, useState } from "react";
+import { useMutation, useQuery } from "@tanstack/react-query";
 import { formatDistanceToNow } from "date-fns";
 import { id as localeId } from "date-fns/locale";
+import { toast } from "sonner";
 import {
   AlertTriangle,
   ChevronRight,
+  Download,
+  Eye,
+  FilePlus2,
   Folder,
+  FolderPlus,
   HardDrive,
   Loader2,
+  MoreVertical,
+  Pencil,
   RefreshCw,
+  Trash2,
   X,
+  FolderInput,
 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import {
   Breadcrumb,
   BreadcrumbItem,
@@ -60,13 +96,15 @@ interface MegaTreeResponse {
   nodeId: string;
   path: { id: string; name: string }[];
   entries: MegaEntry[];
+  hint?: string;
 }
 
 // ───────────────────────── Component ─────────────────────────
 
 /**
- * Tampilan "mount MEGA Cloud" — browse isi akun MEGA secara read-only
- * dari dalam file browser. Hanya guru/admin (dipaksa di API-nya).
+ * Tampilan "mount MEGA Cloud" — FULL AKSES dari dalam file browser:
+ * unggah file, buat folder, rename, pindah, hapus permanen, unduh,
+ * dan preview. Hanya guru/admin (dipaksa di API-nya).
  */
 export function MegaMountView({
   onExit,
@@ -87,15 +125,80 @@ export function MegaMountView({
           { cache: "no-store" }
         );
         const json = await res.json();
-        if (!res.ok) throw new Error(json?.error || "Gagal memuat MEGA");
+        if (!res.ok) {
+          const err = new Error(json?.error || "Gagal memuat MEGA");
+          (err as Error & { hint?: string }).hint = json?.hint;
+          throw err;
+        }
         return json as MegaTreeResponse;
       },
     });
+
+  // ── State dialog operasi ──
+  const [mkdirOpen, setMkdirOpen] = useState(false);
+  const [renameTarget, setRenameTarget] = useState<MegaEntry | null>(null);
+  const [moveTarget, setMoveTarget] = useState<MegaEntry | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<MegaEntry | null>(null);
+  const uploadInputRef = useRef<HTMLInputElement>(null);
+
+  const accountId = data?.account.id;
+
+  const opsMut = useMutation({
+    mutationFn: async (payload: Record<string, unknown>) => {
+      const res = await fetch("/api/cloud/mega/ops", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ...payload, accountId }),
+      });
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(json.error || "Operasi gagal");
+      return json;
+    },
+    onSuccess: () => {
+      refetch();
+      toast.success("Operasi MEGA berhasil");
+    },
+    onError: (e: Error) => toast.error(e.message),
+  });
+
+  const uploadMut = useMutation({
+    mutationFn: async (file: File) => {
+      const fd = new FormData();
+      fd.append("file", file);
+      if (nodeId) fd.append("parentId", nodeId);
+      const res = await fetch("/api/cloud/mega/upload", {
+        method: "POST",
+        body: fd,
+      });
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(json.error || "Upload gagal");
+      return json;
+    },
+    onSuccess: () => {
+      refetch();
+      toast.success("File terunggah ke MEGA");
+    },
+    onError: (e: Error) => toast.error(e.message),
+  });
+
+  const onPickUpload = (f: File | null | undefined) => {
+    if (!f) return;
+    if (f.size > 100 * 1024 * 1024) {
+      toast.error("File maksimal 100 MB");
+      return;
+    }
+    uploadMut.mutate(f);
+  };
 
   const usagePct =
     data?.account.spaceTotal && data.account.spaceUsed != null
       ? Math.min(100, (data.account.spaceUsed / data.account.spaceTotal) * 100)
       : null;
+
+  const foldersInCurrentDir = (data?.entries ?? []).filter((e) => e.isFolder);
+
+  const downloadUrl = (entry: MegaEntry) =>
+    `/api/storage/mega:${accountId}:${entry.nodeId}?name=${encodeURIComponent(entry.name)}`;
 
   return (
     <div className="flex flex-col h-full">
@@ -162,6 +265,46 @@ export function MegaMountView({
         </div>
       </div>
 
+      {/* Toolbar full-akses */}
+      <div className="border-b border-border px-4 py-2 flex items-center gap-2 flex-wrap">
+        <Button
+          size="sm"
+          className="gap-1.5"
+          onClick={() => uploadInputRef.current?.click()}
+          disabled={uploadMut.isPending || !data}
+        >
+          {uploadMut.isPending ? (
+            <Loader2 className="size-4 animate-spin" />
+          ) : (
+            <FilePlus2 className="size-4" />
+          )}
+          Unggah File
+        </Button>
+        <input
+          ref={uploadInputRef}
+          type="file"
+          className="hidden"
+          onChange={(e) => {
+            onPickUpload(e.target.files?.[0]);
+            e.target.value = "";
+          }}
+        />
+        <Button
+          size="sm"
+          variant="outline"
+          className="gap-1.5"
+          onClick={() => setMkdirOpen(true)}
+          disabled={!data}
+        >
+          <FolderPlus className="size-4" />
+          Folder Baru
+        </Button>
+        <p className="text-[11px] text-muted-foreground flex items-center gap-1.5 ml-auto">
+          <AlertTriangle className="size-3 text-amber-500" />
+          Akses penuh — hapus bersifat permanen.
+        </p>
+      </div>
+
       {/* Breadcrumb */}
       <div className="border-b border-border px-4 py-2">
         <Breadcrumb>
@@ -204,13 +347,6 @@ export function MegaMountView({
       <div className="flex-1 min-h-0">
         <ScrollArea className="h-full">
           <div className="p-4 space-y-4">
-            <p className="text-[11px] text-muted-foreground flex items-center gap-1.5">
-              <AlertTriangle className="size-3" />
-              Mount bersifat baca-saja — upload &amp; hapus file lewat folder
-              materi/tugas seperti biasa. File di sini adalah isi asli akun
-              MEGA.
-            </p>
-
             {isLoading ? (
               <div className="space-y-2">
                 {Array.from({ length: 6 }).map((_, i) => (
@@ -218,10 +354,16 @@ export function MegaMountView({
                 ))}
               </div>
             ) : error ? (
-              <div className="text-center py-12 text-sm">
-                <p className="text-destructive mb-3">
+              <div className="text-center py-12 text-sm max-w-md mx-auto">
+                <AlertTriangle className="size-10 mx-auto mb-3 text-destructive/60" />
+                <p className="text-destructive mb-2">
                   {error instanceof Error ? error.message : "Gagal memuat"}
                 </p>
+                {(error as Error & { hint?: string }).hint ? (
+                  <p className="text-xs text-muted-foreground mb-3">
+                    {(error as Error & { hint?: string }).hint}
+                  </p>
+                ) : null}
                 <Button size="sm" variant="outline" onClick={() => refetch()}>
                   <RefreshCw className="size-4" /> Coba lagi
                 </Button>
@@ -229,19 +371,17 @@ export function MegaMountView({
             ) : (data?.entries.length ?? 0) === 0 ? (
               <div className="text-center py-12 text-sm text-muted-foreground">
                 <Folder className="size-8 mx-auto mb-2 opacity-50" />
-                Folder MEGA kosong.
+                Folder ini kosong. Unggah file atau buat folder baru.
               </div>
             ) : (
               <div className="space-y-1">
                 {data?.entries.map((entry) => {
                   if (entry.isFolder) {
                     return (
-                      <button
+                      <div
                         key={entry.nodeId}
-                        type="button"
-                        onDoubleClick={() => setNodeId(entry.nodeId)}
+                        className="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg hover:bg-secondary/60 text-left transition-colors group cursor-pointer"
                         onClick={() => setNodeId(entry.nodeId)}
-                        className="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg hover:bg-secondary/60 text-left transition-colors group"
                       >
                         <span className="rounded-md bg-red-500/10 p-1.5 shrink-0">
                           <Folder className="size-4 text-red-500" />
@@ -252,10 +392,22 @@ export function MegaMountView({
                           </span>
                           <span className="block text-[11px] text-muted-foreground">
                             Folder
+                            {entry.timestamp
+                              ? ` · ${formatDistanceToNow(
+                                  new Date(entry.timestamp),
+                                  { addSuffix: true, locale: localeId }
+                                )}`
+                              : ""}
                           </span>
                         </span>
+                        <RowMenu
+                          entry={entry}
+                          onRename={() => setRenameTarget(entry)}
+                          onMove={() => setMoveTarget(entry)}
+                          onDelete={() => setDeleteTarget(entry)}
+                        />
                         <ChevronRight className="size-4 text-muted-foreground opacity-0 group-hover:opacity-100 shrink-0" />
-                      </button>
+                      </div>
                     );
                   }
                   const fileItem: CloudFileItem = {
@@ -274,15 +426,14 @@ export function MegaMountView({
                       name: data.account.name ?? "MEGA",
                       username: data.account.email ?? "mega",
                     },
-                    visibility: "PUBLIC",
+                    visibility: "ALL",
                     raw: true,
                   };
                   return (
-                    <button
+                    <div
                       key={entry.nodeId}
-                      type="button"
+                      className="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg hover:bg-secondary/60 text-left transition-colors cursor-pointer"
                       onClick={() => setPreviewFile(fileItem)}
-                      className="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg hover:bg-secondary/60 text-left transition-colors"
                     >
                       <span className="rounded-md bg-secondary p-1.5 shrink-0 text-muted-foreground">
                         <HardDrive className="size-4" />
@@ -301,7 +452,14 @@ export function MegaMountView({
                             : ""}
                         </span>
                       </span>
-                    </button>
+                      <RowMenu
+                        entry={entry}
+                        onRename={() => setRenameTarget(entry)}
+                        onMove={() => setMoveTarget(entry)}
+                        onDelete={() => setDeleteTarget(entry)}
+                        downloadUrl={downloadUrl(entry)}
+                      />
+                    </div>
                   );
                 })}
               </div>
@@ -312,6 +470,335 @@ export function MegaMountView({
 
       {/* Preview file MEGA (image/pdf/audio/video/teks/docx) */}
       <FilePreview file={previewFile} onClose={() => setPreviewFile(null)} />
+
+      {/* Dialog: folder baru */}
+      <NameDialog
+        open={mkdirOpen}
+        onOpenChange={setMkdirOpen}
+        title="Folder Baru"
+        description={`Dibuat di dalam ${
+          data?.path?.[data.path.length - 1]?.name ?? "MEGA root"
+        }.`}
+        submitLabel="Buat"
+        onSubmit={(name) => {
+          opsMut.mutate({
+            action: "mkdir",
+            parentNodeId: nodeId,
+            name,
+          });
+          setMkdirOpen(false);
+        }}
+        pending={opsMut.isPending}
+      />
+
+      {/* Dialog: rename */}
+      <NameDialog
+        open={!!renameTarget}
+        onOpenChange={(o) => !o && setRenameTarget(null)}
+        title="Ganti Nama"
+        description={`Rename "${renameTarget?.name ?? ""}".`}
+        initial={renameTarget?.name ?? ""}
+        submitLabel="Rename"
+        onSubmit={(name) => {
+          if (!renameTarget) return;
+          opsMut.mutate({
+            action: "rename",
+            nodeId: renameTarget.nodeId,
+            name,
+          });
+          setRenameTarget(null);
+        }}
+        pending={opsMut.isPending}
+      />
+
+      {/* Dialog: pindah */}
+      <MoveDialog
+        open={!!moveTarget}
+        onOpenChange={(o) => !o && setMoveTarget(null)}
+        entry={moveTarget}
+        folders={foldersInCurrentDir}
+        currentRootId={nodeId}
+        onMove={(targetParentId) => {
+          if (!moveTarget) return;
+          opsMut.mutate({
+            action: "move",
+            nodeId: moveTarget.nodeId,
+            targetParentId,
+          });
+          setMoveTarget(null);
+        }}
+        pending={opsMut.isPending}
+      />
+
+      {/* Konfirmasi hapus permanen */}
+      <AlertDialog
+        open={!!deleteTarget}
+        onOpenChange={(o) => !o && setDeleteTarget(null)}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              Hapus permanen dari MEGA Cloud?
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              <b>{deleteTarget?.name}</b>
+              {deleteTarget?.isFolder
+                ? " beserta SELURUH isi foldernya"
+                : ""}{" "}
+              akan dihapus permanen dari MEGA — tidak masuk trash dan tidak
+              bisa dikembalikan. File tugas/lampiran yang terhubung dengannya
+              juga ikut terhapus dari aplikasi.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Batal</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              disabled={opsMut.isPending}
+              onClick={(e) => {
+                e.preventDefault();
+                if (!deleteTarget) return;
+                opsMut.mutate({ action: "delete", nodeId: deleteTarget.nodeId });
+                setDeleteTarget(null);
+              }}
+            >
+              {opsMut.isPending ? (
+                <Loader2 className="size-4 animate-spin mr-2" />
+              ) : null}
+              Hapus Permanen
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
+  );
+}
+
+// ───────────────────────── Row action menu ─────────────────────────
+
+function RowMenu({
+  entry,
+  onRename,
+  onMove,
+  onDelete,
+  downloadUrl,
+}: {
+  entry: MegaEntry;
+  onRename: () => void;
+  onMove: () => void;
+  onDelete: () => void;
+  downloadUrl?: string;
+}) {
+  return (
+    <span
+      className="shrink-0"
+      onClick={(e) => e.stopPropagation()}
+      onDoubleClick={(e) => e.stopPropagation()}
+    >
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <Button
+            variant="ghost"
+            size="icon"
+            className="size-7 opacity-0 group-hover:opacity-100 data-[state=open]:opacity-100"
+            title="Aksi"
+          >
+            <MoreVertical className="size-4" />
+          </Button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="end" className="w-44">
+          {downloadUrl ? (
+            <>
+              <DropdownMenuItem asChild>
+                <a href={downloadUrl} download={entry.name}>
+                  <Download className="size-4" /> Unduh
+                </a>
+              </DropdownMenuItem>
+              <DropdownMenuSeparator />
+            </>
+          ) : null}
+          <DropdownMenuItem onClick={onRename}>
+            <Pencil className="size-4" /> Rename
+          </DropdownMenuItem>
+          <DropdownMenuItem onClick={onMove}>
+            <FolderInput className="size-4" /> Pindahkan
+          </DropdownMenuItem>
+          <DropdownMenuSeparator />
+          <DropdownMenuItem
+            className="text-destructive focus:text-destructive"
+            onClick={onDelete}
+          >
+            <Trash2 className="size-4" /> Hapus permanen
+          </DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>
+    </span>
+  );
+}
+
+// ───────────────────────── Name dialog (mkdir / rename) ─────────────────────────
+
+function NameDialog({
+  open,
+  onOpenChange,
+  title,
+  description,
+  initial = "",
+  submitLabel,
+  onSubmit,
+  pending,
+}: {
+  open: boolean;
+  onOpenChange: (o: boolean) => void;
+  title: string;
+  description: string;
+  initial?: string;
+  submitLabel: string;
+  onSubmit: (name: string) => void;
+  pending: boolean;
+}) {
+  const [value, setValue] = useState(initial);
+  const [prevOpen, setPrevOpen] = useState(open);
+  const [prevInitial, setPrevInitial] = useState(initial);
+  if (prevOpen !== open || prevInitial !== initial) {
+    setPrevOpen(open);
+    setPrevInitial(initial);
+    if (open) setValue(initial);
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="sm:max-w-sm">
+        <DialogHeader>
+          <DialogTitle>{title}</DialogTitle>
+          <DialogDescription>{description}</DialogDescription>
+        </DialogHeader>
+        <div className="space-y-1.5">
+          <Label>Nama</Label>
+          <Input
+            value={value}
+            onChange={(e) => setValue(e.target.value)}
+            maxLength={120}
+            autoFocus
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && value.trim()) {
+                onSubmit(value.trim());
+              }
+            }}
+          />
+        </div>
+        <DialogFooter>
+          <Button
+            type="button"
+            variant="ghost"
+            onClick={() => onOpenChange(false)}
+          >
+            Batal
+          </Button>
+          <Button
+            type="button"
+            disabled={pending || !value.trim()}
+            onClick={() => onSubmit(value.trim())}
+          >
+            {pending ? <Loader2 className="size-4 animate-spin mr-2" /> : null}
+            {submitLabel}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+// ───────────────────────── Move dialog ─────────────────────────
+
+function MoveDialog({
+  open,
+  onOpenChange,
+  entry,
+  folders,
+  currentRootId,
+  onMove,
+  pending,
+}: {
+  open: boolean;
+  onOpenChange: (o: boolean) => void;
+  entry: MegaEntry | null;
+  folders: MegaEntry[];
+  currentRootId: string | null;
+  onMove: (targetParentId: string | null) => void;
+  pending: boolean;
+}) {
+  const [selected, setSelected] = useState<string | null>(null);
+  const [prevOpen, setPrevOpen] = useState(open);
+  if (prevOpen !== open) {
+    setPrevOpen(open);
+    if (open) setSelected(null);
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="sm:max-w-sm">
+        <DialogHeader>
+          <DialogTitle>Pindahkan</DialogTitle>
+          <DialogDescription>
+            Pilih folder tujuan untuk “{entry?.name ?? ""}”. Folder lain bisa
+            dipilih setelah pindah ke sana.
+          </DialogDescription>
+        </DialogHeader>
+        <div className="space-y-1.5 max-h-64 overflow-y-auto">
+          {currentRootId ? (
+            <button
+              type="button"
+              onClick={() => setSelected(null)}
+              className={`w-full flex items-center gap-2 px-3 py-2 rounded-lg text-left text-sm ${
+                selected === null
+                  ? "bg-primary/10 text-primary"
+                  : "hover:bg-secondary"
+              }`}
+            >
+              <MegaLogo className="size-3.5" /> MEGA (root)
+            </button>
+          ) : null}
+          {folders
+            .filter((f) => f.nodeId !== entry?.nodeId)
+            .map((f) => (
+              <button
+                key={f.nodeId}
+                type="button"
+                onClick={() => setSelected(f.nodeId)}
+                className={`w-full flex items-center gap-2 px-3 py-2 rounded-lg text-left text-sm ${
+                  selected === f.nodeId
+                    ? "bg-primary/10 text-primary"
+                    : "hover:bg-secondary"
+                }`}
+              >
+                <Folder className="size-4" /> {f.name}
+              </button>
+            ))}
+          {currentRootId && folders.length === 0 ? (
+            <p className="text-xs text-muted-foreground text-center py-4">
+              Belum ada folder lain di folder ini.
+            </p>
+          ) : null}
+        </div>
+        <DialogFooter>
+          <Button
+            type="button"
+            variant="ghost"
+            onClick={() => onOpenChange(false)}
+          >
+            Batal
+          </Button>
+          <Button
+            type="button"
+            disabled={pending}
+            onClick={() => onMove(selected)}
+          >
+            {pending ? <Loader2 className="size-4 animate-spin mr-2" /> : null}
+            Pindahkan
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }

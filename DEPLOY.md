@@ -42,13 +42,31 @@ bunx prisma db push
 3. Deploy. Build command default (`next build`) sudah menjalankan `prisma generate` via `postinstall`.
 4. Buka app → login `admin / admin123` → **WAJIB ganti password**.
 
-### 4. Sambungkan MEGA (storage file cloud & lampiran)
+### 4. Sambungkan MEGA / S3 (storage file cloud & lampiran)
 
 1. Login sebagai **admin** → **Admin Panel → Data & Cloud → Cloud Storage Accounts**.
-2. Tambah akun MEGA (email + password). Aula akan verifikasi koneksi dan menyimpan statusnya.
-3. Setelah tersambung, semua upload (materi, lampiran chat, jawaban form FILE/GAMBAR) otomatis disimpan ke MEGA. Tanpa akun MEGA aktif, upload file akan ditolak (MEGA adalah storage wajib).
+2. Tambah akun **MEGA** (email + password) — atau **S3-compatible** (Cloudflare R2 / Backblaze B2 / DO Spaces / Wasabi / MinIO) sebagai alternatif yang tidak pernah memblokir login dari server.
+3. Setelah tersambung, semua upload (materi, lampiran chat, jawaban form FILE/GAMBAR, foto profil) otomatis tersimpan ke cloud. Urutan prioritas: MEGA dulu → bila gagal/diblokir, otomatis fallback ke S3. Tanpa akun cloud aktif, upload file ditolak dengan pesan yang jelas.
+4. Guru/admin juga bisa mengelola isi akun MEGA langsung dari aplikasi: **Cloud & Tugas → kartu MEGA (mount)** — unggah file, buat folder, rename, pindah, hapus permanen, unduh, preview.
 
-> Tips: MEGA membatasi percobaan login berulang (rate limit ±5–10 menit). Jika status akun "rate limited", tunggu sebentar lalu tekan **Sync** ulang di panel.
+> **Anti rate-limit MEGA**: setelah login password berhasil, session MEGA (sid + master key) disimpan di database — `CloudAccount.sessionData`. Proses berikutnya (termasuk cold-start lambda Vercel) memulihkan session tersebut **tanpa login ulang**, sehingga MEGA tidak lagi menandai aplikasi sebagai login berulang. Login gagal memicu cooldown 60 detik agar akun yang bermasalah tidak terus "dipalu".
+
+> **Akun MEGA kena EBLOCKED (diblokir)?** Itu blokir level akun dari MEGA, bukan bug aplikasi. Solusinya: (a) login ke mega.nz lewat browser — kadang ada captcha/verifikasi yang harus diselesaikan, (b) ganti ke akun MEGA baru lewat Admin Panel, atau (c) pakai S3/Cloudflare R2 (gratis 10 GB, tanpa kartu kredit, tidak pernah memblokir server).
+
+#### Setup Cloudflare R2 (alternatif gratis 10 GB)
+
+1. Buat akun [Cloudflare](https://dash.cloudflare.com) → **R2 Object Storage** → **Create bucket** (mis. `aula-files`).
+2. **Manage API Tokens** → **Create API token** → permission **Object Read & Write** untuk bucket tadi.
+3. Salin **Access Key ID** dan **Secret Access Key**.
+4. Di Aula: **Admin Panel → Data & Cloud → Tambah** → Provider **S3-compatible**:
+   - Endpoint: `https://<accountid>.r2.cloudflarestorage.com`
+   - Region: `auto`
+   - Bucket + Access Key ID + Secret Access Key dari langkah 3.
+5. Tekan **Tes Akun** — status harus "Terhubung".
+
+### 5. Profil user (semua role)
+
+Semua user (admin/guru/siswa) dapat mengatur profilnya sendiri lewat tombol kartu user di sidebar kiri bawah: nama, bio, warna avatar, **foto profil** (upload ke cloud), dan ganti password. **Username tidak bisa diubah** — dipakai sebagai identitas login permanen.
 
 ### Akun demo (seed)
 
@@ -345,24 +363,23 @@ Bagian **Admin Panel → Data & Cloud → Database Connections** memungkinkan ad
 - Tombol **Tes Koneksi** menjalankan `MongoClient.connect()` + ping, mengukur latensi, dan menyimpan `lastStatus`/`lastError`/`latencyMs`.
 - Koneksi di panel ini **HANYA untuk monitoring**. DB aplikasi Aula sendiri diatur via env `DATABASE_URL`, bukan via panel ini.
 
-### 3. Tambah akun MEGA untuk storage file cloud
+### 3. Tambah akun cloud (MEGA / S3) untuk storage file cloud
 
-Bagian **Admin Panel → Data & Cloud → Cloud Storage Accounts** memungkinkan admin mendaftar akun MEGA. Aplikasi otomatis:
+Bagian **Admin Panel → Data & Cloud → Cloud Storage Accounts** memungkinkan admin mendaftar akun MEGA dan/atau S3-compatible. Aplikasi otomatis:
 
-- Memilih akun MEGA aktif (`active=true`, `lastStatus="connected"`) dengan **fileCount terkecil** (round-robin sederhana) untuk upload berikutnya.
-- Jika tidak ada akun MEGA terhubung ATAU upload gagal → file otomatis disimpan di filesystem lokal (fallback aman).
-- Saat file dihapus, storageKey dengan prefix `mega:<accountId>:<nodeId>` diparse, file dihapus dari MEGA, dan `fileCount` akun dikurangi.
+- Memilih akun MEGA aktif (`active=true`, `lastStatus != "error"`) dengan **fileCount terkecil** (round-robin sederhana) untuk upload berikutnya.
+- Jika tidak ada akun MEGA aktif ATAU MEGA gagal (mis. EBLOCKED/rate limit) → otomatis fallback ke akun **S3-compatible** aktif. Tanpa keduanya → upload ditolak dengan pesan jelas.
+- Session MEGA (sid + master key) dipersist di `CloudAccount.sessionData` — login password hanya terjadi sekali; proses lain memulihkan session langsung (anti rate-limit).
+- Saat file dihapus, storageKey dengan prefix `mega:<accountId>:<nodeId>` atau `s3:<accountId>:<objectKey>` diparse, blob dihapus dari storage terkait, dan `fileCount` akun dikurangi.
 
 Langkah setup:
 
-1. Buat akun MEGA (gratis 20 GB di [mega.nz](https://mega.nz)).
+1. Buat akun MEGA (gratis 20 GB di [mega.nz](https://mega.nz)) — atau bucket S3/R2 (lihat panduan R2 di bagian Quick Start).
 2. Di panel admin → Data & Cloud → Cloud Storage Accounts → **Tambah**:
    - Nama (cth: `MEGA Pribadi`)
-   - Provider: `mega`
-   - Email + password akun MEGA
-   - (Opsional) Master Key — biarkan kosong untuk login biasa
-3. Setelah dibuat, klik **Tes Akun** untuk verifikasi login + baca kuota. Status berubah `connected` dan kuota terlihat di progress bar.
-4. Upload file cloud berikutnya akan otomatis tersimpan di MEGA.
+   - Provider: `mega` (email + password) atau `s3` (endpoint/region/bucket/access key/secret key)
+3. Setelah dibuat, klik **Tes Akun** untuk verifikasi login + baca kuota. Status berubah `connected` dan kuota terlihat di progress bar. Jika gagal, `lastError` ditampilkan apa adanya (termasuk pesan EBLOCKED).
+4. Upload file cloud berikutnya akan otomatis tersimpan di akun tersebut.
 
 ### 4. Catatan keamanan MEGA password
 

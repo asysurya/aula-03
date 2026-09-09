@@ -60,11 +60,9 @@ export async function POST(req: NextRequest) {
     try {
       stored = await saveFile(file.name, mimetype, bytes);
     } catch (e) {
+      // Pesan error dari saveFile sudah ramah-user — tampilkan langsung.
       const msg = e instanceof Error ? e.message : "SAVE_FAILED";
-      if (msg === "MEGA_NOT_CONFIGURED") {
-        return errorResponse("MEGA belum dikonfigurasi. Admin harus menambahkan akun MEGA di Admin Panel → Data & Cloud.", 400);
-      }
-      return errorResponse(msg, 500);
+      return errorResponse(msg, 502);
     }
     const row = await db.cloudFile.create({
       data: {

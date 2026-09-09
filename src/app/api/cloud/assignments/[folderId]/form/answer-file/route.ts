@@ -71,9 +71,14 @@ export async function POST(
   const bytes = Buffer.from(await file.arrayBuffer());
   const saved = await saveFile(file.name, mimetype, bytes).catch((e) => {
     console.error("[form answer-file] saveFile failed:", e);
-    return null;
+    return { storageKey: null, size: 0, cloudAccountId: null, error: e } as const;
   });
-  if (!saved) return errorResponse("UPLOAD_FAILED", 500);
+  if (!saved || saved.storageKey === null) {
+    const msg = saved && "error" in saved && saved.error instanceof Error
+      ? saved.error.message
+      : "UPLOAD_FAILED";
+    return errorResponse(msg, 502);
+  }
 
   const cloudFile = await db.cloudFile.create({
     data: {

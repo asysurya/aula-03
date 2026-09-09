@@ -96,17 +96,10 @@ export async function POST(req: NextRequest) {
   try {
     stored = await saveFile(file.name, mimetype, bytes);
   } catch (e) {
+    // Pesan error dari saveFile sudah ramah-user (deskripsi MEGA/S3 lengkap
+    // dalam bahasa Indonesia) — tampilkan langsung.
     const msg = e instanceof Error ? e.message : "SAVE_FAILED";
-    if (msg === "MEGA_NOT_CONFIGURED") {
-      return Response.json({ error: "MEGA belum dikonfigurasi. Admin harus menambahkan akun MEGA." }, { status: 400 });
-    }
-    if (msg === "MEGA_TIMEOUT") {
-      return Response.json({ error: "Upload timeout. File terlalu besar atau koneksi lambat." }, { status: 504 });
-    }
-    if (msg.includes("EBLOCKED") || msg.includes("User blocked")) {
-      return Response.json({ error: "Akun MEGA diblokir sementara. Tunggu 5-10 menit." }, { status: 429 });
-    }
-    return Response.json({ error: "Gagal upload: " + msg }, { status: 500 });
+    return Response.json({ error: msg }, { status: 502 });
   }
 
   // Create the CloudFile row with expiresAt set (temp chat attachment).
