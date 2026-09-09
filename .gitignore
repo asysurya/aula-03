@@ -1,0 +1,35 @@
+# dependencies
+node_modules
+.pnp
+.pnp.*
+
+# next.js
+.next/
+out/
+build/
+dist/
+
+# env files (JANGAN commit kredensial!)
+.env
+.env.*
+!.env.example
+
+# logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# misc
+.DS_Store
+*.pem
+*.tsbuildinfo
+next-env.d.ts
+
+# vercel
+.vercel
+
+# runtime uploads (fallback lokal saat MEGA tidak tersedia)
+uploads/
+upload/

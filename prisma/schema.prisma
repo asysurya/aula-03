@@ -1,0 +1,461 @@
+// Aula — Forum diskusi kelas modern
+// Schema is Postgres-compatible (avoid SQLite-only features) for easy Vercel+Supabase migration.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mongodb"
+  url      = env("DATABASE_URL")
+}
+
+// ───────────────────────── Users & Auth ─────────────────────────
+
+model User {
+  id          String   @id @default(cuid()) @map("_id")
+  username    String   @unique
+  name        String
+  password    String
+  role        Role     @default(STUDENT)
+  avatarColor String   @default("emerald")
+  avatarUrl   String?
+  bio         String?
+  status      String   @default("offline")
+  lastSeen    DateTime @default(now())
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  classroomMemberships ClassroomMember[]
+  groupMemberships     GroupMember[]
+  groupsCreated        Group[]
+  sentMessages         Message[]
+  dmConversations1     DMConversation[]  @relation("DMUser1")
+  dmConversations2     DMConversation[]  @relation("DMUser2")
+  cloudFolders         CloudFolder[]
+  cloudFiles           CloudFile[]
+  assignmentsCreated   Assignment[]
+  submissions          Submission[]
+  docsCreated          SharedDoc[]
+  docCollaborators     DocCollaborator[]
+  presence             PresenceRecord?
+  readReceipts         ReadReceipt[]
+  folderGrants         FolderAccess[]
+  fileGrants           FileAccess[]
+  reactions            MessageReaction[]
+  formAttempts         FormAttempt[]
+}
+
+enum Role {
+  ADMIN
+  GURU
+  STUDENT
+}
+
+enum MemberRole {
+  TEACHER
+  STUDENT
+}
+
+// ───────────────────────── Classrooms ─────────────────────────
+
+model Classroom {
+  id          String   @id @default(cuid()) @map("_id")
+  name        String
+  description String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  members  ClassroomMember[]
+  messages Message[]
+  folders  CloudFolder[]
+  groups   Group[]
+}
+
+model ClassroomMember {
+  id          String     @id @default(cuid()) @map("_id")
+  classroomId String
+  userId      String
+  role        MemberRole @default(STUDENT)
+  joinedAt    DateTime   @default(now())
+
+  classroom Classroom @relation(fields: [classroomId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  user      User      @relation(fields: [userId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@unique([classroomId, userId])
+}
+
+// ───────────────────────── Groups ─────────────────────────
+
+model Group {
+  id                 String   @id @default(cuid()) @map("_id")
+  name               String
+  description        String?
+  classroomId        String?
+  createdBy          String
+  isPrivate          Boolean  @default(true)
+  inviteCode         String   @unique
+  allowStudentInvite Boolean  @default(false)
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  classroom Classroom?    @relation(fields: [classroomId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  creator   User          @relation(fields: [createdBy], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  members   GroupMember[]
+  messages  Message[]
+}
+
+model GroupMember {
+  id       String   @id @default(cuid()) @map("_id")
+  groupId  String
+  userId   String
+  joinedAt DateTime @default(now())
+
+  group Group @relation(fields: [groupId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  user  User  @relation(fields: [userId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@unique([groupId, userId])
+}
+
+// ───────────────────────── DMs ─────────────────────────
+
+model DMConversation {
+  id        String   @id @default(cuid()) @map("_id")
+  user1Id   String
+  user2Id   String
+  createdAt DateTime @default(now())
+
+  user1    User      @relation("DMUser1", fields: [user1Id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  user2    User      @relation("DMUser2", fields: [user2Id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  messages Message[]
+
+  @@unique([user1Id, user2Id])
+}
+
+// ───────────────────────── Messages ─────────────────────────
+
+model Message {
+  id          String    @id @default(cuid()) @map("_id")
+  content     String
+  senderId    String
+  classroomId String?
+  groupId     String?
+  dmId        String?
+  replyToId   String?
+  createdAt   DateTime  @default(now())
+  editedAt    DateTime?
+
+  sender      User                @relation(fields: [senderId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  classroom   Classroom?          @relation(fields: [classroomId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  group       Group?              @relation(fields: [groupId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  dm          DMConversation?     @relation(fields: [dmId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  replyTo     Message?            @relation("MessageReply", fields: [replyToId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  replies     Message[]           @relation("MessageReply")
+  receipts    ReadReceipt[]
+  attachments MessageAttachment[]
+  reactions   MessageReaction[]
+
+  @@index([classroomId, createdAt])
+  @@index([groupId, createdAt])
+  @@index([dmId, createdAt])
+  @@index([senderId, createdAt])
+  @@index([replyToId])
+}
+
+model MessageReaction {
+  id        String   @id @default(cuid()) @map("_id")
+  messageId String
+  userId    String
+  emoji     String
+  createdAt DateTime @default(now())
+
+  message Message @relation(fields: [messageId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  user    User    @relation(fields: [userId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@unique([messageId, userId, emoji])
+  @@index([messageId])
+}
+
+model MessageAttachment {
+  id        String   @id @default(cuid()) @map("_id")
+  messageId String
+  fileId    String
+  createdAt DateTime @default(now())
+
+  message Message   @relation(fields: [messageId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  file    CloudFile @relation(fields: [fileId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([messageId])
+}
+
+model ReadReceipt {
+  id        String   @id @default(cuid()) @map("_id")
+  messageId String
+  userId    String
+  readAt    DateTime @default(now())
+
+  message Message @relation(fields: [messageId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  user    User    @relation(fields: [userId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@unique([messageId, userId])
+}
+
+// ───────────────────────── Presence ─────────────────────────
+
+model PresenceRecord {
+  id       String   @id @default(cuid()) @map("_id")
+  userId   String   @unique
+  lastPing DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+}
+
+// ───────────────────────── Cloud / Files ─────────────────────────
+
+model CloudFolder {
+  id          String     @id @default(cuid()) @map("_id")
+  name        String
+  parentId    String?
+  classroomId String?
+  type        FolderType @default(FOLDER)
+  visibility  Visibility @default(ALL)
+  createdBy   String
+  createdAt   DateTime   @default(now())
+
+  parent     CloudFolder?   @relation("FolderChildren", fields: [parentId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  children   CloudFolder[]  @relation("FolderChildren")
+  files      CloudFile[]
+  docs       SharedDoc[]
+  assignment Assignment?
+  classroom  Classroom?     @relation(fields: [classroomId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  creator    User           @relation(fields: [createdBy], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  grants     FolderAccess[]
+}
+
+enum FolderType {
+  FOLDER
+  ASSIGNMENT
+}
+
+enum Visibility {
+  ALL
+  TEACHERS
+  PRIVATE
+}
+
+model CloudFile {
+  id             String     @id @default(cuid()) @map("_id")
+  name           String
+  folderId       String?
+  uploadedBy     String
+  storageKey     String
+  size           Int
+  mimetype       String
+  visibility     Visibility @default(ALL)
+  cloudAccountId String?
+  expiresAt      DateTime?
+  createdAt      DateTime   @default(now())
+
+  folder       CloudFolder?        @relation(fields: [folderId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  uploader     User                @relation(fields: [uploadedBy], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  cloudAccount CloudAccount?       @relation(fields: [cloudAccountId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  submission   Submission?
+  grants       FileAccess[]
+  attachments  MessageAttachment[]
+  formQuestionImages FormQuestion[] @relation("FormQuestionImage")
+  formAnswerFiles    FormAnswer[]   @relation("FormAnswerFile")
+}
+
+model Assignment {
+  id          String   @id @default(cuid()) @map("_id")
+  folderId    String   @unique
+  title       String
+  description String?
+  deadline    DateTime
+  maxScore    Int?
+  createdBy   String
+  createdAt   DateTime @default(now())
+
+  folder      CloudFolder  @relation(fields: [folderId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  creator     User         @relation(fields: [createdBy], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  submissions Submission[]
+  form        Form?
+}
+
+model Submission {
+  id           String   @id @default(cuid()) @map("_id")
+  assignmentId String
+  userId       String
+  fileId       String?  @unique
+  note         String?
+  submittedAt  DateTime @default(now())
+
+  assignment Assignment @relation(fields: [assignmentId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  user       User       @relation(fields: [userId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  file       CloudFile? @relation(fields: [fileId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@unique([assignmentId, userId])
+}
+
+model SharedDoc {
+  id        String   @id @default(cuid()) @map("_id")
+  title     String
+  content   String   @default("")
+  folderId  String?
+  createdBy String
+  updatedAt DateTime @updatedAt
+  createdAt DateTime @default(now())
+
+  folder        CloudFolder?      @relation(fields: [folderId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  creator       User              @relation(fields: [createdBy], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  collaborators DocCollaborator[]
+}
+
+model DocCollaborator {
+  id     String @id @default(cuid()) @map("_id")
+  docId  String
+  userId String
+
+  doc  SharedDoc @relation(fields: [docId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  user User      @relation(fields: [userId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@unique([docId, userId])
+}
+
+// ───────────────────────── Data & Cloud Admin ─────────────────────────
+
+model DatabaseConnection {
+  id            String    @id @default(cuid()) @map("_id")
+  name          String
+  type          String    @default("mongodb")
+  uri           String
+  isPrimary     Boolean   @default(false)
+  active        Boolean   @default(true)
+  lastStatus    String    @default("unknown")
+  lastCheckedAt DateTime?
+  lastError     String?
+  latencyMs     Int?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+}
+
+model CloudAccount {
+  id            String    @id @default(cuid()) @map("_id")
+  name          String
+  provider      String    @default("mega")
+  email         String?
+  password      String?
+  key           String?
+  active        Boolean   @default(true)
+  lastStatus    String    @default("unknown")
+  lastCheckedAt DateTime?
+  lastError     String?
+  spaceTotal    Int?
+  spaceUsed     Int?
+  fileCount     Int       @default(0)
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  cloudFiles CloudFile[]
+}
+
+// ───────────────────────── Access Control ─────────────────────────
+
+model FolderAccess {
+  id       String @id @default(cuid()) @map("_id")
+  folderId String
+  userId   String
+
+  folder CloudFolder @relation(fields: [folderId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  user   User        @relation(fields: [userId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@unique([folderId, userId])
+}
+
+model FileAccess {
+  id     String @id @default(cuid()) @map("_id")
+  fileId String
+  userId String
+
+  file CloudFile @relation(fields: [fileId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  user User      @relation(fields: [userId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@unique([fileId, userId])
+}
+
+// ───────────────────────── Form Tugas (Anti-nyontek) ─────────────────────────
+// Assignment dapat memiliki satu Form. Siswa mengerjakan lewat form player
+// dengan anti-nyontek: acak soal/opsi, satu soal per layar, timer, deteksi
+// pindah tab & paste, dan penilaian otomatis di server.
+
+model Form {
+  id               String   @id @default(cuid()) @map("_id")
+  assignmentId     String   @unique
+  shuffleQuestions Boolean  @default(true)
+  shuffleOptions   Boolean  @default(true)
+  oneByOne         Boolean  @default(true)
+  preventPaste     Boolean  @default(true)
+  trackTabSwitch   Boolean  @default(true)
+  timeLimitMin     Int?
+  showResult       Boolean  @default(true)
+  createdBy        String
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  assignment Assignment     @relation(fields: [assignmentId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  questions  FormQuestion[]
+  attempts   FormAttempt[]
+}
+
+model FormQuestion {
+  id          String  @id @default(cuid()) @map("_id")
+  formId      String
+  type        String // PG | MULTI_PG | ESSAY | SHORT | FILE | IMAGE
+  text        String
+  points      Int     @default(1)
+  required    Boolean @default(true)
+  order       Int     @default(0)
+  options     String  @default("[]") // JSON [{id,label}]
+  imageFileId String?
+  correct     String? // JSON array of correct option ids (never sent to students before submit)
+
+  form       Form         @relation(fields: [formId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  imageFile  CloudFile?   @relation("FormQuestionImage", fields: [imageFileId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+  answers    FormAnswer[]
+}
+
+model FormAttempt {
+  id          String    @id @default(cuid()) @map("_id")
+  formId      String
+  userId      String
+  startedAt   DateTime  @default(now())
+  submittedAt DateTime?
+  score       Int?
+  maxScore    Int       @default(0)
+  status      String    @default("IN_PROGRESS") // IN_PROGRESS | SUBMITTED
+  violations  String    @default("[]") // JSON [{type,at}]
+  orderSeed   Int       @default(0)
+
+  form    Form         @relation(fields: [formId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  user    User         @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  answers FormAnswer[]
+
+  @@unique([formId, userId])
+  @@index([formId])
+}
+
+model FormAnswer {
+  id         String  @id @default(cuid()) @map("_id")
+  attemptId  String
+  questionId String
+  text       String? // ESSAY / SHORT answer
+  optionIds  String? // JSON array of selected option ids (PG / MULTI_PG)
+  fileId     String? // FILE / IMAGE upload answer
+  score      Int?    // manual grade by teacher (ESSAY / SHORT / FILE)
+
+  attempt  FormAttempt  @relation(fields: [attemptId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  question FormQuestion @relation(fields: [questionId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  file     CloudFile?   @relation("FormAnswerFile", fields: [fileId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+
+  @@unique([attemptId, questionId])
+}
