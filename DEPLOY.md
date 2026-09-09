@@ -37,7 +37,7 @@ bunx prisma db push
    |------|-------|
    | `DATABASE_URL` | `mongodb+srv://<user>:<pass>@<cluster>.mongodb.net/aula` |
    | `NEXTAUTH_SECRET` | hasil `openssl rand -base64 32` |
-   | `NEXTAUTH_URL` | `https://nama-app.vercel.app` |
+   | `NEXTAUTH_URL` | `https://nama-app.vercel.app` — **opsional** (trustHost aktif). Jika tidak dipakai: hapus saja, JANGAN diset string kosong (menyebabkan error build `Invalid URL`) |
 
 3. Deploy. Build command default (`next build`) sudah menjalankan `prisma generate` via `postinstall`.
 4. Buka app → login `admin / admin123` → **WAJIB ganti password**.

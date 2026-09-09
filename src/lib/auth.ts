@@ -30,6 +30,9 @@ export const authOptions: NextAuthOptions = {
     }),
   ],
   session: { strategy: "jwt", maxAge: 30 * 24 * 60 * 60 },
+  // Percayai host dari request (Vercel) — membuat NEXTAUTH_URL opsional
+  // dan mencegah error host-mismatch di serverless deployment.
+  trustHost: true,
   pages: { signIn: "/" },
   callbacks: {
     async jwt({ token, user }) {

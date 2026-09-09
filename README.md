@@ -109,7 +109,7 @@ Panduan lengkap: **[DEPLOY.md](./DEPLOY.md)** (MongoDB Atlas + MEGA + Vercel, pl
 Ringkas:
 
 1. Fork/clone repo ini ke GitHub, lalu **Vercel → Import Project**
-2. Set Environment Variables: `DATABASE_URL`, `NEXTAUTH_SECRET`, `NEXTAUTH_URL`
+2. Set Environment Variables: `DATABASE_URL`, `NEXTAUTH_SECRET` (NEXTAUTH_URL opsional — kalau tidak dipakai, **hapus saja, jangan kosongkan**)
 3. Deploy → buka app → login `admin / admin123`
 4. **Admin Panel → Data & Cloud → Cloud Storage Accounts** → tambahkan akun MEGA (email + password) → **Tes Akun**
 5. Selesai — semua upload (materi, lampiran chat, jawaban form) otomatis tersimpan ke MEGA 🎉
@@ -142,7 +142,7 @@ src/lib/                    # auth, db, storage, mega-storage, presence
 |---|---|---|
 | `DATABASE_URL` | ✅ | Connection string MongoDB |
 | `NEXTAUTH_SECRET` | ✅ | Secret session (openssl rand -base64 32) |
-| `NEXTAUTH_URL` | ✅ | URL dasar aplikasi |
+| `NEXTAUTH_URL` | ⚪ | URL dasar aplikasi — **opsional di Vercel** (`trustHost` aktif); diisi bila pakai custom domain. ⚠️ JANGAN diset string kosong! |
 
 ---
 
