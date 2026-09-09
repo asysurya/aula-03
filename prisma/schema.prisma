@@ -472,3 +472,34 @@ model FormAnswer {
 
   @@unique([attemptId, questionId])
 }
+
+// ── Chunked upload staging (file > 4.5 MB melewati serverless Vercel) ──
+// File besar dipecah jadi chunk ≤ 4 MB, disimpan sementara di MongoDB,
+// lalu dirakit ulang saat "complete" dan diunggah ke MEGA/S3.
+model UploadSession {
+  id         String   @id @default(cuid()) @map("_id")
+  name       String
+  mimetype   String
+  size       Int
+  chunkSize  Int
+  chunkCount Int
+  uploadedBy String
+  createdAt  DateTime @default(now())
+  expiresAt  DateTime
+
+  chunks UploadChunk[]
+
+  @@index([uploadedBy])
+  @@index([expiresAt])
+}
+
+model UploadChunk {
+  id        String @id @default(cuid()) @map("_id")
+  sessionId String
+  idx       Int
+  data      Bytes
+
+  session UploadSession @relation(fields: [sessionId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+
+  @@unique([sessionId, idx])
+}

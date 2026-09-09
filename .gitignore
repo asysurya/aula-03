@@ -31,5 +31,5 @@ next-env.d.ts
 .vercel
 
 # runtime uploads (fallback lokal saat MEGA tidak tersedia)
-uploads/
-upload/
+/uploads/
+/upload/

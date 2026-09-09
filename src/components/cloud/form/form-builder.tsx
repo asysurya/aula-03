@@ -27,6 +27,7 @@ import { Badge } from "@/components/ui/badge";
 import { Card } from "@/components/ui/card";
 import { Switch } from "@/components/ui/switch";
 import { Separator } from "@/components/ui/separator";
+import { uploadSmart } from "@/lib/upload-client";
 import {
   Select,
   SelectContent,
@@ -241,15 +242,13 @@ export function FormBuilder({
   }
 
   async function uploadQuestionImage(localId: string, file: File) {
-    const fd = new FormData();
-    fd.append("file", file);
     try {
-      const res = await fetch(
-        `/api/cloud/assignments/${folderId}/form/image`,
-        { method: "POST", body: fd }
-      );
-      const json = await res.json();
-      if (!res.ok) {
+      const res = await uploadSmart<
+        { file?: { id: string; name: string; storageKey: string }; error?: string } &
+          Record<string, unknown>
+      >(file, { kind: "form-image", folderId });
+      const json = res.json;
+      if (!res.ok || !json.file) {
         toast.error(json?.error || "Gagal mengunggah gambar soal");
         return;
       }

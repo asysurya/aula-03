@@ -10,6 +10,7 @@ import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { UserAvatar } from "@/components/shared/user-avatar";
 import { AVATAR_COLORS } from "@/lib/constants";
+import { uploadSmart } from "@/lib/upload-client";
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
 import { Shield, KeyRound, Loader2, Save, Camera, Trash2, Lock } from "lucide-react";
@@ -76,18 +77,17 @@ export function ProfileView({ me }: { me: MeResponse }) {
     onError: (e: Error) => toast.error(e.message),
   });
 
-  // Upload foto avatar langsung ke cloud (MEGA/S3).
+  // Upload foto avatar langsung ke cloud (MEGA/S3) — file besar otomatis
+  // chunked supaya lolos batas body serverless.
   const avatarUploadMut = useMutation({
     mutationFn: async (file: File) => {
-      const fd = new FormData();
-      fd.append("file", file);
-      const res = await fetch("/api/profile/avatar", {
-        method: "POST",
-        body: fd,
+      const res = await uploadSmart<{ avatarUrl?: string; error?: string }>(file, {
+        kind: "avatar",
       });
-      const json = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(json.error || "Gagal mengunggah foto");
-      return json as { avatarUrl: string };
+      if (!res.ok || !res.json.avatarUrl) {
+        throw new Error(res.json.error || "Gagal mengunggah foto");
+      }
+      return res.json as { avatarUrl: string };
     },
     onSuccess: (data) => {
       setAvatarUrl(data.avatarUrl);

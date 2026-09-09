@@ -14,6 +14,7 @@ import {
 } from "@/components/ui/popover";
 import { FileIcon } from "@/components/cloud/file-icon";
 import { mimeToIcon } from "@/lib/cloud-format";
+import { uploadSmart } from "@/lib/upload-client";
 import {
   ALLOWED_MIMES,
   formatBytes,
@@ -140,29 +141,33 @@ export function MessageInput({
     }));
     setUploading((prev) => [...prev, ...staged]);
 
-    // Upload each in parallel.
+    // Upload each in parallel (file besar otomatis chunked + progress).
     await Promise.all(
       staged.map(async (s, idx) => {
         const f = toAdd[idx];
         try {
-          const fd = new FormData();
-          fd.append("file", f);
-          fd.append("kind", conversation.kind);
-          fd.append("id", conversation.id);
-          const res = await fetch("/api/chat/attachments", {
-            method: "POST",
-            body: fd,
+          const res = await uploadSmart<{
+            fileId?: string;
+            name?: string;
+            size?: number;
+            mimetype?: string;
+            storageKey?: string;
+            error?: string;
+          }>(f, {
+            kind: "attachment",
+            convKind: conversation.kind as "classroom" | "group" | "dm",
+            convId: conversation.id,
           });
-          const data = await res.json().catch(() => null);
+          const data = res.json;
           if (!res.ok || !data?.fileId) {
             throw new Error(data?.error || `Upload gagal (${res.status})`);
           }
           const result: PendingAttachment = {
             fileId: data.fileId,
-            name: data.name,
-            size: data.size,
-            mimetype: data.mimetype,
-            storageKey: data.storageKey,
+            name: data.name as string,
+            size: data.size as number,
+            mimetype: data.mimetype as string,
+            storageKey: data.storageKey as string,
           };
           setPending((prev) => [...prev, result]);
           setUploading((prev) =>

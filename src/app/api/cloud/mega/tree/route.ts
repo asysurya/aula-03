@@ -5,6 +5,7 @@ import {
   megaList,
   megaAccountInfo,
   describeMegaError,
+  isAccountLevelMegaError,
   type MegaAccountLike,
 } from "@/lib/mega-storage";
 import { formatBytes } from "@/lib/cloud-format";
@@ -98,13 +99,14 @@ export async function GET(req: NextRequest) {
     });
   } catch (e) {
     const detail = describeMegaError(e);
-    // Update status jujur — supaya panel admin & pemilihan akun
-    // otomatis melewati akun yang bermasalah.
+    // Update status jujur — tapi HANYA untuk error level-akun (diblokir /
+    // kredensial). Error sesi (ESID dsb.) tidak menandai akun error
+    // supaya akun tetap dipakai setelah relogin otomatis.
     try {
       await db.cloudAccount.update({
         where: { id: account.id },
         data: {
-          lastStatus: "error",
+          lastStatus: isAccountLevelMegaError(e) ? "error" : account.lastStatus,
           lastError: detail,
           lastCheckedAt: new Date(),
         },

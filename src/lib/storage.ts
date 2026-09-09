@@ -2,6 +2,7 @@ import { randomBytes } from "crypto";
 import { promises as fs } from "fs";
 import path from "path";
 import { db } from "@/lib/db";
+import { fileCacheDelete } from "@/lib/file-cache";
 import {
   megaUploadTo,
   megaDownload,
@@ -306,6 +307,8 @@ export async function getFile(storageKey: string): Promise<{
  * Also decrements the owning cloudAccount.fileCount when applicable.
  */
 export async function deleteFile(storageKey: string): Promise<void> {
+  // Blob dihapus → evict dari LRU cache supaya tidak menyajikan file mati.
+  fileCacheDelete(storageKey);
   const mega = parseMegaKey(storageKey);
   if (mega) {
     const account = await db.cloudAccount.findUnique({

@@ -28,6 +28,7 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
+import { uploadSmart } from "@/lib/upload-client";
 import { Card } from "@/components/ui/card";
 import { Progress } from "@/components/ui/progress";
 import { Separator } from "@/components/ui/separator";
@@ -328,16 +329,16 @@ export function FormPlayer({
       toast.error("Soal ini meminta upload gambar");
       return;
     }
-    const fd = new FormData();
-    fd.append("file", file);
-    fd.append("questionId", questionId);
     try {
-      const res = await fetch(
-        `/api/cloud/assignments/${folderId}/form/answer-file`,
-        { method: "POST", body: fd }
-      );
-      const json = await res.json();
-      if (!res.ok) {
+      const res = await uploadSmart<
+        { file?: { id: string; name: string }; error?: string } & Record<
+          string,
+          unknown
+        >
+      >(file, { kind: "answer-file", folderId, questionId });
+      const json = res.json;
+      const uploaded = json.file;
+      if (!res.ok || !uploaded) {
         toast.error(json?.error || "Gagal mengunggah jawaban");
         return;
       }
@@ -346,12 +347,12 @@ export function FormPlayer({
         [questionId]: {
           text: "",
           optionIds: [],
-          fileId: json.file.id,
-          fileName: json.file.name,
+          fileId: uploaded.id,
+          fileName: uploaded.name,
         },
       }));
       dirtyRef.current = true;
-      toast.success("File terunggah (MEGA)");
+      toast.success("File terunggah (cloud)");
     } catch {
       toast.error("Gagal mengunggah jawaban");
     }

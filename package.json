@@ -1,20 +1,20 @@
 {
-  "name": "aula",
-  "version": "2.0.0",
+  "name": "nextjs_tailwind_shadcn_ts",
+  "version": "0.2.1",
   "private": true,
-  "description": "Aula — Forum diskusi kelas modern: chat realtime, cloud storage MEGA, dan tugas berbasis form anti-nyontek.",
-  "engines": {
-    "node": ">=20"
-  },
   "scripts": {
-    "dev": "next dev -p 3000",
-    "build": "prisma generate && next build",
-    "start": "next start",
+    "dev": "next dev -p 3000 2>&1 | tee dev.log",
+    "build": "next build && (cp -r .next/static .next/standalone/.next/ 2>/dev/null || true) && (cp -r public .next/standalone/ 2>/dev/null || true)",
+    "start": "NODE_ENV=production node .next/standalone/server.js",
+    "start:bun": "NODE_ENV=production bun .next/standalone/server.js",
     "lint": "eslint .",
     "postinstall": "prisma generate || npx prisma generate || true",
-    "db:push": "prisma db push",
+    "db:push": "prisma db push --accept-data-loss",
+    "db:seed": "node scripts/seed.js || bun run scripts/seed.ts",
+    "vercel-build": "prisma generate && next build",
     "db:generate": "prisma generate",
-    "db:seed": "bun run scripts/seed.ts"
+    "db:migrate": "prisma migrate dev",
+    "db:reset": "prisma migrate reset"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1128.0",
@@ -71,6 +71,7 @@
     "next-auth": "^4.24.11",
     "next-intl": "^4.3.4",
     "next-themes": "^0.4.6",
+    "pptx-preview": "^1.0.7",
     "prisma": "^6.11.1",
     "react": "^19.0.0",
     "react-day-picker": "^9.8.0",
@@ -86,6 +87,7 @@
     "tailwindcss-animate": "^1.0.7",
     "uuid": "^11.1.0",
     "vaul": "^1.1.2",
+    "xlsx": "^0.18.5",
     "z-ai-web-dev-sdk": "^0.0.18",
     "zod": "^4.0.2",
     "zustand": "^5.0.6"

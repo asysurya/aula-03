@@ -11,6 +11,7 @@ import {
   CheckCircle2,
   ClipboardCheck,
   Download,
+  Eye,
   Loader2,
   ShieldAlert,
   Users,
@@ -22,6 +23,8 @@ import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Card } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
+import { FilePreview } from "@/components/cloud/file-preview";
+import type { CloudFileItem } from "@/lib/cloud-format";
 import { cn } from "@/lib/utils";
 import {
   questionTypeMeta,
@@ -175,9 +178,29 @@ function AttemptCard({
   onGraded: () => void;
 }) {
   const [open, setOpen] = useState(false);
+  const [previewFile, setPreviewFile] = useState<CloudFileItem | null>(null);
   const answerByQ = new Map(attempt.answers.map((a) => [a.questionId, a]));
 
   const submitted = attempt.status === "SUBMITTED";
+
+  const toPreviewItem = (
+    f: NonNullable<FormAnswerDTO["file"]>
+  ): CloudFileItem => ({
+    id: f.id,
+    name: f.name,
+    size: f.size,
+    mimetype: f.mimetype,
+    storageKey: f.storageKey,
+    cloudAccountId: null,
+    createdAt: new Date().toISOString(),
+    uploadedBy: "",
+    uploader: {
+      id: attempt.user.id,
+      name: attempt.user.name,
+      username: attempt.user.username,
+    },
+    visibility: "ALL",
+  });
 
   return (
     <Card className="overflow-hidden">
@@ -267,11 +290,15 @@ function AttemptCard({
                 answer={answerByQ.get(q.id)}
                 submitted={submitted}
                 onGraded={onGraded}
+                onPreviewFile={(f) => setPreviewFile(toPreviewItem(f))}
               />
             ))}
           </div>
         </div>
       ) : null}
+
+      {/* Pratinjau file jawaban — tanpa download */}
+      <FilePreview file={previewFile} onClose={() => setPreviewFile(null)} />
     </Card>
   );
 }
@@ -283,6 +310,7 @@ function AnswerRow({
   answer,
   submitted,
   onGraded,
+  onPreviewFile,
 }: {
   folderId: string;
   q: FormQuestionDTO;
@@ -290,6 +318,7 @@ function AnswerRow({
   answer: ReviewAnswer | undefined;
   submitted: boolean;
   onGraded: () => void;
+  onPreviewFile: (file: NonNullable<FormAnswerDTO["file"]>) => void;
 }) {
   const meta = questionTypeMeta(q.type);
   const [scoreInput, setScoreInput] = useState<string>(
@@ -412,16 +441,29 @@ function AnswerRow({
 
       {/* File answer */}
       {answer?.file ? (
-        <a
-          href={`/api/storage/${answer.file.storageKey}`}
-          target="_blank"
-          rel="noopener noreferrer"
-          download={answer.file.name}
-          className="inline-flex items-center gap-2 rounded-md border border-border px-3 py-1.5 text-sm hover:bg-accent/40 transition-colors"
-        >
-          <Download className="size-3.5" />
-          <span className="truncate max-w-[240px]">{answer.file.name}</span>
-        </a>
+        <div className="flex items-center gap-1.5 flex-wrap">
+          <Button
+            size="sm"
+            variant="outline"
+            className="h-8 gap-2"
+            onClick={() => onPreviewFile(answer.file!)}
+            title="Pratinjau tanpa download"
+          >
+            <Eye className="size-3.5" />
+            <span className="truncate max-w-[240px]">{answer.file.name}</span>
+          </Button>
+          <Button asChild size="sm" variant="ghost" className="h-8">
+            <a
+              href={`/api/storage/${answer.file.storageKey}`}
+              target="_blank"
+              rel="noopener noreferrer"
+              download={answer.file.name}
+              title="Unduh"
+            >
+              <Download className="size-3.5" />
+            </a>
+          </Button>
+        </div>
       ) : meta.isUpload && !answer?.fileId ? (
         <p className="text-xs text-muted-foreground italic">
           Tidak ada file terunggah.

@@ -94,13 +94,27 @@ function cacheKey(account: MegaAccountLike): string {
 }
 
 function isRetryable(err: unknown): boolean {
-  // Jangan pernah retry saat akun kena rate-limit/block — retry berarti
-  // login lagi dan memperparah blokir.
+  // HANYA error level-akun yang tidak boleh di-retry (retry = login
+  // berulang = memperparah blokir). Sisanya (ESID/session kadaluarsa,
+  // "storage is not ready", timeout, network) BOLEH di-retry 1x dengan
+  // session baru.
   const msg = err instanceof Error ? err.message : String(err);
-  if (/blocked|rate|EBLOCKED|OVERQUOTA|EMFILE|MEGA_TIMEOUT|MEGA_COOLDOWN|ESID/i.test(msg)) {
+  if (/EBLOCKED|OVERQUOTA|EMFILE|MEGA_COOLDOWN|MEGA_NO_CREDENTIALS/i.test(msg)) {
     return false;
   }
+  if (/ERATELIMIT|rate limit/i.test(msg)) return false;
   return true;
+}
+
+/**
+ * Error level-akun = akunnya sendiri bermasalah (diblokir / kredensial
+ * salah) — pantas dicatat sebagai lastStatus "error" supaya akun
+ * otomatis dilewati. Error SESI (ESID / not ready / network) TIDAK
+ * boleh menandai akun error — cukup relogin.
+ */
+export function isAccountLevelMegaError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return /EBLOCKED|MEGA_NO_CREDENTIALS|MEGA_COOLDOWN|OVERQUOTA|ERATELIMIT|rate limit|ENoENT|wrong/i.test(msg) && !/ESID|not ready|MEGA_TIMEOUT/i.test(msg);
 }
 
 /**
@@ -232,9 +246,12 @@ function loginCooldownActive(key: string): boolean {
  * Ambil (atau buat sekali) session MEGA untuk sebuah akun.
  * Urutan: (1) cache proses, (2) pulihkan dari sessionData (sid), (3) login
  * password — lalu persist sessionData. Login gagal → cooldown 60 detik.
+ * `forceLogin` melewati tahap (2) — dipakai setelah sid terbukti mati (ESID)
+ * supaya recovery tidak memulihkan sid yang sama.
  */
 export async function getMegaSession(
-  account: MegaAccountLike
+  account: MegaAccountLike,
+  opts?: { forceLogin?: boolean }
 ): Promise<Storage> {
   if (!account.email && !account.sessionData) {
     throw new Error("MEGA_NO_CREDENTIALS");
@@ -251,9 +268,11 @@ export async function getMegaSession(
   if (!opening) {
     opening = (async () => {
       // (2) Coba pulihkan session yang tersimpan — tanpa login password.
-      const restored = await restoreSession(account);
-      if (restored) {
-        return restored;
+      if (!opts?.forceLogin) {
+        const restored = await restoreSession(account);
+        if (restored) {
+          return restored;
+        }
       }
       // (3) Login penuh dengan password.
       const storage = await loginOnce(account);
@@ -281,8 +300,9 @@ export async function getMegaSession(
 }
 
 /**
- * Jalankan operasi dengan session ter-cache. Bila session rusak (bukan
- * rate-limit), buang cache dan coba sekali lagi dengan login baru.
+ * Jalankan operasi dengan session ter-cache. Bila session rusak (ESID /
+ * "storage is not ready" / network), buang cache + hapus sessionData mati
+ * di DB, lalu coba SEKALI lagi dengan login baru.
  */
 async function withSession<T>(
   account: MegaAccountLike,
@@ -300,9 +320,22 @@ async function withSession<T>(
     return await op(storage);
   } catch (e) {
     if (!isRetryable(e)) throw e;
-    // Session mungkin basi — login ulang sekali.
+    // Session basi (ESID / status not-ready / timeout) → bersihkan jejak
+    // session mati (DB) supaya proses lain / cold-start tidak memulihkan
+    // sid yang sudah mati, lalu PAKSA login baru dan coba sekali lagi.
+    const msg = e instanceof Error ? e.message : String(e);
+    if (/ESID|not ready/i.test(msg)) {
+      try {
+        await db.cloudAccount.update({
+          where: { id: account.id },
+          data: { sessionData: null },
+        });
+      } catch {
+        /* best-effort */
+      }
+    }
     evictSession(key);
-    storage = await getMegaSession(account);
+    storage = await getMegaSession(account, { forceLogin: true });
     return await op(storage);
   }
 }
@@ -597,6 +630,144 @@ export async function megaCollectDescendantKeys(
   } catch {
     return [];
   }
+}
+
+// ───────────────── Salin node (file & folder, rekursif) ─────────────────
+
+/**
+ * Nama unik bila tujuan sudah berisi nama sama: "file (salinan).ext"
+ */
+function dedupeName(existing: Set<string>, name: string): string {
+  if (!existing.has(name)) return name;
+  const dot = name.lastIndexOf(".");
+  const base = dot > 0 ? name.slice(0, dot) : name;
+  const ext = dot > 0 ? name.slice(dot) : "";
+  for (let i = 1; i < 100; i++) {
+    const candidate = `${base} (salinan${i > 1 ? " " + i : ""})${ext}`;
+    if (!existing.has(candidate)) return candidate;
+  }
+  return `${base}-${Date.now()}${ext}`;
+}
+
+/**
+ * Salin SATU file node ke folder tujuan lewat server-side copy MEGA
+ * (copyTo — tanpa re-upload). Node hasil diidentifikasi dengan:
+ * nama sama + nodeId yang TIDAK ada sebelum copy (deterministik).
+ */
+async function copyFileNode(
+  storage: Storage,
+  file: MutableFile,
+  target: MutableFile,
+  wantName: string
+): Promise<MutableFile> {
+  const preIds = new Set(
+    (target.children ?? []).map((c) => c.nodeId ?? "")
+  );
+  await withTimeout(
+    file.copyTo(target) as Promise<unknown>,
+    UPLOAD_TIMEOUT_MS
+  );
+  await withTimeout(storage.reload(), DEFAULT_TIMEOUT_MS);
+  const freshTarget = target.nodeId ? findNode(storage, target.nodeId) : storage.root;
+  const copy = (freshTarget?.children ?? []).find(
+    (c) =>
+      !c.directory &&
+      c.name === file.name &&
+      c.nodeId &&
+      !preIds.has(c.nodeId)
+  );
+  if (!copy) throw new Error("MEGA_COPY_NODE_NOT_FOUND");
+  if (wantName && wantName !== copy.name) {
+    await withTimeout(copy.rename(wantName), DEFAULT_TIMEOUT_MS);
+    await withTimeout(storage.reload(), DEFAULT_TIMEOUT_MS).catch(() => {});
+  }
+  return copy;
+}
+
+/**
+ * Salin node (file ATAU folder rekursif) ke folder tujuan.
+ * Folder → mkdir + salin turunannya satu per satu (copyTo per file).
+ * Guard: maks 500 node & 2 GB total supaya tidak menggantung lambda.
+ * (Diuji empiris vs akun MEGA nyata: copyTo + reload + identifikasi id.)
+ */
+export async function megaCopyNode(
+  account: MegaAccountLike,
+  nodeId: string,
+  targetParentId: string | null,
+  opts?: { name?: string }
+): Promise<{ nodeId: string; copiedCount: number }> {
+  return withSession(account, async (storage) => {
+    const node = await resolveNode(storage, nodeId);
+    if (!node) throw new Error("MEGA_NODE_NOT_FOUND");
+    if (node.nodeId === storage.root.nodeId) {
+      throw new Error("MEGA_CANNOT_COPY_ROOT");
+    }
+    const target = await resolveFolder(storage, targetParentId);
+
+    // Jangan salin ke dalam dirinya sendiri (folder → subfolder sendiri).
+    let p: MutableFile | undefined = target;
+    while (p) {
+      if (p.nodeId === node.nodeId) {
+        throw new Error("MEGA_CANNOT_COPY_INTO_SELF");
+      }
+      p = p.parent;
+    }
+
+    let copiedCount = 0;
+    let totalBytes = 0;
+    const guard = (size: number) => {
+      copiedCount++;
+      totalBytes += size;
+      if (copiedCount > 500) throw new Error("MEGA_COPY_TOO_MANY_ITEMS");
+      if (totalBytes > 2 * 1024 * 1024 * 1024) {
+        throw new Error("MEGA_COPY_TOO_LARGE");
+      }
+    };
+
+    const existingNames = new Set(
+      (target.children ?? []).map((c) => c.name ?? "")
+    );
+
+    if (!node.directory) {
+      guard(node.size ?? 0);
+      const wantName = dedupeName(existingNames, opts?.name ?? node.name ?? "file");
+      const copied = await copyFileNode(storage, node, target, wantName);
+      if (!copied.nodeId) throw new Error("MEGA_NO_NODE_ID");
+      return { nodeId: copied.nodeId, copiedCount: 1 };
+    }
+
+    // Folder: mkdir + salin isi rekursif.
+    const wantName = dedupeName(existingNames, opts?.name ?? node.name ?? "folder");
+    const newRoot = await withTimeout(
+      target.mkdir({ name: wantName }) as Promise<MutableFile>,
+      DEFAULT_TIMEOUT_MS
+    );
+    if (!newRoot.nodeId) throw new Error("MEGA_NO_NODE_ID");
+
+    const copyChildren = async (src: MutableFile, dst: MutableFile) => {
+      for (const child of src.children ?? []) {
+        guard(child.directory ? 0 : child.size ?? 0);
+        if (child.directory) {
+          const sub = await withTimeout(
+            dst.mkdir({ name: child.name ?? "folder" }) as Promise<MutableFile>,
+            DEFAULT_TIMEOUT_MS
+          );
+          if (!sub.nodeId) throw new Error("MEGA_NO_NODE_ID");
+          await copyChildren(child, sub);
+        } else {
+          // dst folder baru → tidak ada konflik nama; copyTo langsung
+          // tanpa identifikasi/rename (lebih cepat, reload cukup di akhir).
+          await withTimeout(
+            child.copyTo(dst) as Promise<unknown>,
+            UPLOAD_TIMEOUT_MS
+          );
+        }
+      }
+    };
+    await copyChildren(node, newRoot);
+    await withTimeout(storage.reload(), DEFAULT_TIMEOUT_MS).catch(() => {});
+    return { nodeId: newRoot.nodeId, copiedCount };
+  });
 }
 
 /**

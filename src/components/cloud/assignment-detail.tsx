@@ -18,6 +18,7 @@ import {
   ClipboardList,
   Clock,
   Download,
+  Eye,
   Loader2,
   Upload,
   Users,
@@ -28,6 +29,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { Card } from "@/components/ui/card";
+import { Progress } from "@/components/ui/progress";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Separator } from "@/components/ui/separator";
 import {
@@ -55,6 +57,7 @@ import {
 
 import { FileUpload } from "@/components/cloud/file-upload";
 import { FileIcon } from "@/components/cloud/file-icon";
+import { FilePreview } from "@/components/cloud/file-preview";
 import { FormBuilder } from "@/components/cloud/form/form-builder";
 import { FormPlayer } from "@/components/cloud/form/form-player";
 import { FormReview } from "@/components/cloud/form/form-review";
@@ -63,7 +66,10 @@ import {
   formatBytes,
   mimeToIcon,
   type AssignmentDetailResponse,
+  type CloudFileItem,
+  type SubmissionFile,
 } from "@/lib/cloud-format";
+import { uploadSmart } from "@/lib/upload-client";
 import { useUIStore } from "@/stores/ui-store";
 import type { MeResponse } from "@/hooks/use-me";
 
@@ -106,6 +112,27 @@ function deadlineInfo(iso: string) {
   return { overdue, label, date: d };
 }
 
+/** Konversi SubmissionFile → item preview (tombol mata, tanpa download). */
+function submissionToPreviewItem(
+  f: SubmissionFile,
+  uploaderName?: string
+): CloudFileItem {
+  return {
+    id: f.id,
+    name: f.name,
+    size: f.size,
+    mimetype: f.mimetype,
+    storageKey: f.storageKey,
+    cloudAccountId: null,
+    createdAt: new Date().toISOString(),
+    uploadedBy: "",
+    uploader: uploaderName
+      ? { id: "", name: uploaderName, username: uploaderName }
+      : undefined,
+    visibility: "ALL",
+  };
+}
+
 export function AssignmentDetail({
   folderId,
   classroomId,
@@ -135,6 +162,7 @@ export function AssignmentDetail({
 
   // Form tugas (anti-nyontek) — dimuat paralel dengan detail tugas.
   const [showBuilder, setShowBuilder] = useState(false);
+  const [previewFile, setPreviewFile] = useState<CloudFileItem | null>(null);
   const { data: formData } = useQuery<FormGetResponse>({
     queryKey: formQueryKey,
     queryFn: async () => {
@@ -278,6 +306,7 @@ export function AssignmentDetail({
             mySubmission={mySubmission}
             overdue={di.overdue}
             onSubmitted={() => qc.invalidateQueries({ queryKey })}
+            onPreview={(f) => setPreviewFile(submissionToPreviewItem(f, "Tugas saya"))}
           />
         ) : myRole === "TEACHER" ? (
           <div className="space-y-6">
@@ -367,7 +396,13 @@ export function AssignmentDetail({
                 <FormReview folderId={folderId} />
               </div>
             ) : (
-              <TeacherRosterPanel roster={roster ?? []} summary={summary} />
+              <TeacherRosterPanel
+                roster={roster ?? []}
+                summary={summary}
+                onPreview={(f, name) =>
+                  setPreviewFile(submissionToPreviewItem(f, name))
+                }
+              />
             )}
           </div>
         ) : null}
@@ -406,6 +441,19 @@ export function AssignmentDetail({
                       <Tooltip>
                         <TooltipTrigger asChild>
                           <Button
+                            variant="ghost"
+                            size="icon"
+                            className="size-8"
+                            onClick={() => setPreviewFile(f)}
+                          >
+                            <Eye className="size-4" />
+                          </Button>
+                        </TooltipTrigger>
+                        <TooltipContent>Pratinjau</TooltipContent>
+                      </Tooltip>
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <Button
                             asChild
                             variant="ghost"
                             size="icon"
@@ -437,6 +485,9 @@ export function AssignmentDetail({
           ) : null}
         </section>
       </div>
+
+      {/* Pratinjau file (materi / pengumpulan siswa) — tanpa download */}
+      <FilePreview file={previewFile} onClose={() => setPreviewFile(null)} />
     </div>
   );
 }
@@ -446,11 +497,13 @@ function StudentSubmissionPanel({
   mySubmission,
   overdue,
   onSubmitted,
+  onPreview,
 }: {
   assignmentId: string;
   mySubmission: AssignmentDetailResponse["mySubmission"];
   overdue: boolean;
   onSubmitted: () => void;
+  onPreview: (file: SubmissionFile) => void;
 }) {
   const [note, setNote] = useState(mySubmission?.note ?? "");
   const [busy, setBusy] = useState(false);
@@ -555,15 +608,26 @@ function StudentSubmissionPanel({
               {formatBytes(submittedFile.size)} · {submittedFile.mimetype}
             </p>
           </div>
-          <Button asChild variant="ghost" size="icon" className="size-8">
-            <a
-              href={`/api/storage/${submittedFile.storageKey}`}
-              target="_blank"
-              rel="noopener noreferrer"
+          <div className="flex items-center gap-1 shrink-0">
+            <Button
+              variant="ghost"
+              size="icon"
+              className="size-8"
+              onClick={() => onPreview(submittedFile)}
+              title="Pratinjau"
             >
-              <Download className="size-4" />
-            </a>
-          </Button>
+              <Eye className="size-4" />
+            </Button>
+            <Button asChild variant="ghost" size="icon" className="size-8">
+              <a
+                href={`/api/storage/${submittedFile.storageKey}`}
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                <Download className="size-4" />
+              </a>
+            </Button>
+          </div>
         </div>
       ) : null}
 
@@ -616,6 +680,7 @@ function SubmissionUpload({
   onPendingFile: (fileId: string | null) => void;
 }) {
   const [busy, setBusy] = useState(false);
+  const [percent, setPercent] = useState<number | null>(null);
 
   async function handleFile(file: File) {
     if (file.size === 0) {
@@ -623,18 +688,20 @@ function SubmissionUpload({
       return;
     }
     setBusy(true);
+    setPercent(0);
     try {
-      const fd = new FormData();
-      fd.append("assignmentId", assignmentId);
-      fd.append("file", file);
-      if (note.trim()) fd.append("note", note.trim());
-      const res = await fetch("/api/cloud/submissions", {
-        method: "POST",
-        body: fd,
-      });
-      const json = await res.json();
+      const res = await uploadSmart<
+        { submission?: { file?: { id?: string } }; error?: string } & Record<
+          string,
+          unknown
+        >
+      >(
+        file,
+        { kind: "submission", assignmentId, note },
+        { onProgress: (p) => setPercent(p.percent) }
+      );
       if (!res.ok) {
-        toast.error(json?.error || "Gagal mengumpulkan tugas");
+        toast.error(res.json.error || "Gagal mengumpulkan tugas");
         return;
       }
       toast.success("Tugas dikumpulkan.");
@@ -642,6 +709,7 @@ function SubmissionUpload({
       onPendingFile(null);
     } finally {
       setBusy(false);
+      setPercent(null);
     }
   }
 
@@ -657,6 +725,7 @@ function SubmissionUpload({
       }}
       className="rounded-lg border-2 border-dashed border-border hover:border-primary/50 hover:bg-accent/30 transition-colors px-4 py-5 text-center cursor-pointer"
       onClick={() => {
+        if (disabled || busy) return;
         const input = document.createElement("input");
         input.type = "file";
         input.onchange = () => {
@@ -669,14 +738,28 @@ function SubmissionUpload({
     >
       <div className="flex flex-col items-center gap-1.5">
         {busy ? (
-          <Loader2 className="size-6 animate-spin text-muted-foreground" />
+          <>
+            <Loader2 className="size-6 animate-spin text-muted-foreground" />
+            <p className="text-sm font-medium">
+              {percent != null && percent < 95
+                ? `Mengunggah… ${percent}%`
+                : "Menyimpan ke cloud…"}
+            </p>
+            {percent != null ? (
+              <div className="w-56 max-w-full">
+                <Progress value={percent} className="h-1.5" />
+              </div>
+            ) : null}
+          </>
         ) : (
-          <Upload className="size-6 text-muted-foreground" />
+          <>
+            <Upload className="size-6 text-muted-foreground" />
+            <p className="text-sm font-medium">
+              Tarik file tugas di sini atau klik untuk pilih
+            </p>
+            <p className="text-xs text-muted-foreground">Maksimal 100 MB.</p>
+          </>
         )}
-        <p className="text-sm font-medium">
-          {busy ? "Mengunggah & mengumpulkan…" : "Tarik file tugas di sini atau klik untuk pilih"}
-        </p>
-        <p className="text-xs text-muted-foreground">Maksimal 100 MB.</p>
       </div>
     </div>
   );
@@ -685,9 +768,11 @@ function SubmissionUpload({
 function TeacherRosterPanel({
   roster,
   summary,
+  onPreview,
 }: {
   roster: AssignmentDetailResponse["roster"];
   summary: AssignmentDetailResponse["summary"];
+  onPreview: (file: SubmissionFile, uploaderName: string) => void;
 }) {
   if (!roster) return null;
   const submittedCount = summary?.submittedCount ?? roster.filter((r) => r.submitted).length;
@@ -742,9 +827,23 @@ function TeacherRosterPanel({
                 <TableCell>
                   {r.file ? (
                     <span className="inline-flex items-center gap-2 min-w-0">
-                      <span className="truncate max-w-[180px]" title={r.file.name}>
+                      <button
+                        type="button"
+                        className="truncate max-w-[180px] text-left hover:underline"
+                        title={`Pratinjau "${r.file.name}"`}
+                        onClick={() => onPreview(r.file!, r.user.name)}
+                      >
                         {r.file.name}
-                      </span>
+                      </button>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="size-7"
+                        onClick={() => r.file && onPreview(r.file, r.user.name)}
+                        title="Pratinjau tanpa download"
+                      >
+                        <Eye className="size-3.5" />
+                      </Button>
                       <Button
                         asChild
                         variant="ghost"
