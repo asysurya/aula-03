@@ -90,7 +90,15 @@ export async function GET(req: NextRequest) {
 
   // Kandidat file.
   const where = onlyMine
-    ? { uploadedBy: user.id, folderId: { in: folders.map((f) => f.id) } }
+    ? {
+        uploadedBy: user.id,
+        OR: [
+          { folderId: { in: folders.map((f) => f.id) } },
+          // File PERMANEN tanpa folder — unggahan chat permanen & referensi
+          // mount MEGA milik sendiri — bisa dipakai ulang di pesan lain.
+          { folderId: null, expiresAt: null },
+        ],
+      }
     : {
         OR: [
           { folderId: { in: folders.map((f) => f.id) } },

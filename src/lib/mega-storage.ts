@@ -530,6 +530,34 @@ async function resolveFolder(
 }
 
 /**
+ * Info satu node (file ATAU folder) di akun MEGA — dipakai fitur "lampirkan
+ * dari mount MEGA" untuk membaca nama/ukuran asli dari sisi server (bukan
+ * mempercayai data klien).
+ */
+export interface MegaStatResult {
+  nodeId: string;
+  name: string;
+  size: number;
+  isFolder: boolean;
+}
+
+export async function megaStat(
+  account: MegaAccountLike,
+  nodeId: string
+): Promise<MegaStatResult> {
+  return withSession(account, async (storage) => {
+    const node = await resolveNode(storage, nodeId);
+    if (!node) throw new Error("MEGA_NODE_NOT_FOUND");
+    return {
+      nodeId: node.nodeId ?? nodeId,
+      name: node.name ?? "(tanpa nama)",
+      size: node.directory ? 0 : node.size ?? 0,
+      isFolder: !!node.directory,
+    };
+  });
+}
+
+/**
  * Download a buffer from MEGA. Caller must pass the owning account.
  * Returns null on any failure (caller can treat as "file not found").
  */

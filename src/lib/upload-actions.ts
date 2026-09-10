@@ -318,10 +318,9 @@ export async function uploadMegaFileAction(
   }
 }
 
-// ───────────────────────── 4. Lampiran chat (sementara 24 jam) ─────────────────────────
+// ───────────────────────── 4. Lampiran chat (PERMANEN) ─────────────────────────
 
 type ConversationKind = "classroom" | "group" | "dm";
-const ATTACHMENT_TTL_MS = 24 * 60 * 60 * 1000;
 
 async function assertMembership(
   kind: ConversationKind,
@@ -375,7 +374,10 @@ export async function uploadAttachmentAction(
       mimetype: file.mimetype,
       visibility: "ALL",
       cloudAccountId: stored.cloudAccountId,
-      expiresAt: new Date(Date.now() + ATTACHMENT_TTL_MS),
+      // PERMANEN (expiresAt null): file tersimpan di cloud (MEGA/S3) dan
+      // TIDAK ikut terhapus saat pesannya dihapus — bisa dipakai ulang di
+      // pesan lain (muncul lagi di Cloud Picker).
+      expiresAt: null,
     },
     select: { id: true, name: true, size: true, mimetype: true, storageKey: true },
   });

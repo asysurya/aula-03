@@ -9,6 +9,8 @@ import {
 } from "@/lib/chat-sync";
 import { folderClassroomId, getClassroomRole } from "@/lib/cloud-utils";
 import { canViewFile, canViewFolder, type UserRole } from "@/lib/cloud-perms";
+import { parseMegaKey } from "@/lib/mega-storage";
+import { canViewMount } from "@/lib/mount-access";
 
 type ConversationKind = "classroom" | "group" | "dm";
 
@@ -404,12 +406,15 @@ export async function POST(req: NextRequest) {
   }
 
   // ── Validasi lampiran file ───────────────────────────────────────
-  // Dua jalur sah:
-  //  1. File sementara chat (expiresAt terisi) → wajib milik sendiri.
-  //  2. File permanen cloud (expiresAt null) → wajib TERLIHAT oleh user
-  //     (aturan visibility folder/kelas + grants). FIX bug lama: file
-  //     permanen dari Cloud Picker dulunya ditolak "File lampiran tidak
-  //     valid" meski picker menampilkannya.
+  // Tiga jalur sah:
+  //  1. File sementara chat lama (expiresAt terisi — warisan) → milik sendiri.
+  //  2. File permanen cloud di folder kelas → wajib TERLIHAT oleh user
+  //     (aturan visibility folder/kelas + grants).
+  //  3. File permanen TANPA folder:
+  //     a. Referensi mount MEGA (storageKey mega:<accountId>:<nodeId>) →
+  //        boleh bila user boleh membuka mount akun itu (Admin Panel).
+  //     b. Unggahan chat permanen user lain → boleh bila pengunggahnya
+  //        seanggota kelas percakapan ini (konsisten dengan Cloud Picker).
   if (attachmentFileIds.length > 0) {
     const files = await db.cloudFile.findMany({
       where: { id: { in: attachmentFileIds } },
@@ -419,6 +424,7 @@ export async function POST(req: NextRequest) {
         expiresAt: true,
         folderId: true,
         visibility: true,
+        storageKey: true,
         grants: { select: { userId: true } },
       },
     });
@@ -440,9 +446,21 @@ export async function POST(req: NextRequest) {
       roleCache.set(classroomId, r);
       return r;
     };
+    // Kelas asal percakapan ini (classroom → diri sendiri; group → kelas
+    // grupnya; dm → null) — untuk aturan file permanen milik anggota kelas.
+    let convClassroomId: string | null = null;
+    if (kind === "classroom") {
+      convClassroomId = id;
+    } else if (kind === "group") {
+      const group = await db.group.findUnique({
+        where: { id },
+        select: { classroomId: true },
+      });
+      convClassroomId = group?.classroomId ?? null;
+    }
     for (const f of files) {
       if (f.expiresAt) {
-        // File sementara (unggahan chat 24 jam) — milik sendiri saja.
+        // File sementara (warisan unggahan 24 jam lama) — milik sendiri saja.
         if (f.uploadedBy !== userId) {
           return NextResponse.json(
             { error: "File lampiran bukan milik Anda" },
@@ -453,34 +471,64 @@ export async function POST(req: NextRequest) {
       }
       // File permanen cloud.
       if (f.uploadedBy === userId || userRole === "ADMIN") continue;
-      if (!f.folderId) {
-        return NextResponse.json(
-          { error: "File lampiran tidak valid" },
-          { status: 400 }
-        );
+      if (f.folderId) {
+        const cid = await folderClassroomId(f.folderId);
+        const classroomRole = cid ? await getRole(cid) : null;
+        if (
+          !cid ||
+          !canViewFile(
+            {
+              id: f.id,
+              folderId: f.folderId,
+              visibility: f.visibility as "ALL" | "TEACHERS" | "PRIVATE",
+              uploadedBy: f.uploadedBy,
+              grants: f.grants ?? [],
+            },
+            userId,
+            userRole,
+            classroomRole
+          )
+        ) {
+          return NextResponse.json(
+            { error: "File lampiran tidak boleh kamu bagikan" },
+            { status: 403 }
+          );
+        }
+        continue;
       }
-      const cid = await folderClassroomId(f.folderId);
-      const classroomRole = cid ? await getRole(cid) : null;
-      if (
-        !cid ||
-        !canViewFile(
-          {
-            id: f.id,
-            folderId: f.folderId,
-            visibility: f.visibility as "ALL" | "TEACHERS" | "PRIVATE",
-            uploadedBy: f.uploadedBy,
-            grants: f.grants ?? [],
-          },
-          userId,
-          userRole,
-          classroomRole
-        )
-      ) {
+      // File permanen TANPA folder.
+      const mega = parseMegaKey(f.storageKey);
+      if (mega) {
+        // (a) Referensi mount MEGA / file yang tersimpan di akun MEGA —
+        // boleh bila mount akunnya terlihat oleh user (aturan Admin Panel).
+        const account = await db.cloudAccount.findUnique({
+          where: { id: mega.accountId },
+          select: { mountVisibleTo: true, mountMode: true },
+        });
+        if (account && canViewMount(account, userRole)) continue;
         return NextResponse.json(
           { error: "File lampiran tidak boleh kamu bagikan" },
           { status: 403 }
         );
       }
+      // (b) Unggahan chat permanen user lain — boleh bila pengunggahnya
+      // seanggota kelas percakapan ini (persis seperti daftar Cloud Picker).
+      if (convClassroomId) {
+        const uploaderMember = await db.classroomMember.findUnique({
+          where: {
+            classroomId_userId: {
+              classroomId: convClassroomId,
+              userId: f.uploadedBy,
+            },
+          },
+          select: { id: true },
+        });
+        if (uploaderMember) continue;
+      }
+      return NextResponse.json(
+        { error: "File lampiran tidak boleh kamu bagikan" },
+        { status: 403 }
+      );
     }
   }
 

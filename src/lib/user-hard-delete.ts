@@ -1,6 +1,9 @@
 import { db } from "@/lib/db";
 import { deleteFile } from "@/lib/storage";
-import { hardDeleteCloudFilesByIds } from "@/lib/hard-delete";
+import {
+  hardDeleteCloudFilesByIds,
+  deleteCloudFileRowsKeepBlob,
+} from "@/lib/hard-delete";
 
 // ─────────────────────────────────────────────────────────────────────────
 // Hard delete USER — menghapus akun + seluruh jejak datanya secara PERMANEN.
@@ -248,11 +251,30 @@ export async function hardDeleteUser(
   );
 
   // ── 11. File yang diunggah user di folder orang lain / root ──
+  // DIBAGI DUA (fitur "lampiran permanen + mount MEGA"):
+  //  · File PERMANEN visibilitas ALL tanpa folder (unggahan chat permanen /
+  //    referensi mount MEGA) → hapus BARISNYA saja — blob fisik DIPERTAHANKAN:
+  //    file aslinya hidup di akun cloud bersama (MEGA/S3 admin), bisa dipakai
+  //    pesan lain, dan referensi mount menunjuk file ASLI milik admin.
+  //  · Sisanya (file folder, file PRIVATE seperti avatar/gambar soal, sisa
+  //    file sementara lama) → hard delete penuh (blob ikut dihapus).
   const ownFiles = await db.cloudFile.findMany({
     where: { uploadedBy: userId },
-    select: { id: true },
+    select: {
+      id: true,
+      folderId: true,
+      expiresAt: true,
+      visibility: true,
+    },
   });
-  await hardDeleteCloudFilesByIds(ownFiles.map((f) => f.id));
+  const keepBlobIds = ownFiles
+    .filter((f) => !f.folderId && !f.expiresAt && f.visibility === "ALL")
+    .map((f) => f.id);
+  const dropBlobIds = ownFiles
+    .filter((f) => f.folderId || f.expiresAt || f.visibility !== "ALL")
+    .map((f) => f.id);
+  await deleteCloudFileRowsKeepBlob(keepBlobIds);
+  await hardDeleteCloudFilesByIds(dropBlobIds);
 
   // ── 12. Grant akses folder/file yang diberikan KEPADA user ──
   await db.folderAccess.deleteMany({ where: { userId } });

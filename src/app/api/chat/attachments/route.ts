@@ -37,13 +37,11 @@ async function assertMembership(
   return false;
 }
 
-// 24h in milliseconds.
-const TTL_MS = 24 * 60 * 60 * 1000;
-
 // POST /api/chat/attachments
 // multipart/form-data: file (File), kind (classroom|group|dm), id (conversation id).
-// Creates a temporary CloudFile (expiresAt = now + 24h, folderId = null, visibility = ALL).
-// Returns { fileId, name, size, mimetype, storageKey }.
+// Creates a PERMANENT CloudFile (expiresAt = null, folderId = null, visibility = ALL)
+// — file tersimpan di cloud, TIDAK ikut terhapus saat pesan dihapus, dan bisa
+// dipakai ulang di pesan lain. Returns { fileId, name, size, mimetype, storageKey }.
 export async function POST(req: NextRequest) {
   const user = await requireUser().catch(() => null);
   if (!user) {
@@ -110,18 +108,18 @@ export async function POST(req: NextRequest) {
     return Response.json({ error: msg }, { status: 502 });
   }
 
-  // Create the CloudFile row with expiresAt set (temp chat attachment).
+  // Create the CloudFile row — PERMANEN (expiresAt null).
   const row = await db.cloudFile.create({
     data: {
       name: file.name,
-      folderId: null, // temp chat files live outside the cloud folder tree
+      folderId: null, // chat attachments live outside the cloud folder tree
       uploadedBy: user.id,
       storageKey: stored.storageKey,
       size: stored.size,
       mimetype,
       visibility: "ALL", // conversation members can see
       cloudAccountId: stored.cloudAccountId,
-      expiresAt: new Date(Date.now() + TTL_MS),
+      expiresAt: null,
     },
     select: {
       id: true,

@@ -760,8 +760,8 @@ export function MessageInput({
           variant="ghost"
           onClick={() => setPickerOpen(true)}
           disabled={disabled || isUploadingAny}
-          aria-label="Lampirkan file dari cloud"
-          title="Lampirkan file (pilih dari cloud, maks 5, otomatis dihapus setelah 24 jam)"
+          aria-label="Lampirkan file dari cloud atau mount MEGA"
+          title="Lampirkan file (cloud kelas / mount MEGA — permanen & bisa dipakai ulang)"
           className="h-10 w-10 shrink-0 rounded-full"
         >
           <Paperclip className="h-4 w-4" />
