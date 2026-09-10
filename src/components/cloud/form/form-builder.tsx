@@ -583,19 +583,50 @@ export function FormBuilder({
             <Label htmlFor="timelimit">
               Batas waktu (menit, kosong = tanpa batas)
             </Label>
-            <Input
-              id="timelimit"
-              inputMode="numeric"
-              className="w-36"
-              placeholder="cth: 30"
-              value={timeLimitInput}
-              disabled={locked}
-              onChange={(e) =>
-                setTimeLimitInput(
-                  e.target.value.replace(/[^0-9]/g, "").slice(0, 3)
-                )
-              }
-            />
+            <div className="flex items-center gap-2 flex-wrap">
+              <Input
+                id="timelimit"
+                inputMode="numeric"
+                className="w-36"
+                placeholder="cth: 30"
+                value={timeLimitInput}
+                disabled={locked}
+                onChange={(e) =>
+                  setTimeLimitInput(
+                    e.target.value.replace(/[^0-9]/g, "").slice(0, 3)
+                  )
+                }
+              />
+              {/* Preset cepat — satu klik atur durasi countdown pengerjaan */}
+              <div className="flex items-center gap-1 flex-wrap">
+                {[15, 30, 45, 60, 90].map((m) => (
+                  <Button
+                    key={m}
+                    type="button"
+                    size="sm"
+                    variant={
+                      timeLimitInput === String(m) ? "default" : "outline"
+                    }
+                    className="h-8 px-2.5 tabular-nums"
+                    disabled={locked}
+                    onClick={() => setTimeLimitInput(String(m))}
+                  >
+                    {m}m
+                  </Button>
+                ))}
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="ghost"
+                  className="h-8 px-2.5"
+                  disabled={locked || !timeLimitInput}
+                  onClick={() => setTimeLimitInput("")}
+                  title="Tanpa batas waktu"
+                >
+                  ∞
+                </Button>
+              </div>
+            </div>
           </div>
           <div className="space-y-1">
             <Label htmlFor="maxattempts">

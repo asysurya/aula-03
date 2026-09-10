@@ -337,6 +337,7 @@ export function AssignmentDetail({
             canStart={formData.canStart}
             deadlinePassed={formData.deadlinePassed}
             deadlineLabel={fmtDate(assignment.deadline)}
+            deadlineISO={assignment.deadline}
             attemptsUsed={formData.attemptsUsed ?? 1}
             canRetry={formData.canRetry ?? false}
           />

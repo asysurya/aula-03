@@ -90,6 +90,16 @@ function answersFromAttempt(
   return out;
 }
 
+/** Format detik → jam:menit:detik (atau menit:detik bila < 1 jam). */
+function fmtClock(totalSec: number): string {
+  const h = Math.floor(totalSec / 3600);
+  const m = Math.floor((totalSec % 3600) / 60);
+  const s = totalSec % 60;
+  return h > 0
+    ? `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`
+    : `${m}:${String(s).padStart(2, "0")}`;
+}
+
 export function FormPlayer({
   folderId,
   form,
@@ -97,6 +107,7 @@ export function FormPlayer({
   canStart,
   deadlinePassed,
   deadlineLabel,
+  deadlineISO,
   attemptsUsed = 1,
   canRetry = false,
 }: {
@@ -106,6 +117,8 @@ export function FormPlayer({
   canStart: boolean;
   deadlinePassed: boolean;
   deadlineLabel: string;
+  // ISO deadline asli — dipakai countdown "menuju tenggat" saat bermain.
+  deadlineISO?: string;
   attemptsUsed?: number;
   canRetry?: boolean;
 }) {
@@ -131,6 +144,8 @@ export function FormPlayer({
   const [warning, setWarning] = useState<string | null>(null);
   const [result, setResult] = useState<FormSubmitResult | null>(null);
   const [remainingSec, setRemainingSec] = useState<number | null>(null);
+  // Countdown menuju tenggat tugas (selalu dihitung saat bermain).
+  const [deadlineSec, setDeadlineSec] = useState<number | null>(null);
   // Pesan error submit terakhir — panel "coba kirim lagi" yang jelas,
   // supaya siswa tahu pengiriman gagal dan BISA mengulang submit.
   const [submitError, setSubmitError] = useState<string | null>(null);
@@ -148,6 +163,12 @@ export function FormPlayer({
   const violationsRef = useRef<FormViolation[]>([]);
   const dirtyRef = useRef(false);
   const saveTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // Referensi submit TERBARU — interval countdown memanggil lewat ref ini
+  // supaya auto-submit saat waktu habis selalu memakai closure jawaban
+  // terbaru (bukan snapshot saat pengerjaan dimulai).
+  const submitRef = useRef<((auto?: boolean) => Promise<void>) | null>(null);
+  // Milestone peringatan yang sudah dibunyikan (anti dobel).
+  const warnedRef = useRef<Set<number>>(new Set());
 
   const invalidate = useCallback(() => {
     qc.invalidateQueries({ queryKey: ["cloud", "assignment", folderId] });
@@ -278,34 +299,55 @@ export function FormPlayer({
   }, [phase, persist]);
 
   // ── Timer countdown ───────────────────────────────────────────────
+  // Dihitung dari startedAt SERVER → tahan refresh: siswa menutup tab,
+  // menyalakan ulang HP, atau pindah perangkat, waktu tetap berjalan.
   const startedAt = attempt?.startedAt;
   const timeLimitMin = settings?.timeLimitMin ?? form?.timeLimitMin ?? null;
 
   useEffect(() => {
-    if (phase !== "playing" || !timeLimitMin) {
+    if (phase !== "playing") {
       setRemainingSec(null);
+      setDeadlineSec(null);
+      warnedRef.current.clear();
       return;
     }
     const base = startedAt ? new Date(startedAt).getTime() : Date.now();
-    const limitSec = timeLimitMin * 60; // sudah di-guard non-null di atas
+    const limitSec = timeLimitMin ? timeLimitMin * 60 : null;
+    const deadlineMs = deadlineISO ? new Date(deadlineISO).getTime() : null;
     // Throttle auto-submit: maks 1 percobaan tiap 10 detik. Kalau koneksi
     // mati saat waktu habis, auto-submit TERUS mencoba (tidak diam-diam
     // gagal) — dan siswa juga bisa kirim manual lewat tombol.
     let lastAutoTry = 0;
     function tick() {
-      const elapsed = (Date.now() - base) / 1000;
-      const left = Math.max(0, Math.round(limitSec - elapsed));
-      setRemainingSec(left);
-      if (left <= 0 && Date.now() - lastAutoTry > 10_000) {
-        lastAutoTry = Date.now();
-        void submit(true);
+      const now = Date.now();
+      if (limitSec != null) {
+        const elapsed = (now - base) / 1000;
+        const left = Math.max(0, Math.round(limitSec - elapsed));
+        setRemainingSec(left);
+        // Peringatan milestone (5 menit & 1 menit) — sekali lewat ambang.
+        for (const m of [300, 60]) {
+          if (left <= m && left > m - 20 && !warnedRef.current.has(m) && left > 0) {
+            warnedRef.current.add(m);
+            toast.warning(
+              m === 60
+                ? "Sisa 1 menit — jawaban dikirim otomatis saat waktu habis!"
+                : `Sisa ${Math.round(m / 60)} menit — pastikan semua soal terjawab.`
+            );
+          }
+        }
+        if (left <= 0 && Date.now() - lastAutoTry > 10_000) {
+          lastAutoTry = Date.now();
+          void submitRef.current?.(true);
+        }
+      }
+      if (deadlineMs != null) {
+        setDeadlineSec(Math.max(0, Math.round((deadlineMs - now) / 1000)));
       }
     }
     tick();
     const t = setInterval(tick, 1000);
     return () => clearInterval(t);
-
-  }, [phase, timeLimitMin, startedAt]);
+  }, [phase, timeLimitMin, startedAt, deadlineISO]);
 
   // ── Anti-cheat: tab switch / blur detection ───────────────────────
   useEffect(() => {
@@ -467,6 +509,8 @@ export function FormPlayer({
       setConfirmOpen(false);
     }
   }
+  // Selalu simpan referensi submit terbaru untuk interval countdown.
+  submitRef.current = submit;
 
   // ── Answer mutators ───────────────────────────────────────────────
   function setText(questionId: string, text: string) {
@@ -677,6 +721,7 @@ export function FormPlayer({
           />
           <MiniStat
             label="Batas waktu"
+            accent={!!form?.timeLimitMin}
             value={form?.timeLimitMin ? `${form.timeLimitMin} menit` : "—"}
           />
           <MiniStat
@@ -1002,9 +1047,21 @@ export function FormPlayer({
   }
 
   // ── PLAYING ───────────────────────────────────────────────────────
-  const timerDanger = remainingSec != null && remainingSec <= 60;
-  const minutes = remainingSec != null ? Math.floor(remainingSec / 60) : 0;
-  const seconds = remainingSec != null ? remainingSec % 60 : 0;
+  // Countdown utama: batas waktu pengerjaan (jika diatur guru), kalau
+  // tidak ada → countdown menuju tenggat tugas. Selalu tampil sticky.
+  const hasLimit = timeLimitMin != null && remainingSec != null;
+  const clockSec = hasLimit ? remainingSec : deadlineSec;
+  const limitSec = timeLimitMin != null ? timeLimitMin * 60 : null;
+  // Ambang warna: kuning saat sisa ≤ min(5 menit, 25% durasi), merah ≤ 1 menit.
+  const warnAt =
+    limitSec != null ? Math.min(300, Math.floor(limitSec / 4)) : 300;
+  const clockWarn = clockSec != null && clockSec <= warnAt;
+  const clockDanger = clockSec != null && clockSec <= 60;
+  const timeUp = hasLimit && remainingSec === 0;
+  const timeUsedPct =
+    hasLimit && limitSec != null && remainingSec != null
+      ? Math.min(100, ((limitSec - remainingSec) / limitSec) * 100)
+      : null;
 
   return (
     <div
@@ -1027,8 +1084,10 @@ export function FormPlayer({
         </div>
       ) : null}
 
-      {/* Status bar */}
-      <Card className="p-3 space-y-2.5">
+      {/* Status bar — STICKY: countdown & progres selalu terlihat
+          walaupun siswa scroll ke soal paling bawah. */}
+      <div className="sticky top-0 z-30 -m-1 p-1 bg-background/95 backdrop-blur-sm">
+      <Card className="p-3 space-y-2.5 shadow-sm">
         <div className="flex items-center justify-between gap-2 flex-wrap">
           <div className="flex items-center gap-2">
             <Badge variant="secondary" className="gap-1">
@@ -1038,19 +1097,32 @@ export function FormPlayer({
               Terjawab {answeredCount}/{qs.length}
             </span>
           </div>
-          <div className="flex items-center gap-2">
-            {remainingSec != null ? (
-              <span
+          <div className="flex items-center gap-3 flex-wrap justify-end">
+            {hasLimit ? (
+              <span className="text-[11px] text-muted-foreground hidden sm:inline-flex items-center gap-1">
+                <Clock className="size-3" /> Tenggat {deadlineLabel}
+              </span>
+            ) : null}
+            {clockSec != null ? (
+              <div
+                aria-live="polite"
                 className={cn(
-                  "inline-flex items-center gap-1.5 font-mono text-sm font-semibold tabular-nums px-2.5 py-1 rounded-md",
-                  timerDanger
+                  "flex flex-col items-end rounded-lg px-3 py-1.5 transition-colors",
+                  clockDanger
                     ? "bg-destructive/15 text-destructive animate-pulse"
-                    : "bg-secondary"
+                    : clockWarn
+                      ? "bg-amber-500/15 text-amber-600 dark:text-amber-400"
+                      : "bg-secondary text-secondary-foreground"
                 )}
               >
-                <Timer className="size-3.5" />
-                {minutes}:{String(seconds).padStart(2, "0")}
-              </span>
+                <span className="text-[10px] font-semibold uppercase tracking-wider opacity-70 inline-flex items-center gap-1">
+                  <Timer className="size-3" />
+                  {hasLimit ? "Sisa waktu pengerjaan" : "Menuju tenggat"}
+                </span>
+                <span className="font-mono text-xl font-bold tabular-nums leading-tight">
+                  {fmtClock(clockSec)}
+                </span>
+              </div>
             ) : null}
             <Button
               size="sm"
@@ -1071,16 +1143,48 @@ export function FormPlayer({
             </Button>
           </div>
         </div>
-        <Progress
-          value={
-            oneByOne
-              ? ((currentIdx + 1) / qs.length) * 100
-              : (answeredCount / Math.max(1, qs.length)) * 100
-          }
-          className="h-1.5"
-        />
-      </Card>
 
+        {/* Progres ganda: soal terjawab + waktu terpakai */}
+        <div className="space-y-1.5">
+          <Progress
+            value={
+              oneByOne
+                ? ((currentIdx + 1) / qs.length) * 100
+                : (answeredCount / Math.max(1, qs.length)) * 100
+            }
+            className="h-1.5"
+          />
+          {timeUsedPct != null && !timeUp ? (
+            <div className="flex items-center gap-2">
+              <span className="text-[10px] text-muted-foreground whitespace-nowrap">
+                Waktu terpakai
+              </span>
+              <Progress value={timeUsedPct} className="h-1 flex-1" />
+              <span className="text-[10px] text-muted-foreground tabular-nums w-9 text-right">
+                {Math.round(timeUsedPct)}%
+              </span>
+            </div>
+          ) : null}
+        </div>
+
+        {/* Waktu habis — kirim otomatis berjalan; input soal dikunci. */}
+        {timeUp ? (
+          <div className="flex items-center gap-2 rounded-md bg-destructive/10 text-destructive px-3 py-2 text-sm font-medium">
+            <Loader2 className="size-4 animate-spin shrink-0" />
+            Waktu habis — jawabanmu sedang dikirim otomatis
+            {submitError ? " (mengulangi pengiriman…)" : "…"}
+          </div>
+        ) : null}
+      </Card>
+      </div>
+
+      {/* Soal — dikunci setelah waktu habis (fairness: tidak bisa
+          mengubah jawaban setelah batas waktu berlalu). */}
+      <div
+        className={cn(
+          timeUp && "pointer-events-none opacity-60"
+        )}
+      >
       {oneByOne && current ? (
         <QuestionCard
           q={current}
@@ -1121,6 +1225,7 @@ export function FormPlayer({
           ))}
         </div>
       )}
+      </div>
 
       {/* Panel error submit — siswa TETAP BISA mengirim ulang (jawaban
           tersimpan di server via autosave). */}
@@ -1188,7 +1293,7 @@ export function FormPlayer({
         )}
         <Button
           onClick={() => setConfirmOpen(true)}
-          disabled={submitting}
+          disabled={submitting || timeUp}
           className="bg-emerald-600 hover:bg-emerald-700"
         >
           {submitting ? (
@@ -1614,10 +1719,30 @@ function QuickQuiz({
   );
 }
 
-function MiniStat({ label, value }: { label: string; value: string }) {
+function MiniStat({
+  label,
+  value,
+  accent,
+}: {
+  label: string;
+  value: string;
+  accent?: boolean;
+}) {
   return (
-    <div className="rounded-lg border border-border bg-card p-2.5">
-      <p className="text-lg font-bold tabular-nums">{value}</p>
+    <div
+      className={cn(
+        "rounded-lg border bg-card p-2.5",
+        accent ? "border-primary/40 bg-primary/5" : "border-border"
+      )}
+    >
+      <p
+        className={cn(
+          "text-lg font-bold tabular-nums",
+          accent && "text-primary"
+        )}
+      >
+        {value}
+      </p>
       <p className="text-[10px] text-muted-foreground uppercase tracking-wide">
         {label}
       </p>
