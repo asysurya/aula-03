@@ -206,6 +206,12 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 
+  // Waktu server di-sample SEBELUM query (konservatif): event yang terjadi
+  // selama query berjalan tetap tertangkap poll berikutnya (merge by id di
+  // client membuat duplikat aman). Dipakai client sebagai patokan `since`
+  // untuk sync realtime edit/hapus — bebas skew jam client.
+  const serverTime = new Date().toISOString();
+
   const where: Record<string, unknown> = {};
   if (kind === "classroom") where.classroomId = id;
   else if (kind === "group") where.groupId = id;
@@ -225,7 +231,10 @@ export async function GET(req: NextRequest) {
     include: messageInclude,
   })) as unknown as MessageWithRelations[];
 
-  return NextResponse.json({ messages: sanitizeMessages(messages).map(toDto) });
+  return NextResponse.json({
+    messages: sanitizeMessages(messages).map(toDto),
+    serverTime,
+  });
 }
 
 // POST /api/chat/messages  body: { kind, id, content, attachmentFileIds?, replyToId? }

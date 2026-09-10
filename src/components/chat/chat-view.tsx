@@ -70,6 +70,9 @@ export function ChatView({
 
   const seenIdsRef = useRef<Set<string>>(new Set());
   const lastCreatedAtRef = useRef<string | null>(null);
+  // Patokan `since` untuk sync realtime (jam SERVER dari response, bukan jam
+  // client) — bebas skew antar perangkat.
+  const lastPollRef = useRef<string | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const sentinelRef = useRef<HTMLDivElement | null>(null);
   const nearBottomRef = useRef<boolean>(true);
@@ -117,7 +120,10 @@ export function ChatView({
   }, []);
 
   const fetchMessages = useCallback(
-    async (since: string | null, signal: AbortSignal) => {
+    async (
+      since: string | null,
+      signal: AbortSignal
+    ): Promise<{ messages: ChatMessage[]; serverTime: string }> => {
       const params = new URLSearchParams({
         kind: conversation.kind,
         id: conversation.id,
@@ -131,8 +137,14 @@ export function ChatView({
         const data = await res.json().catch(() => ({}));
         throw new Error(data?.error || `HTTP ${res.status}`);
       }
-      const data = (await res.json()) as { messages: ChatMessage[] };
-      return data.messages;
+      const data = (await res.json()) as {
+        messages: ChatMessage[];
+        serverTime?: string;
+      };
+      return {
+        messages: data.messages,
+        serverTime: data.serverTime ?? new Date().toISOString(),
+      };
     },
     [conversation.id, conversation.kind]
   );
@@ -151,6 +163,7 @@ export function ChatView({
     setReplyTo(null);
     seenIdsRef.current = new Set();
     lastCreatedAtRef.current = null;
+    lastPollRef.current = null;
     nearBottomRef.current = true;
 
     (async () => {
@@ -158,7 +171,9 @@ export function ChatView({
         const all = await fetchMessages(null, controller.signal);
         if (controller.signal.aborted) return;
         if (conversationKeyRef.current !== key) return;
-        mergeMessages(all);
+        mergeMessages(all.messages);
+        // Awal patokan sync realtime = jam server saat initial load.
+        lastPollRef.current = all.serverTime;
       } catch (e) {
         if (controller.signal.aborted) return;
         if (conversationKeyRef.current !== key) return;
@@ -182,7 +197,8 @@ export function ChatView({
     };
   }, [conversation.id, conversation.kind, fetchMessages, mergeMessages]);
 
-  // Polling.
+  // Polling realtime: tidak hanya pesan BARU — pesan yang DIEDIT, DIHAPUS,
+  // dan REAKSI dari pengguna lain juga tersinkron otomatis.
   useEffect(() => {
     const key = `${conversation.kind}:${conversation.id}`;
     const interval = setInterval(async () => {
@@ -191,9 +207,43 @@ export function ChatView({
       if (conversationKeyRef.current !== key) return;
       pollInFlightRef.current = true;
       try {
-        const fresh = await fetchMessages(lastCreatedAtRef.current, new AbortController().signal);
+        // Hanya id pesan nyata — id optimistik "temp_" dikecualikan supaya
+        // kiriman yang masih berjalan tidak salah dianggap terhapus.
+        const loadedIds = Array.from(seenIdsRef.current).filter(
+          (id) => !id.startsWith("temp_")
+        );
+        const res = await fetch("/api/chat/messages/sync", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            kind: conversation.kind,
+            id: conversation.id,
+            since: lastPollRef.current,
+            loadedIds,
+          }),
+        });
+        if (!res.ok) return;
+        const data = (await res.json()) as {
+          new: ChatMessage[];
+          changed: ChatMessage[];
+          deletedIds: string[];
+          serverTime: string;
+        };
         if (conversationKeyRef.current !== key) return;
-        if (fresh.length > 0) mergeMessages(fresh);
+        // 1) Pesan baru.
+        if (data.new?.length) mergeMessages(data.new);
+        // 2) Pesan berubah (edit / reaksi): replace penuh by id.
+        if (data.changed?.length) {
+          const changedMap = new Map(data.changed.map((c) => [c.id, c]));
+          setMessages((prev) => prev.map((m) => changedMap.get(m.id) ?? m));
+        }
+        // 3) Pesan dihapus pengguna lain: buang dari state + seen.
+        if (data.deletedIds?.length) {
+          const del = new Set(data.deletedIds);
+          for (const id of del) seenIdsRef.current.delete(id);
+          setMessages((prev) => prev.filter((m) => !del.has(m.id)));
+        }
+        if (data.serverTime) lastPollRef.current = data.serverTime;
       } catch {
         // swallow polling errors silently
       } finally {
@@ -201,7 +251,7 @@ export function ChatView({
       }
     }, MESSAGE_POLL_INTERVAL);
     return () => clearInterval(interval);
-  }, [conversation.id, conversation.kind, fetchMessages, mergeMessages]);
+  }, [conversation.id, conversation.kind, mergeMessages]);
 
   // Poor-man's cleanup cron: fire cleanup on mount + every 10 min.
   // Fire-and-forget; do not await.
@@ -636,8 +686,12 @@ export function ChatView({
                   setLoadingInit(true);
                   seenIdsRef.current = new Set();
                   lastCreatedAtRef.current = null;
+                  lastPollRef.current = null;
                   fetchMessages(null, new AbortController().signal)
-                    .then((all) => mergeMessages(all))
+                    .then((all) => {
+                      mergeMessages(all.messages);
+                      lastPollRef.current = all.serverTime;
+                    })
                     .catch((e) =>
                       setErrorInit(
                         e instanceof Error ? e.message : "Gagal memuat"
