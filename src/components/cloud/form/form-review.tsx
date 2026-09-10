@@ -13,6 +13,7 @@ import {
   Download,
   Eye,
   Loader2,
+  RotateCcw,
   ShieldAlert,
   Users,
   XCircle,
@@ -23,6 +24,14 @@ import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Card } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { FilePreview } from "@/components/cloud/file-preview";
 import type { CloudFileItem } from "@/lib/cloud-format";
 import { cn } from "@/lib/utils";
@@ -179,9 +188,41 @@ function AttemptCard({
 }) {
   const [open, setOpen] = useState(false);
   const [previewFile, setPreviewFile] = useState<CloudFileItem | null>(null);
+  const [resetOpen, setResetOpen] = useState(false);
+  const [resetting, setResetting] = useState(false);
   const answerByQ = new Map(attempt.answers.map((a) => [a.questionId, a]));
 
   const submitted = attempt.status === "SUBMITTED";
+
+  // Guru mereset pengerjaan siswa — jawaban, file, pelanggaran, dan skor
+  // dihapus; siswa bisa mulai dari awal (mis. submit gagal / terlanjur salah).
+  async function resetAttempt() {
+    setResetting(true);
+    try {
+      const res = await fetch(
+        `/api/cloud/assignments/${folderId}/form/attempts/reset`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ userId: attempt.user.id }),
+        }
+      );
+      const json = await res.json();
+      if (!res.ok) {
+        toast.error(json?.error || "Gagal mereset pengerjaan");
+        return;
+      }
+      toast.success(
+        `Pengerjaan ${attempt.user.name} direset — siswa dapat mengerjakan ulang.`
+      );
+      setResetOpen(false);
+      onGraded();
+    } catch {
+      toast.error("Gagal mereset pengerjaan");
+    } finally {
+      setResetting(false);
+    }
+  }
 
   const toPreviewItem = (
     f: NonNullable<FormAnswerDTO["file"]>
@@ -204,49 +245,62 @@ function AttemptCard({
 
   return (
     <Card className="overflow-hidden">
-      {/* Header row */}
-      <button
-        type="button"
-        onClick={() => setOpen((o) => !o)}
-        className="flex items-center gap-3 w-full px-4 py-3 hover:bg-accent/40 transition-colors text-left"
-      >
-        {open ? (
-          <ChevronDown className="size-4 text-muted-foreground shrink-0" />
-        ) : (
-          <ChevronRight className="size-4 text-muted-foreground shrink-0" />
-        )}
-        <div className="flex-1 min-w-0">
-          <p className="font-medium text-sm truncate">{attempt.user.name}</p>
-          <p className="text-xs text-muted-foreground truncate">
-            @{attempt.user.username} · mulai{" "}
-            {format(new Date(attempt.startedAt), "d MMM HH:mm")}
-            {attempt.submittedAt
-              ? ` · kirim ${format(new Date(attempt.submittedAt), "HH:mm")}`
-              : " · belum dikumpulkan"}
-          </p>
-        </div>
-        {attempt.violations.length > 0 ? (
-          <Badge className="bg-amber-500/15 text-amber-600 dark:text-amber-400 border border-amber-500/30 gap-1 shrink-0">
-            <AlertTriangle className="size-3" />
-            {attempt.violations.length}
-          </Badge>
-        ) : null}
-        <Badge variant="outline" className="shrink-0 gap-1">
-          {submitted ? (
-            <>
-              <CheckCircle2 className="size-3 text-emerald-500" />
-              {attempt.score != null
-                ? `${attempt.score}/${attempt.maxScore}`
-                : "—"}
-            </>
+      {/* Header row: expand/collapse + tombol reset terpisah */}
+      <div className="flex items-center">
+        <button
+          type="button"
+          onClick={() => setOpen((o) => !o)}
+          className="flex items-center gap-3 flex-1 min-w-0 px-4 py-3 hover:bg-accent/40 transition-colors text-left"
+        >
+          {open ? (
+            <ChevronDown className="size-4 text-muted-foreground shrink-0" />
           ) : (
-            <>
-              <Loader2 className="size-3 animate-spin" />
-              Berlangsung
-            </>
+            <ChevronRight className="size-4 text-muted-foreground shrink-0" />
           )}
-        </Badge>
-      </button>
+          <div className="flex-1 min-w-0">
+            <p className="font-medium text-sm truncate">{attempt.user.name}</p>
+            <p className="text-xs text-muted-foreground truncate">
+              @{attempt.user.username} · mulai{" "}
+              {format(new Date(attempt.startedAt), "d MMM HH:mm")}
+              {attempt.submittedAt
+                ? ` · kirim ${format(new Date(attempt.submittedAt), "HH:mm")}`
+                : " · belum dikumpulkan"}
+            </p>
+          </div>
+          {attempt.violations.length > 0 ? (
+            <Badge className="bg-amber-500/15 text-amber-600 dark:text-amber-400 border border-amber-500/30 gap-1 shrink-0">
+              <AlertTriangle className="size-3" />
+              {attempt.violations.length}
+            </Badge>
+          ) : null}
+          <Badge variant="outline" className="shrink-0 gap-1">
+            {submitted ? (
+              <>
+                <CheckCircle2 className="size-3 text-emerald-500" />
+                {attempt.score != null
+                  ? `${attempt.score}/${attempt.maxScore}`
+                  : "—"}
+              </>
+            ) : (
+              <>
+                <Loader2 className="size-3 animate-spin" />
+                Berlangsung
+              </>
+            )}
+          </Badge>
+        </button>
+        <div className="shrink-0 pr-3 pl-1">
+          <Button
+            size="icon"
+            variant="ghost"
+            onClick={() => setResetOpen(true)}
+            title="Reset pengerjaan siswa ini (siswa bisa mengerjakan ulang)"
+            aria-label="Reset pengerjaan siswa"
+          >
+            <RotateCcw className="size-4 text-muted-foreground" />
+          </Button>
+        </div>
+      </div>
 
       {/* Expanded detail */}
       {open ? (
@@ -299,6 +353,43 @@ function AttemptCard({
 
       {/* Pratinjau file jawaban — tanpa download */}
       <FilePreview file={previewFile} onClose={() => setPreviewFile(null)} />
+
+      {/* Dialog konfirmasi reset pengerjaan */}
+      <Dialog open={resetOpen} onOpenChange={setResetOpen}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>Reset pengerjaan {attempt.user.name}?</DialogTitle>
+            <DialogDescription>
+              Seluruh jawaban, file yang diunggah, skor, dan log pelanggaran
+              pengerjaan ini akan <b>dihapus permanen</b>. Siswa tersebut dapat
+              mengerjakan tugas dari awal lagi.
+            </DialogDescription>
+          </DialogHeader>
+          <p className="text-xs text-muted-foreground">
+            Status saat ini:{" "}
+            <b>{submitted ? "sudah dikumpulkan" : "sedang berlangsung"}</b>
+            {attempt.score != null ? ` · nilai ${attempt.score}/${attempt.maxScore}` : ""}
+            {attempt.answers.length > 0 ? ` · ${attempt.answers.length} jawaban tersimpan` : ""}
+          </p>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setResetOpen(false)}>
+              Batal
+            </Button>
+            <Button
+              onClick={() => void resetAttempt()}
+              disabled={resetting}
+              className="bg-destructive hover:bg-destructive/90"
+            >
+              {resetting ? (
+                <Loader2 className="size-4 animate-spin mr-1" />
+              ) : (
+                <RotateCcw className="size-4 mr-1" />
+              )}
+              Reset &amp; ulangi
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </Card>
   );
 }

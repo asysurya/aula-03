@@ -7,6 +7,7 @@ import { format } from "date-fns";
 import {
   AlertTriangle,
   CheckCircle2,
+  ChevronLeft,
   ChevronRight,
   Circle,
   ClipboardList,
@@ -17,6 +18,7 @@ import {
   ImagePlus,
   Loader2,
   Play,
+  RotateCcw,
   Send,
   ShieldAlert,
   Timer,
@@ -113,6 +115,9 @@ export function FormPlayer({
   const [warning, setWarning] = useState<string | null>(null);
   const [result, setResult] = useState<FormSubmitResult | null>(null);
   const [remainingSec, setRemainingSec] = useState<number | null>(null);
+  // Pesan error submit terakhir — panel "coba kirim lagi" yang jelas,
+  // supaya siswa tahu pengiriman gagal dan BISA mengulang submit.
+  const [submitError, setSubmitError] = useState<string | null>(null);
 
   // Violations buffer + dirty flag for autosave
   const violationsRef = useRef<FormViolation[]>([]);
@@ -216,12 +221,16 @@ export function FormPlayer({
       return;
     }
     const base = startedAt ? new Date(startedAt).getTime() : Date.now();
+    // Throttle auto-submit: maks 1 percobaan tiap 10 detik. Kalau koneksi
+    // mati saat waktu habis, auto-submit TERUS mencoba (tidak diam-diam
+    // gagal) — dan siswa juga bisa kirim manual lewat tombol.
+    let lastAutoTry = 0;
     function tick() {
       const elapsed = (Date.now() - base) / 1000;
       const left = Math.max(0, Math.round(timeLimitMin * 60 - elapsed));
       setRemainingSec(left);
-      if (left <= 0) {
-        // auto-submit
+      if (left <= 0 && Date.now() - lastAutoTry > 10_000) {
+        lastAutoTry = Date.now();
         void submit(true);
       }
     }
@@ -267,6 +276,7 @@ export function FormPlayer({
   async function submit(auto = false) {
     if (submitting) return;
     setSubmitting(true);
+    setSubmitError(null);
     try {
       await persist(); // flush latest answers first
       const res = await fetch(
@@ -279,7 +289,19 @@ export function FormPlayer({
       );
       const json = await res.json();
       if (!res.ok) {
-        toast.error(json?.error || "Gagal mengirim jawaban");
+        if (res.status === 409 && json?.error === "ATTEMPT_ALREADY_SUBMITTED") {
+          // Submit sebenarnya sudah masuk (mis. percobaan sebelumnya sukses
+          // di server tapi responsnya tidak sampai ke client). Muat ulang.
+          invalidate();
+          setPhase("done");
+          toast.success("Jawabanmu sudah terkirim sebelumnya.");
+          return;
+        }
+        const msg =
+          json?.error ||
+          "Gagal mengirim jawaban — coba lagi. Jawabanmu tetap tersimpan.";
+        setSubmitError(msg);
+        toast.error(msg);
         return;
       }
       if (auto) logViolation("TIMEOUT");
@@ -289,6 +311,12 @@ export function FormPlayer({
         auto ? "Waktu habis — jawaban otomatis dikirim." : "Jawaban terkirim!"
       );
       invalidate();
+    } catch {
+      // Network error — autosave server-side tetap jalan; tawarkan retry.
+      setSubmitError(
+        "Koneksi terputus saat mengirim. Jawabanmu tersimpan — klik “Coba kirim lagi”."
+      );
+      toast.error("Koneksi terputus — jawaban tersimpan, coba kirim lagi.");
     } finally {
       setSubmitting(false);
       setConfirmOpen(false);
@@ -362,6 +390,7 @@ export function FormPlayer({
   const qs = questions;
   const current = qs[currentIdx];
   const oneByOne = settings?.oneByOne ?? true;
+  const allowBack = settings?.allowBack ?? false;
   const answeredCount = qs.filter((q) => {
     const a = answers[q.id];
     if (!a) return false;
@@ -659,6 +688,38 @@ export function FormPlayer({
         </div>
       )}
 
+      {/* Panel error submit — siswa TETAP BISA mengirim ulang (jawaban
+          tersimpan di server via autosave). */}
+      {phase === "playing" && submitError ? (
+        <Card className="p-3.5 border-destructive/40 bg-destructive/5 space-y-2">
+          <div className="flex items-start gap-2.5">
+            <AlertTriangle className="size-4.5 text-destructive shrink-0 mt-0.5" />
+            <div className="flex-1 min-w-0 space-y-1">
+              <p className="text-sm font-medium text-destructive">
+                Pengiriman jawaban belum berhasil
+              </p>
+              <p className="text-xs text-muted-foreground">
+                {submitError} Jawabanmu aman — tersimpan otomatis di server.
+                Periksa koneksi lalu kirim ulang.
+              </p>
+            </div>
+            <Button
+              size="sm"
+              onClick={() => void submit(false)}
+              disabled={submitting}
+              className="bg-destructive hover:bg-destructive/90 shrink-0"
+            >
+              {submitting ? (
+                <Loader2 className="size-3.5 animate-spin mr-1" />
+              ) : (
+                <RotateCcw className="size-3.5 mr-1" />
+              )}
+              Coba kirim lagi
+            </Button>
+          </div>
+        </Card>
+      ) : null}
+
       {/* Bottom bar */}
       <div className="flex items-center justify-between gap-2 flex-wrap sticky bottom-0 bg-background/90 backdrop-blur border-t border-border pt-3 pb-1">
         {oneByOne ? (
@@ -666,6 +727,16 @@ export function FormPlayer({
             <span className="text-xs text-muted-foreground tabular-nums">
               Soal {currentIdx + 1} / {qs.length}
             </span>
+            {allowBack ? (
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={currentIdx === 0}
+                onClick={() => setCurrentIdx((i) => Math.max(0, i - 1))}
+              >
+                <ChevronLeft className="size-4" /> Sebelumnya
+              </Button>
+            ) : null}
             <Button
               size="sm"
               disabled={currentIdx === qs.length - 1}

@@ -111,6 +111,8 @@ export interface FormSettings {
   trackTabSwitch: boolean;
   timeLimitMin: number | null;
   showResult: boolean;
+  /** Izinkan siswa kembali ke soal sebelumnya (mode satu-soal-per-layar). */
+  allowBack?: boolean;
 }
 
 export interface FormViolation {

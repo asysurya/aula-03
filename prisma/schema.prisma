@@ -419,6 +419,9 @@ model Form {
   trackTabSwitch   Boolean  @default(true)
   timeLimitMin     Int?
   showResult       Boolean  @default(true)
+  // Izinkan siswa kembali ke soal sebelumnya (mode satu-soal-per-layar).
+  // Nullable: form lama (null) = false — kompatibel dengan perilaku sebelumnya.
+  allowBack        Boolean?
   createdBy        String
   createdAt        DateTime @default(now())
   updatedAt        DateTime @updatedAt

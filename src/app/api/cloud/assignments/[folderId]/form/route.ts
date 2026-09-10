@@ -142,6 +142,7 @@ export async function GET(
         trackTabSwitch: form.trackTabSwitch,
         timeLimitMin: form.timeLimitMin,
         showResult: form.showResult,
+        allowBack: form.allowBack ?? false,
         questions: form.questions.map((q) => toQuestionDTO(q, true)),
       },
       attempt: null,
@@ -190,6 +191,7 @@ export async function GET(
         trackTabSwitch: form.trackTabSwitch,
         timeLimitMin: form.timeLimitMin,
         showResult: form.showResult,
+        allowBack: form.allowBack ?? false,
         questions: showCorrect
           ? form.questions.map((q) => toQuestionDTO(q, true, seed))
           : ordered,
@@ -231,6 +233,7 @@ export async function GET(
       trackTabSwitch: form.trackTabSwitch,
       timeLimitMin: form.timeLimitMin,
       showResult: form.showResult,
+      allowBack: form.allowBack ?? false,
       questions: [...qs].sort((a, b) => a.order - b.order),
     },
     attempt: null,
@@ -353,6 +356,7 @@ export async function PUT(
     trackTabSwitch: !!settings.trackTabSwitch,
     timeLimitMin: timeLimit == null ? null : Math.round(timeLimit),
     showResult: settings.showResult !== false,
+    allowBack: !!settings.allowBack,
     createdBy: user.id,
   };
 

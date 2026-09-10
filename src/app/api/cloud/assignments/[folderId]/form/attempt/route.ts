@@ -126,6 +126,7 @@ export async function POST(
       showResult: form.showResult,
       shuffleQuestions: form.shuffleQuestions,
       shuffleOptions: form.shuffleOptions,
+      allowBack: form.allowBack ?? false,
     },
     questions: ordered,
   });

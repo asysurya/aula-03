@@ -9,12 +9,15 @@ import {
   CheckCircle2,
   Circle,
   Copy,
+  Download,
+  FileJson,
   FileQuestion,
   ImagePlus,
   Loader2,
   Plus,
   Save,
   ShieldAlert,
+  Sparkles,
   Trash2,
   X,
 } from "lucide-react";
@@ -46,6 +49,13 @@ import {
   type FormQuestionType,
   type FormSettings,
 } from "@/lib/form-types";
+import type { FormIOParsedQuestion } from "@/lib/form-io";
+import {
+  AiGenerateDialog,
+  FormImportDialog,
+  downloadFormJson,
+  type ApplyMode,
+} from "./form-io-dialogs";
 
 // ── Local question model (editable, may have local ids) ──────────
 
@@ -105,12 +115,15 @@ export function FormBuilder({
       trackTabSwitch: true,
       timeLimitMin: null,
       showResult: true,
+      allowBack: false,
     }
   );
   const [questions, setQuestions] = useState<EditableQuestion[]>(
     initialQuestions.map(dtoToEditable)
   );
   const [saving, setSaving] = useState(false);
+  const [aiOpen, setAiOpen] = useState(false);
+  const [importOpen, setImportOpen] = useState(false);
   const [timeLimitInput, setTimeLimitInput] = useState<string>(
     initialSettings?.timeLimitMin != null
       ? String(initialSettings.timeLimitMin)
@@ -118,6 +131,64 @@ export function FormBuilder({
   );
 
   const locked = hasAttempts;
+
+  // Terapkan hasil import JSON / draf AI: konversi ke model editable.
+  function applyImported(
+    imported: FormIOParsedQuestion[],
+    mode: ApplyMode,
+    importedSettings?: Partial<FormSettings>
+  ) {
+    if (imported.length === 0) return;
+    const toEditable = imported.map((q) => ({
+      localId: makeQuestionId(),
+      type: q.type,
+      text: q.text,
+      points: q.points,
+      required: q.required,
+      options: q.options.map((o) => ({ ...o })),
+      correct: [...q.correct],
+      imageFileId: null,
+      imagePreview: null,
+    }));
+    setQuestions((prev) =>
+      mode === "replace" ? toEditable : [...prev, ...toEditable]
+    );
+    if (importedSettings && Object.keys(importedSettings).length > 0) {
+      setSettings((prev) => ({ ...prev, ...importedSettings }));
+      if (importedSettings.timeLimitMin != null) {
+        setTimeLimitInput(String(importedSettings.timeLimitMin));
+      } else if ("timeLimitMin" in importedSettings) {
+        setTimeLimitInput("");
+      }
+    }
+    toast.success(
+      mode === "replace"
+        ? `${imported.length} soal dimuat (mengganti yang lama)`
+        : `${imported.length} soal ditambahkan`
+    );
+  }
+
+  function exportCurrent() {
+    if (questions.length === 0) {
+      toast.error("Belum ada soal untuk diexport");
+      return;
+    }
+    downloadFormJson(
+      {
+        ...settings,
+        timeLimitMin: timeLimitInput ? parseInt(timeLimitInput, 10) : null,
+      },
+      questions.map((q) => ({
+        type: q.type,
+        text: q.text,
+        points: q.points,
+        required: q.required,
+        options: q.options,
+        correct: q.correct,
+      })),
+      `form-tugas-${folderId.slice(-8)}`
+    );
+  }
 
   function addQuestion() {
     setQuestions((prev) => [
@@ -381,10 +452,17 @@ export function FormBuilder({
           />
           <SettingSwitch
             label="Satu soal per layar"
-            hint="Tidak bisa mundur ke soal sebelumnya"
+            hint="Soal tampil satu per satu secara berurutan"
             checked={settings.oneByOne}
             disabled={locked}
             onChange={(v) => setSettings((s) => ({ ...s, oneByOne: v }))}
+          />
+          <SettingSwitch
+            label="Boleh kembali ke soal sebelumnya"
+            hint="Tampilkan tombol “Sebelumnya” saat mengerjakan (mode satu soal per layar)"
+            checked={settings.allowBack ?? false}
+            disabled={locked || !settings.oneByOne}
+            onChange={(v) => setSettings((s) => ({ ...s, allowBack: v }))}
           />
           <SettingSwitch
             label="Larang paste"
@@ -444,14 +522,45 @@ export function FormBuilder({
             <FileQuestion className="size-5 text-primary" />
             Soal ({questions.length})
           </h3>
-          <div className="text-xs text-muted-foreground flex gap-3">
-            <span>
-              Total poin: <b className="text-foreground">{totalPoints}</b>
-            </span>
-            <span>
-              Dinilai otomatis:{" "}
-              <b className="text-foreground">{autoGradable}</b>
-            </span>
+          <div className="flex items-center gap-4 flex-wrap">
+            <div className="text-xs text-muted-foreground flex gap-3">
+              <span>
+                Total poin: <b className="text-foreground">{totalPoints}</b>
+              </span>
+              <span>
+                Dinilai otomatis:{" "}
+                <b className="text-foreground">{autoGradable}</b>
+              </span>
+            </div>
+            <div className="flex items-center gap-1.5">
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => setAiOpen(true)}
+                disabled={locked}
+                title="Buat draf soal dengan AI dari prompt bebas"
+              >
+                <Sparkles className="size-3.5 mr-1" /> Buat dengan AI
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => setImportOpen(true)}
+                disabled={locked}
+                title="Impor soal dari file/teks JSON"
+              >
+                <FileJson className="size-3.5 mr-1" /> Impor
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={exportCurrent}
+                disabled={questions.length === 0}
+                title="Export soal + pengaturan ke file JSON"
+              >
+                <Download className="size-3.5 mr-1" /> Export
+              </Button>
+            </div>
           </div>
         </div>
 
@@ -734,6 +843,18 @@ export function FormBuilder({
           Simpan Form Tugas
         </Button>
       </div>
+
+      {/* Dialog AI + Import JSON */}
+      <AiGenerateDialog
+        open={aiOpen}
+        onOpenChange={setAiOpen}
+        onApply={applyImported}
+      />
+      <FormImportDialog
+        open={importOpen}
+        onOpenChange={setImportOpen}
+        onApply={applyImported}
+      />
     </div>
   );
 }
