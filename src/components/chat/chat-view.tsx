@@ -197,18 +197,101 @@ export function ChatView({
     };
   }, [conversation.id, conversation.kind, fetchMessages, mergeMessages]);
 
-  // Polling realtime: tidak hanya pesan BARU — pesan yang DIEDIT, DIHAPUS,
-  // dan REAKSI dari pengguna lain juga tersinkron otomatis.
+  // Terapkan delta sync (dipakai BERSAMA oleh SSE stream & polling
+  // fallback): pesan baru → append; berubah → replace by id; terhapus →
+  // buang dari state + seen.
+  const applySyncData = useCallback(
+    (data: {
+      new?: ChatMessage[];
+      changed?: ChatMessage[];
+      deletedIds?: string[];
+      serverTime?: string;
+    }) => {
+      if (data.new?.length) mergeMessages(data.new);
+      if (data.changed?.length) {
+        const changedMap = new Map(data.changed.map((c) => [c.id, c]));
+        setMessages((prev) => prev.map((m) => changedMap.get(m.id) ?? m));
+      }
+      if (data.deletedIds?.length) {
+        const del = new Set(data.deletedIds);
+        for (const id of del) seenIdsRef.current.delete(id);
+        setMessages((prev) => prev.filter((m) => !del.has(m.id)));
+      }
+      if (data.serverTime) lastPollRef.current = data.serverTime;
+    },
+    [mergeMessages]
+  );
+
+  // ── Realtime "0-delay": SSE stream ──
+  // Server mendorong delta (pesan/edit/hapus/reaksi) seketika begitu
+  // terjadi (cek tiap ±400 ms di server). EventSource auto-reconnect.
+  // Saat tab disembunyikan: tutup koneksi (hemat resource), buka lagi saat
+  // kembali visible — polling fallback menutup celah di sela-selanya.
+  const sseAliveRef = useRef<number>(0);
+  useEffect(() => {
+    const key = `${conversation.kind}:${conversation.id}`;
+    let es: EventSource | null = null;
+    let stopped = false;
+
+    function connect() {
+      if (stopped || typeof window === "undefined") return;
+      if (conversationKeyRef.current !== key) return;
+      const params = new URLSearchParams({
+        kind: conversation.kind,
+        id: conversation.id,
+      });
+      if (lastPollRef.current) params.set("since", lastPollRef.current);
+      es = new EventSource(
+        `/api/chat/messages/stream?${params.toString()}`
+      );
+      es.onmessage = (ev: MessageEvent<string>) => {
+        if (conversationKeyRef.current !== key) return;
+        try {
+          const data = JSON.parse(ev.data) as {
+            new?: ChatMessage[];
+            changed?: ChatMessage[];
+            deletedIds?: string[];
+            serverTime?: string;
+            hello?: boolean;
+          };
+          applySyncData(data);
+          sseAliveRef.current = Date.now();
+        } catch {
+          /* event rusak — abaikan */
+        }
+      };
+    }
+
+    function onVisibility() {
+      if (document.hidden) {
+        es?.close();
+        es = null;
+      } else {
+        connect();
+      }
+    }
+
+    connect();
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      stopped = true;
+      document.removeEventListener("visibilitychange", onVisibility);
+      es?.close();
+      es = null;
+    };
+  }, [conversation.id, conversation.kind, applySyncData]);
+
+  // Polling fallback (2,5 dtk) — hanya aktif kalau SSE tidak sehat
+  // (>10 dtk tanpa event), mis. proxy memblok streaming atau koneksi putus.
   useEffect(() => {
     const key = `${conversation.kind}:${conversation.id}`;
     const interval = setInterval(async () => {
       if (pollInFlightRef.current) return;
       if (typeof document !== "undefined" && document.hidden) return;
       if (conversationKeyRef.current !== key) return;
+      if (Date.now() - sseAliveRef.current < 10_000) return; // SSE sehat
       pollInFlightRef.current = true;
       try {
-        // Hanya id pesan nyata — id optimistik "temp_" dikecualikan supaya
-        // kiriman yang masih berjalan tidak salah dianggap terhapus.
         const loadedIds = Array.from(seenIdsRef.current).filter(
           (id) => !id.startsWith("temp_")
         );
@@ -224,26 +307,13 @@ export function ChatView({
         });
         if (!res.ok) return;
         const data = (await res.json()) as {
-          new: ChatMessage[];
-          changed: ChatMessage[];
-          deletedIds: string[];
-          serverTime: string;
+          new?: ChatMessage[];
+          changed?: ChatMessage[];
+          deletedIds?: string[];
+          serverTime?: string;
         };
         if (conversationKeyRef.current !== key) return;
-        // 1) Pesan baru.
-        if (data.new?.length) mergeMessages(data.new);
-        // 2) Pesan berubah (edit / reaksi): replace penuh by id.
-        if (data.changed?.length) {
-          const changedMap = new Map(data.changed.map((c) => [c.id, c]));
-          setMessages((prev) => prev.map((m) => changedMap.get(m.id) ?? m));
-        }
-        // 3) Pesan dihapus pengguna lain: buang dari state + seen.
-        if (data.deletedIds?.length) {
-          const del = new Set(data.deletedIds);
-          for (const id of del) seenIdsRef.current.delete(id);
-          setMessages((prev) => prev.filter((m) => !del.has(m.id)));
-        }
-        if (data.serverTime) lastPollRef.current = data.serverTime;
+        applySyncData(data);
       } catch {
         // swallow polling errors silently
       } finally {
@@ -251,7 +321,7 @@ export function ChatView({
       }
     }, MESSAGE_POLL_INTERVAL);
     return () => clearInterval(interval);
-  }, [conversation.id, conversation.kind, mergeMessages]);
+  }, [conversation.id, conversation.kind, applySyncData]);
 
   // Poor-man's cleanup cron: fire cleanup on mount + every 10 min.
   // Fire-and-forget; do not await.
