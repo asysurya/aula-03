@@ -15,14 +15,20 @@ import {
   Eye,
   EyeOff,
   FileUp,
+  Gamepad2,
   ImagePlus,
+  ListChecks,
   Loader2,
+  Maximize2,
+  Minimize2,
   Play,
   RotateCcw,
   Send,
   ShieldAlert,
   Timer,
+  Trophy,
   Upload,
+  Zap,
 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -85,6 +91,8 @@ export function FormPlayer({
   canStart,
   deadlinePassed,
   deadlineLabel,
+  attemptsUsed = 1,
+  canRetry = false,
 }: {
   folderId: string;
   form: (FormSettings & { id: string; questions: FormQuestionDTO[] }) | null;
@@ -92,6 +100,8 @@ export function FormPlayer({
   canStart: boolean;
   deadlinePassed: boolean;
   deadlineLabel: string;
+  attemptsUsed?: number;
+  canRetry?: boolean;
 }) {
   const qc = useQueryClient();
 
@@ -118,6 +128,13 @@ export function FormPlayer({
   // Pesan error submit terakhir — panel "coba kirim lagi" yang jelas,
   // supaya siswa tahu pengiriman gagal dan BISA mengulang submit.
   const [submitError, setSubmitError] = useState<string | null>(null);
+  // Ulangi percobaan (guru mengizinkan > 1 percobaan)
+  const [retryOpen, setRetryOpen] = useState(false);
+  const [retrying, setRetrying] = useState(false);
+  // Game Kuis Kilat (latihan soal PG race-time)
+  const [quizOpen, setQuizOpen] = useState(false);
+  // Layar penuh saat mengerjakan (anti-nyontek tambahan)
+  const [isFullscreen, setIsFullscreen] = useState(false);
 
   // Violations buffer + dirty flag for autosave
   const violationsRef = useRef<FormViolation[]>([]);
@@ -142,6 +159,19 @@ export function FormPlayer({
   );
 
   // ── Start attempt ─────────────────────────────────────────────────
+  function applyAttemptResponse(json: {
+    questions: FormQuestionDTO[];
+    settings: FormSettings;
+  }) {
+    setQuestions(json.questions);
+    setSettings(json.settings);
+    setAnswers({});
+    setCurrentIdx(0);
+    setSubmitError(null);
+    setResult(null);
+    setPhase("playing");
+  }
+
   async function startAttempt() {
     setStarting(true);
     try {
@@ -164,16 +194,44 @@ export function FormPlayer({
         toast.error(json?.error || "Gagal memulai tugas");
         return;
       }
-      setQuestions(json.questions);
-      setSettings(json.settings);
-      setAnswers({});
-      setCurrentIdx(0);
-      setPhase("playing");
+      applyAttemptResponse(json);
       toast.success("Pengerjaan dimulai — semangat!");
       invalidate();
     } finally {
       setStarting(false);
       setRulesOpen(false);
+    }
+  }
+
+  // ── Ulangi percobaan (guru set maxAttempts > 1) ──────────────────────
+  async function retryAttempt() {
+    if (retrying) return;
+    setRetrying(true);
+    try {
+      const res = await fetch(
+        `/api/cloud/assignments/${folderId}/form/attempt/retry`,
+        { method: "POST" }
+      );
+      const json = await res.json();
+      if (!res.ok) {
+        toast.error(json?.error || "Gagal mengulang pengerjaan");
+        if (
+          json?.error === "RETRY_LIMIT_REACHED" ||
+          json?.error === "DEADLINE_PASSED" ||
+          json?.error === "ATTEMPT_NOT_FOUND"
+        ) {
+          invalidate();
+        }
+        return;
+      }
+      applyAttemptResponse(json);
+      toast.success("Percobaan baru dimulai — semangat!");
+      invalidate();
+    } catch {
+      toast.error("Koneksi terputus — coba lagi");
+    } finally {
+      setRetrying(false);
+      setRetryOpen(false);
     }
   }
 
@@ -221,13 +279,14 @@ export function FormPlayer({
       return;
     }
     const base = startedAt ? new Date(startedAt).getTime() : Date.now();
+    const limitSec = timeLimitMin * 60; // sudah di-guard non-null di atas
     // Throttle auto-submit: maks 1 percobaan tiap 10 detik. Kalau koneksi
     // mati saat waktu habis, auto-submit TERUS mencoba (tidak diam-diam
     // gagal) — dan siswa juga bisa kirim manual lewat tombol.
     let lastAutoTry = 0;
     function tick() {
       const elapsed = (Date.now() - base) / 1000;
-      const left = Math.max(0, Math.round(timeLimitMin * 60 - elapsed));
+      const left = Math.max(0, Math.round(limitSec - elapsed));
       setRemainingSec(left);
       if (left <= 0 && Date.now() - lastAutoTry > 10_000) {
         lastAutoTry = Date.now();
@@ -256,21 +315,99 @@ export function FormPlayer({
       document.removeEventListener("visibilitychange", onVisibility);
   }, [phase, settings?.trackTabSwitch, logViolation]);
 
-  // ── Anti-cheat: block paste + context menu ────────────────────────
+  // ── Anti-cheat: block copy/cut + context menu (React handlers) ────
+  // Catatan: PASTE tidak ditangani di sini — ditangkap native capture
+  // di efek bawah supaya tidak tercatat dobel.
   const antiPasteHandlers = useMemo(() => {
     if (phase !== "playing" || !settings?.preventPaste)
       return {};
     return {
-      onPaste: (e: React.ClipboardEvent) => {
-        e.preventDefault();
-        logViolation("PASTE");
-        setWarning("Paste diblokir! Percobaan paste tercatat.");
-      },
       onCopy: (e: React.ClipboardEvent) => e.preventDefault(),
       onCut: (e: React.ClipboardEvent) => e.preventDefault(),
       onContextMenu: (e: React.MouseEvent) => e.preventDefault(),
     };
+  }, [phase, settings?.preventPaste]);
+
+  // ── Anti-cheat: paste detection SUPER SENSITIF (cross-device) ──────
+  // Masalah lama: paste dari HP (keyboard Gboard/SwiftKey) sering TIDAK
+  // memicu event "paste" — jadi lolos tanpa tercatat. Solusi berlapis:
+  //   1. keydown capture — Ctrl/Cmd+V/X/C diblokir SEBELUM event paste
+  //      dibentuk (menangkap semua browser desktop).
+  //   2. paste capture di document — menangkap paste dari menu klik-kanan
+  //      dan menu konteks mobile (React handler lama sering tak terpasang
+  //      di input yang difokus keyboard virtual).
+  //   3. beforeinput capture (inputType insertFromPaste / deleteByCut) —
+  //      jalur yang dipakai keyboard mobile pihak ketiga; preventDefault
+  //      di sini mencegah teks masuk SEKALIGUS mencatat pelanggaran.
+  useEffect(() => {
+    if (phase !== "playing" || !settings?.preventPaste) return;
+
+    function flag(detail: string, msg: string) {
+      logViolation("PASTE", detail);
+      setWarning(msg);
+    }
+    const onKeyDown = (e: KeyboardEvent) => {
+      const k = (e.key || "").toLowerCase();
+      if ((e.ctrlKey || e.metaKey) && ["v", "x", "c"].includes(k)) {
+        e.preventDefault();
+        flag(`ctrl+${k}`, "Copy/paste/cut diblokir! Percobaan tercatat.");
+      }
+    };
+    const onPasteNative = (e: Event) => {
+      e.preventDefault();
+      flag("paste-event", "Paste diblokir! Percobaan paste tercatat.");
+    };
+    const onBeforeInput = (e: Event) => {
+      const ie = e as InputEvent;
+      if (
+        ie.inputType === "insertFromPaste" ||
+        ie.inputType === "insertTransposePaste" ||
+        ie.inputType === "deleteByCut"
+      ) {
+        e.preventDefault();
+        flag(ie.inputType, "Paste diblokir! Percobaan paste tercatat.");
+      }
+    };
+
+    document.addEventListener("keydown", onKeyDown, true);
+    document.addEventListener("paste", onPasteNative, true);
+    document.addEventListener("beforeinput", onBeforeInput, true);
+    return () => {
+      document.removeEventListener("keydown", onKeyDown, true);
+      document.removeEventListener("paste", onPasteNative, true);
+      document.removeEventListener("beforeinput", onBeforeInput, true);
+    };
   }, [phase, settings?.preventPaste, logViolation]);
+
+  // ── Anti-cheat: window blur (pindah aplikasi di HP) ─────────────────
+  // visibilitychange tidak selalu terpicu saat berpindah APLIKASI di
+  // beberapa browser mobile — window blur menutup celah itu.
+  useEffect(() => {
+    if (phase !== "playing" || !settings?.trackTabSwitch) return;
+    const onBlur = () => {
+      logViolation("EXIT", "window-blur");
+      setWarning(
+        "Kamu meninggalkan halaman! Perpindahan aplikasi tercatat sebagai pelanggaran."
+      );
+    };
+    window.addEventListener("blur", onBlur);
+    return () => window.removeEventListener("blur", onBlur);
+  }, [phase, settings?.trackTabSwitch, logViolation]);
+
+  // ── Layar penuh saat mengerjakan (anti-nyontek tambahan) ───────────
+  function toggleFullscreen() {
+    if (document.fullscreenElement) {
+      void document.exitFullscreen();
+    } else {
+      void document.documentElement.requestFullscreen();
+    }
+  }
+  useEffect(() => {
+    const onFs = () => setIsFullscreen(!!document.fullscreenElement);
+    document.addEventListener("fullscreenchange", onFs);
+    return () =>
+      document.removeEventListener("fullscreenchange", onFs);
+  }, []);
 
   // ── Submit ────────────────────────────────────────────────────────
   async function submit(auto = false) {
@@ -391,6 +528,7 @@ export function FormPlayer({
   const current = qs[currentIdx];
   const oneByOne = settings?.oneByOne ?? true;
   const allowBack = settings?.allowBack ?? false;
+  const maxAttempts = form?.maxAttempts ?? settings?.maxAttempts ?? 1;
   const answeredCount = qs.filter((q) => {
     const a = answers[q.id];
     if (!a) return false;
@@ -398,6 +536,35 @@ export function FormPlayer({
     if (q.type === "FILE" || q.type === "IMAGE") return !!a.fileId;
     return a.text.trim().length > 0;
   }).length;
+
+  // Soal WAJIB yang belum dijawab — untuk peringatan sebelum submit.
+  const unansweredRequired = qs
+    .map((q, i) => ({ q, i }))
+    .filter(({ q }) => {
+      if (!q.required) return false;
+      const a = answers[q.id];
+      if (!a) return true;
+      if (q.type === "PG" || q.type === "MULTI_PG") return a.optionIds.length === 0;
+      if (q.type === "FILE" || q.type === "IMAGE") return !a.fileId;
+      return a.text.trim().length === 0;
+    });
+
+  // Lompat ke soal tertentu (mode satu-per-layar atau semua-soal).
+  function jumpToQuestion(idx: number, questionId: string) {
+    if (oneByOne) {
+      setCurrentIdx(idx);
+    } else {
+      document
+        .getElementById(`student-q-${questionId}`)
+        ?.scrollIntoView({ behavior: "smooth", block: "center" });
+    }
+  }
+
+  // Soal PG (dengan kunci) untuk game Kuis Kilat — hanya tersedia setelah
+  // submit (jawaban benar dibuka oleh server).
+  const quizQuestions = qs.filter(
+    (q) => q.type === "PG" && q.correct && q.correct.length === 1
+  );
 
   // ── INTRO (belum mulai) ───────────────────────────────────────────
   if (phase === "intro") {
@@ -428,7 +595,11 @@ export function FormPlayer({
           />
           <MiniStat
             label="Percobaan"
-            value="1×"
+            value={
+              maxAttempts > 1
+                ? `${attemptsUsed}/${maxAttempts}×`
+                : "1×"
+            }
           />
         </div>
 
@@ -436,13 +607,25 @@ export function FormPlayer({
           <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
             Aturan pengerjaan
           </p>
-          <Rule text="Hanya ada satu kesempatan pengerjaan — tidak bisa diulang." />
+          <Rule
+            text={
+              maxAttempts > 1
+                ? `Kamu punya ${maxAttempts} kesempatan pengerjaan — nilai yang dipakai adalah percobaan TERAKHIR.`
+                : "Hanya ada satu kesempatan pengerjaan — tidak bisa diulang."
+            }
+          />
           {form?.shuffleQuestions ? (
             <Rule text="Urutan soal diacak khusus untukmu." />
           ) : null}
           {form?.shuffleOptions ? <Rule text="Urutan opsi jawaban diacak." /> : null}
           {form?.oneByOne ? (
-            <Rule text="Soal tampil satu per satu dan tidak bisa mundur." />
+            <Rule
+              text={
+                form?.allowBack
+                  ? "Soal tampil satu per satu — kamu boleh kembali ke soal sebelumnya."
+                  : "Soal tampil satu per satu dan tidak bisa kembali ke soal sebelumnya."
+              }
+            />
           ) : null}
           {form?.preventPaste ? (
             <Rule text="Copy-paste diblokir; percobaan paste tercatat." />
@@ -495,6 +678,12 @@ export function FormPlayer({
               <li>Timer (jika ada) mulai berjalan saat kamu klik "Ya, mulai".</li>
               <li>Jangan berpindah tab — setiap perpindahan tercatat.</li>
               <li>Progress jawaban tersimpan otomatis tiap 5 detik.</li>
+              {maxAttempts > 1 ? (
+                <li>
+                  Kamu punya <b>{maxAttempts} percobaan</b> — percobaan baru
+                  tersedia setelah yang sekarang dikumpulkan.
+                </li>
+              ) : null}
               {form?.timeLimitMin ? (
                 <li>
                   Batas waktu <b>{form.timeLimitMin} menit</b>; jawaban dikirim
@@ -582,6 +771,100 @@ export function FormPlayer({
             ))}
           </div>
         ) : null}
+
+        {/* Ulangi percobaan (guru mengizinkan maxAttempts > 1) */}
+        {canRetry ? (
+          <div className="rounded-lg border border-primary/30 bg-primary/5 p-4 space-y-2.5">
+            <p className="text-sm">
+              Percobaan <b>{attemptsUsed}</b> dari <b>{maxAttempts}</b>{" "}
+              terpakai. Kamu masih bisa mengulang — nilai yang dipakai adalah
+              percobaan <b>terakhir</b>.
+            </p>
+            <Button
+              onClick={() => setRetryOpen(true)}
+              disabled={retrying}
+              className="gap-1.5"
+            >
+              {retrying ? (
+                <Loader2 className="size-4 animate-spin" />
+              ) : (
+                <RotateCcw className="size-4" />
+              )}
+              {retrying ? "Menyiapkan…" : "Ulangi pengerjaan"}
+            </Button>
+          </div>
+        ) : null}
+
+        {/* Game Kuis Kilat — latihan soal PG race-time */}
+        {quizQuestions.length >= 3 ? (
+          <div className="rounded-lg border border-violet-500/30 bg-violet-500/5 p-4 space-y-2.5">
+            <p className="text-sm flex items-start gap-2">
+              <Gamepad2 className="size-4 text-violet-500 shrink-0 mt-0.5" />
+              <span>
+                Ulangi materi ini sambil bermain <b>Kuis Kilat</b> — jawab{" "}
+                {quizQuestions.length} soal pilihan ganda, 15 detik per soal,
+                kumpulkan poin &amp; combo sebanyak mungkin. Tidak memengaruhi
+                nilaimu.
+              </span>
+            </p>
+            <Button
+              variant="outline"
+              onClick={() => setQuizOpen(true)}
+              className="gap-1.5 border-violet-500/40 text-violet-600 dark:text-violet-400 hover:bg-violet-500/10"
+            >
+              <Zap className="size-4" /> Main Kuis Kilat
+            </Button>
+          </div>
+        ) : null}
+
+        {/* Dialog konfirmasi ulangi percobaan */}
+        <Dialog open={retryOpen} onOpenChange={setRetryOpen}>
+          <DialogContent className="max-w-md">
+            <DialogHeader>
+              <DialogTitle className="flex items-center gap-2">
+                <RotateCcw className="size-5 text-primary" />
+                Ulangi pengerjaan?
+              </DialogTitle>
+              <DialogDescription>
+                Percobaan ini diarsipkan dan mulai dari awal lagi. Kamu punya{" "}
+                <b>{maxAttempts - attemptsUsed}</b> percobaan tersisa.
+              </DialogDescription>
+            </DialogHeader>
+            <ul className="text-sm space-y-2 list-disc pl-4">
+              <li>Jawaban percobaan lama tetap tersimpan di arsip guru.</li>
+              <li>
+                Nilai yang dipakai adalah percobaan{" "}
+                <b>terakhir yang dikumpulkan</b>.
+              </li>
+              <li>Soal dan opsi diacak ulang.</li>
+            </ul>
+            <DialogFooter>
+              <Button variant="outline" onClick={() => setRetryOpen(false)}>
+                Batal
+              </Button>
+              <Button
+                onClick={() => void retryAttempt()}
+                disabled={retrying}
+                className="gap-1.5"
+              >
+                {retrying ? (
+                  <Loader2 className="size-4 animate-spin" />
+                ) : (
+                  <Play className="size-4" />
+                )}
+                Ya, ulangi sekarang
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+
+        {/* Game Kuis Kilat */}
+        {quizOpen ? (
+          <QuickQuiz
+            questions={quizQuestions}
+            onClose={() => setQuizOpen(false)}
+          />
+        ) : null}
       </Card>
     );
   }
@@ -623,19 +906,38 @@ export function FormPlayer({
               Terjawab {answeredCount}/{qs.length}
             </span>
           </div>
-          {remainingSec != null ? (
-            <span
-              className={cn(
-                "inline-flex items-center gap-1.5 font-mono text-sm font-semibold tabular-nums px-2.5 py-1 rounded-md",
-                timerDanger
-                  ? "bg-destructive/15 text-destructive animate-pulse"
-                  : "bg-secondary"
-              )}
+          <div className="flex items-center gap-2">
+            {remainingSec != null ? (
+              <span
+                className={cn(
+                  "inline-flex items-center gap-1.5 font-mono text-sm font-semibold tabular-nums px-2.5 py-1 rounded-md",
+                  timerDanger
+                    ? "bg-destructive/15 text-destructive animate-pulse"
+                    : "bg-secondary"
+                )}
+              >
+                <Timer className="size-3.5" />
+                {minutes}:{String(seconds).padStart(2, "0")}
+              </span>
+            ) : null}
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={toggleFullscreen}
+              title={
+                isFullscreen
+                  ? "Keluar dari layar penuh"
+                  : "Kerjakan dalam layar penuh (anti-nyontek)"
+              }
+              aria-label="Layar penuh"
             >
-              <Timer className="size-3.5" />
-              {minutes}:{String(seconds).padStart(2, "0")}
-            </span>
-          ) : null}
+              {isFullscreen ? (
+                <Minimize2 className="size-4" />
+              ) : (
+                <Maximize2 className="size-4" />
+              )}
+            </Button>
+          </div>
         </div>
         <Progress
           value={
@@ -766,16 +1068,17 @@ export function FormPlayer({
         </Button>
       </div>
 
-      {/* Confirm dialog */}
+      {/* Confirm dialog — dengan peringatan soal WAJIB belum dijawab */}
       <Dialog open={confirmOpen} onOpenChange={setConfirmOpen}>
         <DialogContent className="max-w-md">
           <DialogHeader>
             <DialogTitle>Kumpulkan jawaban?</DialogTitle>
             <DialogDescription>
-              Jawaban akan dikirim dan <b>tidak bisa diubah lagi</b>.
+              Jawaban akan dikirim dan <b>tidak bisa diubah lagi</b>
+              {maxAttempts > 1 ? " untuk percobaan ini." : "."}
             </DialogDescription>
           </DialogHeader>
-          <div className="text-sm space-y-1.5">
+          <div className="text-sm space-y-2">
             <p>
               Terjawab:{" "}
               <b className={answeredCount === qs.length ? "text-emerald-600 dark:text-emerald-400" : "text-amber-600 dark:text-amber-400"}>
@@ -783,28 +1086,70 @@ export function FormPlayer({
               </b>{" "}
               soal
             </p>
-            {answeredCount < qs.length ? (
+            {unansweredRequired.length > 0 ? (
+              <div className="rounded-lg border border-destructive/40 bg-destructive/10 p-3 space-y-2">
+                <p className="text-sm font-medium text-destructive flex items-center gap-1.5">
+                  <AlertTriangle className="size-4 shrink-0" />
+                  {unansweredRequired.length} soal WAJIB belum dijawab!
+                </p>
+                <p className="text-xs text-muted-foreground">
+                  Soal nomor{" "}
+                  <b className="text-foreground">
+                    {unansweredRequired
+                      .slice(0, 12)
+                      .map((u) => `#${u.i + 1}`)
+                      .join(", ")}
+                    {unansweredRequired.length > 12
+                      ? ` +${unansweredRequired.length - 12} lainnya`
+                      : ""}
+                  </b>{" "}
+                  wajib diisi — nilai kosong = 0 poin.
+                </p>
+                <div className="flex flex-wrap gap-1.5">
+                  {unansweredRequired.slice(0, 12).map(({ q, i }) => (
+                    <Button
+                      key={q.id}
+                      size="sm"
+                      variant="outline"
+                      className="h-7 px-2 text-xs"
+                      onClick={() => {
+                        setConfirmOpen(false);
+                        jumpToQuestion(i, q.id);
+                      }}
+                    >
+                      <ListChecks className="size-3 mr-1" /> Soal {i + 1}
+                    </Button>
+                  ))}
+                </div>
+              </div>
+            ) : answeredCount < qs.length ? (
               <p className="text-xs text-muted-foreground">
-                Soal yang belum dijawab akan tetap kosong (0 poin) — kecuali
-                tidak wajib.
+                {qs.length - answeredCount} soal opsional belum dijawab —
+                akan tetap kosong (0 poin).
               </p>
             ) : null}
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setConfirmOpen(false)}>
-              Periksa lagi
+              {unansweredRequired.length > 0 ? "Periksa dulu" : "Periksa lagi"}
             </Button>
             <Button
               onClick={() => void submit(false)}
               disabled={submitting}
-              className="bg-emerald-600 hover:bg-emerald-700"
+              className={cn(
+                "gap-1.5",
+                unansweredRequired.length > 0 &&
+                  "bg-destructive hover:bg-destructive/90"
+              )}
             >
               {submitting ? (
-                <Loader2 className="size-4 animate-spin mr-1" />
+                <Loader2 className="size-4 animate-spin" />
               ) : (
-                <Send className="size-4 mr-1" />
+                <Send className="size-4" />
               )}
-              Ya, kumpulkan
+              {unansweredRequired.length > 0
+                ? `Tetap kirim (${unansweredRequired.length} kosong)`
+                : "Ya, kumpulkan"}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -814,6 +1159,226 @@ export function FormPlayer({
 }
 
 // ── Sub-components ─────────────────────────────────────────────────
+
+// Kuis Kilat — game latihan PG race-time (tidak memengaruhi nilai).
+// 15 detik per soal, poin = 10 benar + bonus combo, soal diacak.
+function QuickQuiz({
+  questions,
+  onClose,
+}: {
+  questions: FormQuestionDTO[];
+  onClose: () => void;
+}) {
+  const TIME_PER_Q = 15;
+  const [deck] = useState(() =>
+    [...questions].sort(() => Math.random() - 0.5)
+  );
+  const [idx, setIdx] = useState(0);
+  const [timeLeft, setTimeLeft] = useState(TIME_PER_Q);
+  const [chosen, setChosen] = useState<string | null>(null);
+  const [score, setScore] = useState(0);
+  const [streak, setStreak] = useState(0);
+  const [bestStreak, setBestStreak] = useState(0);
+  const [correctCount, setCorrectCount] = useState(0);
+  const [finished, setFinished] = useState(false);
+
+  const q = deck[idx];
+
+  function next() {
+    if (idx + 1 >= deck.length) {
+      setFinished(true);
+      return;
+    }
+    setIdx((i) => i + 1);
+    setChosen(null);
+  }
+
+  // Guard: soal ini sudah dijawab / di-timeout? (ref — tanpa re-render)
+  const settledRef = useRef(false);
+
+  // Timer per soal — semua setState terjadi dalam callback interval
+  // (bukan sinkron di body efek). Habis waktu = salah, lanjut otomatis.
+  useEffect(() => {
+    if (finished) return;
+    settledRef.current = false;
+    const startedAt = Date.now();
+    const t = setInterval(() => {
+      const left = Math.max(
+        0,
+        TIME_PER_Q - Math.floor((Date.now() - startedAt) / 1000)
+      );
+      setTimeLeft(left);
+      if (left <= 0) {
+        clearInterval(t);
+        if (!settledRef.current) {
+          settledRef.current = true;
+          setChosen("__timeout__");
+          setStreak(0);
+          setTimeout(() => next(), 1200);
+        }
+      }
+    }, 250);
+    return () => clearInterval(t);
+  }, [idx, finished]);
+
+  function pick(optionId: string) {
+    if (settledRef.current) return;
+    settledRef.current = true;
+    setChosen(optionId);
+    const correct = q?.correct?.includes(optionId) ?? false;
+    if (correct) {
+      const newStreak = streak + 1;
+      setCorrectCount((c) => c + 1);
+      setScore((s) => s + 10 + streak * 2);
+      setStreak(newStreak);
+      setBestStreak((b) => Math.max(b, newStreak));
+    } else {
+      setStreak(0);
+    }
+    setTimeout(() => next(), 1200);
+  }
+
+  function restart() {
+    setIdx(0);
+    setChosen(null);
+    setScore(0);
+    setStreak(0);
+    setBestStreak(0);
+    setCorrectCount(0);
+    setFinished(false);
+  }
+
+  return (
+    <Dialog open onOpenChange={(o) => !o && onClose()}>
+      <DialogContent className="max-w-lg">
+        {finished ? (
+          <>
+            <DialogHeader>
+              <DialogTitle className="flex items-center gap-2">
+                <Trophy className="size-5 text-amber-500" /> Kuis Kilat
+                selesai!
+              </DialogTitle>
+            </DialogHeader>
+            <div className="text-center space-y-3 py-2">
+              <p className="text-5xl font-bold text-primary tabular-nums">
+                {score}
+              </p>
+              <p className="text-sm text-muted-foreground">poin</p>
+              <div className="grid grid-cols-3 gap-2 text-center">
+                <div className="rounded-lg border border-border p-2.5">
+                  <p className="text-lg font-bold">
+                    {correctCount}/{deck.length}
+                  </p>
+                  <p className="text-[10px] text-muted-foreground uppercase">
+                    Benar
+                  </p>
+                </div>
+                <div className="rounded-lg border border-border p-2.5">
+                  <p className="text-lg font-bold">
+                    {deck.length > 0
+                      ? Math.round((correctCount / deck.length) * 100)
+                      : 0}
+                    %
+                  </p>
+                  <p className="text-[10px] text-muted-foreground uppercase">
+                    Akurasi
+                  </p>
+                </div>
+                <div className="rounded-lg border border-border p-2.5">
+                  <p className="text-lg font-bold">×{bestStreak}</p>
+                  <p className="text-[10px] text-muted-foreground uppercase">
+                    Combo terbaik
+                  </p>
+                </div>
+              </div>
+            </div>
+            <DialogFooter className="gap-2">
+              <Button variant="outline" onClick={restart}>
+                <RotateCcw className="size-4 mr-1" /> Main lagi
+              </Button>
+              <Button onClick={onClose}>Selesai</Button>
+            </DialogFooter>
+          </>
+        ) : (
+          <>
+            <DialogHeader>
+              <div className="flex items-center justify-between gap-2 w-full">
+                <DialogTitle className="text-base flex items-center gap-2">
+                  <Zap className="size-4 text-violet-500" /> Kuis Kilat
+                </DialogTitle>
+                <span className="text-xs text-muted-foreground tabular-nums">
+                  {idx + 1}/{deck.length} · Skor {score}
+                </span>
+              </div>
+            </DialogHeader>
+            <div className="space-y-3">
+              {/* Timer bar */}
+              <div className="h-1.5 rounded-full bg-muted overflow-hidden">
+                <div
+                  className={cn(
+                    "h-full rounded-full transition-all duration-1000 ease-linear",
+                    timeLeft <= 5 ? "bg-destructive" : "bg-violet-500"
+                  )}
+                  style={{ width: `${(timeLeft / TIME_PER_Q) * 100}%` }}
+                />
+              </div>
+              <div className="flex items-center justify-between text-xs">
+                <span
+                  className={cn(
+                    "font-mono font-bold tabular-nums",
+                    timeLeft <= 5 && "text-destructive animate-pulse"
+                  )}
+                >
+                  ⏱ {timeLeft}s
+                </span>
+                {streak >= 2 ? (
+                  <span className="font-semibold text-orange-500">
+                    🔥 Combo ×{streak}
+                  </span>
+                ) : null}
+              </div>
+              <p className="text-sm font-medium whitespace-pre-wrap leading-relaxed">
+                {q?.text}
+              </p>
+              <div className="space-y-1.5">
+                {q?.options.map((o) => {
+                  const chosenThis = chosen === o.id;
+                  const correctThis =
+                    chosen != null && (q.correct?.includes(o.id) ?? false);
+                  return (
+                    <button
+                      key={o.id}
+                      type="button"
+                      onClick={() => pick(o.id)}
+                      disabled={chosen != null}
+                      className={cn(
+                        "flex items-center gap-2.5 w-full rounded-lg border px-3 py-2.5 text-left text-sm transition-all",
+                        chosen == null
+                          ? "border-border hover:border-violet-500/50 hover:bg-violet-500/5"
+                          : correctThis
+                            ? "border-emerald-500 bg-emerald-500/10"
+                            : chosenThis
+                              ? "border-destructive bg-destructive/10"
+                              : "border-border opacity-50"
+                      )}
+                    >
+                      <span className="text-sm">{o.label}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+            <DialogFooter>
+              <Button variant="ghost" size="sm" onClick={onClose}>
+                Keluar
+              </Button>
+            </DialogFooter>
+          </>
+        )}
+      </DialogContent>
+    </Dialog>
+  );
+}
 
 function MiniStat({ label, value }: { label: string; value: string }) {
   return (

@@ -10,7 +10,7 @@
 // - FormImportDialog: paste teks JSON / pilih file .json → validasi → terapkan
 // - downloadFormJson: unduh form saat ini sebagai file .json
 
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import {
   AlertTriangle,
@@ -28,6 +28,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
+import { cn } from "@/lib/utils";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import {
@@ -61,6 +62,55 @@ import {
 import { buildExternalPrompt } from "@/lib/form-ai";
 
 export type ApplyMode = "append" | "replace";
+
+// Textarea yang tumbuh mengikuti isi hingga batas tinggi — lalu scroll
+// (perilaku sama dengan input chat). Dipakai untuk paste JSON panjang.
+function AutoTextarea({
+  value,
+  onChange,
+  placeholder,
+  readOnly,
+  className,
+  rows = 2,
+  maxHeight = 160,
+  id,
+  onFocus,
+}: {
+  value: string;
+  onChange?: (v: string) => void;
+  placeholder?: string;
+  readOnly?: boolean;
+  className?: string;
+  rows?: number;
+  maxHeight?: number;
+  id?: string;
+  onFocus?: (e: React.FocusEvent<HTMLTextAreaElement>) => void;
+}) {
+  const ref = useRef<HTMLTextAreaElement | null>(null);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    el.style.height = "0px";
+    const next = Math.min(el.scrollHeight, maxHeight);
+    el.style.height = `${next}px`;
+  }, [value, maxHeight]);
+  return (
+    <textarea
+      id={id}
+      ref={ref}
+      rows={rows}
+      value={value}
+      readOnly={readOnly}
+      placeholder={placeholder}
+      onFocus={onFocus}
+      onChange={(e) => onChange?.(e.target.value)}
+      className={cn(
+        "flex min-h-[40px] w-full rounded-md border border-input bg-transparent px-3 py-2 text-xs font-mono shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50 resize-none overflow-y-auto",
+        className
+      )}
+    />
+  );
+}
 
 interface DialogProps {
   open: boolean;
@@ -405,28 +455,24 @@ export function AiGenerateDialog({
                     {copied ? "Tersalin" : "Salin prompt"}
                   </Button>
                 </div>
-                <Textarea
+                <AutoTextarea
                   readOnly
-                  rows={4}
                   value={externalPromptText}
                   placeholder="Tulis prompt Anda dulu — prompt siap-salin muncul di sini"
-                  className="text-[11px] font-mono"
                   onFocus={(e) => e.currentTarget.select()}
                 />
               </div>
               <div className="space-y-1.5">
                 <Label htmlFor="ai-reply">Jawaban AI (tempel apa adanya)</Label>
-                <Textarea
+                <AutoTextarea
                   id="ai-reply"
-                  rows={5}
                   value={reply}
-                  onChange={(e) => {
-                    setReply(e.target.value);
+                  onChange={(v) => {
+                    setReply(v);
                     setReplyResult(null);
                     setReplyError(null);
                   }}
                   placeholder="Tempel jawaban AI di sini — boleh ikut kalimat pengantarnya"
-                  className="text-xs font-mono"
                 />
               </div>
               <Button
@@ -559,16 +605,14 @@ export function FormImportDialog({
                 <Upload className="size-3.5 mr-1" /> Pilih file
               </Button>
             </div>
-            <Textarea
+            <AutoTextarea
               id="import-text"
-              rows={5}
               value={text}
-              onChange={(e) => {
-                setText(e.target.value);
+              onChange={(v) => {
+                setText(v);
                 setParsed(null);
               }}
               placeholder='{"kind":"aula-form","version":1,"questions":[…]}'
-              className="text-xs font-mono"
             />
             <input
               ref={fileRef}

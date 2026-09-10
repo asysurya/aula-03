@@ -113,6 +113,8 @@ export interface FormSettings {
   showResult: boolean;
   /** Izinkan siswa kembali ke soal sebelumnya (mode satu-soal-per-layar). */
   allowBack?: boolean;
+  /** Jumlah percobaan pengerjaan yang diizinkan (1–10; null/undefined = 1). */
+  maxAttempts?: number | null;
 }
 
 export interface FormViolation {
@@ -155,6 +157,10 @@ export interface FormGetResponse {
   canStart: boolean;
   deadlinePassed: boolean;
   questionOrder: string[];
+  /** Berapa kali siswa ini sudah memakai percobaan (attempt aktif + arsip). */
+  attemptsUsed?: number;
+  /** Siswa masih boleh mengulang pengerjaan (percobaan tersisa). */
+  canRetry?: boolean;
 }
 
 export interface FormSubmitResult {

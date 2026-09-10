@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   format,
@@ -111,6 +111,36 @@ function deadlineInfo(iso: string) {
   else
     label = format(d, "d MMM yyyy, HH:mm", { locale: localeId });
   return { overdue, label, date: d };
+}
+
+// Countdown tenggat live (hari:jam:menit:detik) — update tiap detik.
+function DeadlineCountdown({ deadline }: { deadline: string }) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, []);
+  const left = new Date(deadline).getTime() - now;
+  if (left <= 0) return null;
+  const d = Math.floor(left / 86_400_000);
+  const h = Math.floor((left % 86_400_000) / 3_600_000);
+  const m = Math.floor((left % 3_600_000) / 60_000);
+  const s = Math.floor((left % 60_000) / 1000);
+  const urgent = left < 24 * 3600 * 1000; // < 1 hari
+  return (
+    <span
+      className={
+        urgent
+          ? "font-mono font-semibold tabular-nums text-destructive"
+          : "font-mono font-semibold tabular-nums text-amber-600 dark:text-amber-400"
+      }
+      title="Sisa waktu sebelum tenggat"
+    >
+      {d > 0 ? `${d}h ` : ""}
+      {String(h).padStart(2, "0")}:{String(m).padStart(2, "0")}:
+      {String(s).padStart(2, "0")}
+    </span>
+  );
 }
 
 /** Konversi SubmissionFile → item preview (tombol mata, tanpa download). */
@@ -284,6 +314,12 @@ export function AssignmentDetail({
               <CalendarClock className="size-4" />
               Tenggat: {fmtDate(assignment.deadline)} ({di.label})
             </span>
+            {!di.overdue ? (
+              <span className="inline-flex items-center gap-1.5 text-sm text-muted-foreground">
+                <Clock className="size-3.5" /> Sisa:{" "}
+                <DeadlineCountdown deadline={assignment.deadline} />
+              </span>
+            ) : null}
             <span className="text-muted-foreground inline-flex items-center gap-1">
               <Clock className="size-3.5" /> Dibuat {fmtRelative(assignment.createdAt)}
             </span>
@@ -301,6 +337,8 @@ export function AssignmentDetail({
             canStart={formData.canStart}
             deadlinePassed={formData.deadlinePassed}
             deadlineLabel={fmtDate(assignment.deadline)}
+            attemptsUsed={formData.attemptsUsed ?? 1}
+            canRetry={formData.canRetry ?? false}
           />
         ) : myRole === "STUDENT" && !hasForm ? (
           <StudentSubmissionPanel

@@ -3,9 +3,11 @@
 import { useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { format } from "date-fns";
+import { id as localeId } from "date-fns/locale";
 import { toast } from "sonner";
 import {
   AlertTriangle,
+  BarChart3,
   ChevronDown,
   ChevronRight,
   CheckCircle2,
@@ -15,6 +17,7 @@ import {
   Loader2,
   RotateCcw,
   ShieldAlert,
+  Table2,
   Users,
   XCircle,
 } from "lucide-react";
@@ -125,12 +128,74 @@ export function FormReview({ folderId }: { folderId: string }) {
     (r) => r.role === "STUDENT" && !r.hasAttempt
   );
   const flagged = submitted.filter((a) => a.violations.length > 0);
+  const scores = submitted
+    .map((a) => a.score)
+    .filter((s): s is number => s != null);
   const avg =
-    submitted.length > 0
-      ? Math.round(
-          submitted.reduce((s, a) => s + (a.score ?? 0), 0) / submitted.length
-        )
+    scores.length > 0
+      ? Math.round(scores.reduce((s, v) => s + v, 0) / scores.length)
       : null;
+  const highest = scores.length > 0 ? Math.max(...scores) : null;
+  const lowest = scores.length > 0 ? Math.min(...scores) : null;
+
+  // Distribusi nilai (5 bin) — batang CSS sederhana.
+  const bins = [
+    { label: "0–59", lo: 0, hi: 59 },
+    { label: "60–69", lo: 60, hi: 69 },
+    { label: "70–79", lo: 70, hi: 79 },
+    { label: "80–89", lo: 80, hi: 89 },
+    { label: "90–100", lo: 90, hi: 100000 },
+  ].map((b) => ({
+    label: b.label,
+    count: scores.filter((s) => s >= b.lo && s <= b.hi).length,
+  }));
+  const maxBin = Math.max(1, ...bins.map((b) => b.count));
+
+  // Export CSV — nama, status, nilai, pelanggaran, waktu.
+  function exportCsv() {
+    const rowsData = data;
+    if (!rowsData) return;
+    const esc = (v: string | number | null | undefined) =>
+      `"${String(v ?? "").replace(/"/g, '""')}"`;
+    const rows = [
+      [
+        "Nama",
+        "Username",
+        "Status",
+        "Nilai",
+        "Nilai Maks",
+        "Pelanggaran",
+        "Mulai",
+        "Dikumpulkan",
+      ].join(";"),
+      ...rowsData.attempts.map((a) =>
+        [
+          esc(a.user.name),
+          esc(a.user.username),
+          a.status === "SUBMITTED" ? "Terkumpul" : "Sedang mengerjakan",
+          a.score != null ? a.score : "-",
+          a.maxScore,
+          a.violations.length,
+          a.startedAt ? format(new Date(a.startedAt), "yyyy-MM-dd HH:mm") : "",
+          a.submittedAt
+            ? format(new Date(a.submittedAt), "yyyy-MM-dd HH:mm")
+            : "",
+        ].join(";")
+      ),
+    ].join("\n");
+    const blob = new Blob(["\uFEFF" + rows], {
+      type: "text/csv;charset=utf-8",
+    });
+    const url = URL.createObjectURL(blob);
+    const aEl = document.createElement("a");
+    aEl.href = url;
+    aEl.download = `nilai-tugas-${folderId.slice(-8)}.csv`;
+    document.body.appendChild(aEl);
+    aEl.click();
+    aEl.remove();
+    URL.revokeObjectURL(url);
+    toast.success("Data nilai diexport ke CSV");
+  }
 
   return (
     <div className="space-y-4">
@@ -142,13 +207,63 @@ export function FormReview({ folderId }: { folderId: string }) {
           · {notStarted.length} belum mulai
         </span>
         {avg != null ? <Badge variant="outline">Rata-rata {avg}</Badge> : null}
+        {highest != null ? (
+          <Badge variant="outline">Tertinggi {highest}</Badge>
+        ) : null}
+        {lowest != null ? (
+          <Badge variant="outline">Terendah {lowest}</Badge>
+        ) : null}
         {flagged.length > 0 ? (
           <Badge className="bg-amber-500/15 text-amber-600 dark:text-amber-400 border border-amber-500/30">
             <ShieldAlert className="size-3" /> {flagged.length} terindikasi
             pelanggaran
           </Badge>
         ) : null}
+        <div className="flex-1" />
+        <Button size="sm" variant="outline" onClick={exportCsv}>
+          <Table2 className="size-3.5 mr-1" /> Export CSV
+        </Button>
       </div>
+
+      {/* Distribusi nilai */}
+      {scores.length > 0 ? (
+        <Card className="p-4 space-y-2">
+          <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground flex items-center gap-1.5">
+            <BarChart3 className="size-3.5" /> Distribusi nilai (n={
+              scores.length
+            })
+          </p>
+          <div className="flex items-end gap-3 h-24 px-1">
+            {bins.map((b) => (
+              <div
+                key={b.label}
+                className="flex-1 flex flex-col items-center gap-1"
+                title={`${b.count} siswa (${
+                  scores.length > 0
+                    ? Math.round((b.count / scores.length) * 100)
+                    : 0
+                }%)`}
+              >
+                <span className="text-[10px] font-semibold tabular-nums">
+                  {b.count}
+                </span>
+                <div
+                  className="w-full rounded-t bg-primary/70 transition-all"
+                  style={{
+                    height: `${Math.max(
+                      b.count > 0 ? 8 : 2,
+                      (b.count / maxBin) * 64
+                    )}px`,
+                  }}
+                />
+                <span className="text-[10px] text-muted-foreground">
+                  {b.label}
+                </span>
+              </div>
+            ))}
+          </div>
+        </Card>
+      ) : null}
 
       {/* Attempts list */}
       <div className="space-y-3">

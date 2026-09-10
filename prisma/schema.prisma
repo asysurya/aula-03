@@ -422,6 +422,10 @@ model Form {
   // Izinkan siswa kembali ke soal sebelumnya (mode satu-soal-per-layar).
   // Nullable: form lama (null) = false — kompatibel dengan perilaku sebelumnya.
   allowBack        Boolean?
+  // Jumlah percobaan pengerjaan yang diizinkan (1–10).
+  // Nullable: form lama (null) = 1 — kompatibel dengan DB produksi lama
+  // (MongoDB schemaless; tanpa migrasi/index baru).
+  maxAttempts      Int?
   createdBy        String
   createdAt        DateTime @default(now())
   updatedAt        DateTime @updatedAt
@@ -466,6 +470,25 @@ model FormAttempt {
 
   @@unique([formId, userId])
   @@index([formId])
+}
+
+// Arsip percobaan lama — saat siswa mengulang pengerjaan (Form.maxAttempts
+// > 1), attempt aktif yang lama dipindah ke sini supaya nilai terakhir tetap
+// di FormAttempt namun riwayat percobaan sebelumnya tetap tersimpan.
+// Koleksi baru — MongoDB membuatnya otomatis (tanpa migrasi).
+model FormAttemptArchive {
+  id          String   @id @default(cuid()) @map("_id")
+  formId      String
+  userId      String
+  attemptId   String // id attempt asli saat diarsipkan
+  score       Int?
+  maxScore    Int
+  violations  String   @default("[]")
+  startedAt  DateTime
+  submittedAt DateTime
+  archivedAt DateTime @default(now())
+
+  @@index([formId, userId])
 }
 
 model FormAnswer {

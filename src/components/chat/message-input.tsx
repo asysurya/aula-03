@@ -1,7 +1,16 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
-import { Loader2, Paperclip, Send, Smile, X, UploadCloud } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  Eye,
+  EyeOff,
+  Loader2,
+  Paperclip,
+  Send,
+  Smile,
+  X,
+  UploadCloud,
+} from "lucide-react";
 import { toast } from "sonner";
 import EmojiPicker, { Theme as EmojiTheme } from "emoji-picker-react";
 import { useTheme } from "next-themes";
@@ -23,7 +32,13 @@ import {
 } from "@/lib/file-constants";
 import { mimeToIcon } from "@/lib/cloud-format";
 import { uploadSmart } from "@/lib/upload-client";
+import { MarkdownText } from "./markdown";
+import {
+  AttachmentPicker,
+  type CloudPickerFile,
+} from "./attachment-picker";
 import type { ChatMessage } from "./types";
+import { cn } from "@/lib/utils";
 
 export interface PendingAttachment {
   fileId: string;
@@ -54,6 +69,33 @@ interface UploadingState {
   result?: PendingAttachment;
 }
 
+// ── Slash command (Discord-style) ──────────────────────────────────
+
+const SLASH_COMMANDS: { cmd: string; label: string; insert: string }[] = [
+  {
+    cmd: "/shrug",
+    label: "Tambah ¯\\_(ツ)_/¯ di akhir pesan",
+    insert: "¯\\_(ツ)_/¯",
+  },
+  { cmd: "/tableflip", label: "(╯°□°)╯︵ ┻━┻", insert: "(╯°□°)╯︵ ┻━┻" },
+  { cmd: "/me", label: "Aksi / narasi italic — /me sedang belajar", insert: "_sedang belajar_" },
+  { cmd: "/spoiler", label: "Spoiler ||teks tersembunyi||", insert: "||teks tersembunyi||" },
+  { cmd: "/bold", label: "**teks tebal**", insert: "**teks tebal**" },
+  { cmd: "/code", label: "Blok kode```…```", insert: "```\nkode di sini\n```" },
+];
+
+function applySlashCommand(value: string, insert: string): string {
+  // Ganti kata pertama (/xxx) dengan template command.
+  const idx = value.indexOf("/");
+  if (idx === -1) return value;
+  const before = value.slice(0, idx);
+  const after = value.slice(idx);
+  const firstWordEnd = after.indexOf(" ");
+  const rest =
+    firstWordEnd === -1 ? "" : after.slice(firstWordEnd + 1);
+  return `${before}${insert}${rest ? ` ${rest}` : ""}`;
+}
+
 export function MessageInput({
   onSend,
   placeholder = "Tulis pesan…",
@@ -72,9 +114,32 @@ export function MessageInput({
   const [pending, setPending] = useState<PendingAttachment[]>([]);
   const [isDragging, setIsDragging] = useState(false);
   const [emojiOpen, setEmojiOpen] = useState(false);
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const [previewMd, setPreviewMd] = useState(false);
+  const [slashIndex, setSlashIndex] = useState(0);
   const dragDepth = useRef(0);
   const ref = useRef<HTMLTextAreaElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+
+  // Draft otomatis — pesan yang belum terkirim tersimpan per conversation,
+  // aman saat pindah channel / refresh (localStorage).
+  const draftKey = `chat-draft-${conversation.kind}-${conversation.id}`;
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem(draftKey);
+      if (saved) setValue(saved);
+    } catch {
+      /* abaikan */
+    }
+  }, [draftKey]);
+  useEffect(() => {
+    try {
+      if (value) localStorage.setItem(draftKey, value);
+      else localStorage.removeItem(draftKey);
+    } catch {
+      /* abaikan */
+    }
+  }, [value, draftKey]);
 
   // Auto-grow textarea up to a max height.
   useEffect(() => {
@@ -93,8 +158,44 @@ export function MessageInput({
     !isUploadingAny &&
     (trimmed.length > 0 || pending.length > 0);
 
+  // Deteksi slash command di awal kata pertama.
+  const slashMatches = useMemo(() => {
+    if (!value.startsWith("/")) return [];
+    const word = value.split(/\s/)[0]?.toLowerCase() ?? "";
+    if (!word || word === "/") return SLASH_COMMANDS;
+    return SLASH_COMMANDS.filter((c) => c.cmd.startsWith(word));
+  }, [value]);
+
+  useEffect(() => {
+    setSlashIndex(0);
+  }, [slashMatches.length]);
+
   function pickFiles() {
     fileInputRef.current?.click();
+  }
+
+  function onAttachCloud(files: CloudPickerFile[]) {
+    const room =
+      MAX_ATTACHMENTS_PER_MESSAGE - pending.length - uploading.length;
+    if (room <= 0) {
+      toast.error(`Maks ${MAX_ATTACHMENTS_PER_MESSAGE} lampiran per pesan`);
+      return;
+    }
+    const additions: PendingAttachment[] = files
+      .slice(0, room)
+      .map((f) => ({
+        fileId: f.id,
+        name: f.name,
+        size: f.size,
+        mimetype: f.mimetype,
+        storageKey: f.storageKey,
+      }));
+    if (additions.length < files.length) {
+      toast.error(
+        `Hanya ${additions.length} ditambahkan (maks ${MAX_ATTACHMENTS_PER_MESSAGE} lampiran)`
+      );
+    }
+    setPending((prev) => [...prev, ...additions]);
   }
 
   async function handleFilesSelected(files: FileList | null) {
@@ -266,9 +367,14 @@ export function MessageInput({
     setSending(true);
     try {
       await onSend(content, attachmentFileIds);
-      // On success: clear pending attachments + reply target.
+      // On success: clear pending attachments + reply target + draft.
       setPending([]);
       onCancelReply?.();
+      try {
+        localStorage.removeItem(draftKey);
+      } catch {
+        /* abaikan */
+      }
     } finally {
       setSending(false);
       // refocus for fast typing
@@ -278,6 +384,32 @@ export function MessageInput({
 
   // Shift+Enter to send; plain Enter = newline (default behavior).
   function onKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
+    // Pilih slash command dengan panah + Enter.
+    if (slashMatches.length > 0) {
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        setSlashIndex((i) => (i + 1) % slashMatches.length);
+        return;
+      }
+      if (e.key === "ArrowUp") {
+        e.preventDefault();
+        setSlashIndex(
+          (i) => (i - 1 + slashMatches.length) % slashMatches.length
+        );
+        return;
+      }
+      if (e.key === "Enter" || e.key === "Tab") {
+        e.preventDefault();
+        const chosen = slashMatches[slashIndex];
+        if (chosen) setValue(applySlashCommand(value, chosen.insert));
+        return;
+      }
+      if (e.key === "Escape") {
+        e.preventDefault();
+        setValue("");
+        return;
+      }
+    }
     if (e.key === "Enter" && e.shiftKey) {
       e.preventDefault();
       void submit();
@@ -310,7 +442,7 @@ export function MessageInput({
           <div className="flex flex-col items-center gap-2 text-primary">
             <UploadCloud className="h-10 w-10" />
             <p className="font-medium text-sm">Lepaskan file untuk melampirkan</p>
-            <p className="text-xs text-muted-foreground">Maks {MAX_ATTACHMENTS_PER_MESSAGE} file · {Math.round(MAX_FILE_SIZE / 1024 / 1024)}MB per file</p>
+            <p className="text-xs text-muted-foreground">Maks {MAX_ATTACHMENTS_PER_MESSAGE} file · {Math.round(MAX_FILE_SIZE / 1024 / 1024)}MB per file · tersimpan di cloud</p>
           </div>
         </div>
       ) : null}
@@ -332,6 +464,50 @@ export function MessageInput({
           >
             <X className="h-3.5 w-3.5" />
           </button>
+        </div>
+      ) : null}
+
+      {/* Slash command suggestions (Discord-style) */}
+      {slashMatches.length > 0 && !previewMd ? (
+        <div className="mb-2 rounded-lg border border-border bg-popover shadow-md overflow-hidden">
+          <p className="px-3 pt-2 pb-1 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+            Perintah cepat — ↑↓ untuk pilih, Enter untuk pakai
+          </p>
+          {slashMatches.slice(0, 6).map((c, i) => (
+            <button
+              key={c.cmd}
+              type="button"
+              onClick={() => setValue(applySlashCommand(value, c.insert))}
+              onMouseEnter={() => setSlashIndex(i)}
+              className={cn(
+                "flex items-center gap-2.5 w-full px-3 py-1.5 text-left text-sm transition-colors",
+                i === slashIndex ? "bg-accent" : "hover:bg-accent/50"
+              )}
+            >
+              <code className="rounded bg-muted px-1.5 py-0.5 font-mono text-xs">
+                {c.cmd}
+              </code>
+              <span className="text-xs text-muted-foreground truncate">
+                {c.label}
+              </span>
+            </button>
+          ))}
+        </div>
+      ) : null}
+
+      {/* Pratinjau markdown */}
+      {previewMd ? (
+        <div className="mb-2 rounded-lg border border-primary/30 bg-primary/5 px-3 py-2.5">
+          <p className="text-[10px] font-semibold uppercase tracking-wide text-primary/80 mb-1">
+            Pratinjau markdown
+          </p>
+          {trimmed ? (
+            <MarkdownText text={trimmed} />
+          ) : (
+            <p className="text-xs text-muted-foreground italic">
+              (kosong — tulis sesuatu untuk melihat pratinjaunya)
+            </p>
+          )}
         </div>
       ) : null}
 
@@ -465,10 +641,33 @@ export function MessageInput({
           type="button"
           size="icon"
           variant="ghost"
-          onClick={pickFiles}
+          onClick={() => setPreviewMd((p) => !p)}
+          disabled={disabled}
+          aria-label={previewMd ? "Tutup pratinjau" : "Pratinjau markdown"}
+          title={
+            previewMd
+              ? "Tutup pratinjau markdown"
+              : "Pratinjau markdown (**tebal**, *miring*, dll)"
+          }
+          className={cn(
+            "h-10 w-10 shrink-0 rounded-full",
+            previewMd && "text-primary bg-primary/10 hover:bg-primary/15"
+          )}
+        >
+          {previewMd ? (
+            <EyeOff className="h-4 w-4" />
+          ) : (
+            <Eye className="h-4 w-4" />
+          )}
+        </Button>
+        <Button
+          type="button"
+          size="icon"
+          variant="ghost"
+          onClick={() => setPickerOpen(true)}
           disabled={disabled || isUploadingAny}
-          aria-label="Lampirkan file"
-          title="Lampirkan file (maks 5, otomatis dihapus setelah 24 jam)"
+          aria-label="Lampirkan file dari cloud"
+          title="Lampirkan file (pilih dari cloud, maks 5, otomatis dihapus setelah 24 jam)"
           className="h-10 w-10 shrink-0 rounded-full"
         >
           <Paperclip className="h-4 w-4" />
@@ -479,7 +678,7 @@ export function MessageInput({
           onClick={() => void submit()}
           disabled={!canSend}
           aria-label="Kirim"
-          className="h-10 w-10 shrink-0 rounded-full"
+          className="h-10 w-10 shrink-0"
         >
           {sending ? (
             <Loader2 className="h-4 w-4 animate-spin" />
@@ -489,8 +688,18 @@ export function MessageInput({
         </Button>
       </div>
       <p className="text-[10px] text-muted-foreground mt-1 px-1 hidden sm:block">
-        Shift+Enter untuk kirim · Enter untuk baris baru · Lampiran dihapus otomatis 24 jam
+        Shift+Enter kirim · Enter baris baru · ketik / untuk perintah cepat · lampiran tersimpan di cloud
       </p>
+
+      {/* Cloud picker — pilih file cloud / unggah baru */}
+      <AttachmentPicker
+        open={pickerOpen}
+        onOpenChange={setPickerOpen}
+        conversation={conversation}
+        pendingFileIds={pending.map((p) => p.fileId)}
+        maxAttachments={MAX_ATTACHMENTS_PER_MESSAGE}
+        onAttach={onAttachCloud}
+      />
     </div>
   );
 }

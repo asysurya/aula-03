@@ -143,6 +143,7 @@ export async function GET(
         timeLimitMin: form.timeLimitMin,
         showResult: form.showResult,
         allowBack: form.allowBack ?? false,
+        maxAttempts: form.maxAttempts ?? 1,
         questions: form.questions.map((q) => toQuestionDTO(q, true)),
       },
       attempt: null,
@@ -179,6 +180,17 @@ export async function GET(
       ? seededShuffle(qs, seed)
       : [...qs].sort((a, b) => a.order - b.order);
     const showCorrect = form.showResult && attempt.status === "SUBMITTED";
+    // Percobaan terpakai = arsip + attempt aktif ini.
+    const archivedCount = await db.formAttemptArchive.count({
+      where: { formId: form.id, userId: user.id },
+    });
+    const attemptsUsed = archivedCount + 1;
+    const maxAttempts = form.maxAttempts ?? 1;
+    const canRetry =
+      attempt.status === "SUBMITTED" &&
+      !deadlinePassed &&
+      maxAttempts > 1 &&
+      attemptsUsed < maxAttempts;
     return Response.json({
       role: myRole,
       hasForm: true,
@@ -192,6 +204,7 @@ export async function GET(
         timeLimitMin: form.timeLimitMin,
         showResult: form.showResult,
         allowBack: form.allowBack ?? false,
+        maxAttempts,
         questions: showCorrect
           ? form.questions.map((q) => toQuestionDTO(q, true, seed))
           : ordered,
@@ -216,6 +229,8 @@ export async function GET(
       canStart: false,
       deadlinePassed,
       questionOrder: ordered.map((q) => q.id),
+      attemptsUsed,
+      canRetry,
     });
   }
 
@@ -234,12 +249,15 @@ export async function GET(
       timeLimitMin: form.timeLimitMin,
       showResult: form.showResult,
       allowBack: form.allowBack ?? false,
+      maxAttempts: form.maxAttempts ?? 1,
       questions: [...qs].sort((a, b) => a.order - b.order),
     },
     attempt: null,
     canStart: !deadlinePassed,
     deadlinePassed,
     questionOrder: [],
+    attemptsUsed: 0,
+    canRetry: false,
   });
 }
 
@@ -348,6 +366,16 @@ export async function PUT(
   )
     return errorResponse("TIME_LIMIT_INVALID", 400);
 
+  const maxAttemptsRaw =
+    settings.maxAttempts == null ? 1 : Number(settings.maxAttempts);
+  if (
+    !Number.isFinite(maxAttemptsRaw) ||
+    maxAttemptsRaw < 1 ||
+    maxAttemptsRaw > 10
+  )
+    return errorResponse("MAX_ATTEMPTS_INVALID (1–10)", 400);
+  const maxAttempts = Math.round(maxAttemptsRaw);
+
   const data = {
     shuffleQuestions: !!settings.shuffleQuestions,
     shuffleOptions: !!settings.shuffleOptions,
@@ -357,6 +385,7 @@ export async function PUT(
     timeLimitMin: timeLimit == null ? null : Math.round(timeLimit),
     showResult: settings.showResult !== false,
     allowBack: !!settings.allowBack,
+    maxAttempts,
     createdBy: user.id,
   };
 

@@ -7,6 +7,10 @@ import {
   ArrowDown,
   ArrowUp,
   CheckCircle2,
+  ChevronDown,
+  ChevronRight,
+  ChevronsDownUp,
+  ChevronsUpDown,
   Circle,
   Copy,
   Download,
@@ -116,6 +120,7 @@ export function FormBuilder({
       timeLimitMin: null,
       showResult: true,
       allowBack: false,
+      maxAttempts: 1,
     }
   );
   const [questions, setQuestions] = useState<EditableQuestion[]>(
@@ -129,6 +134,13 @@ export function FormBuilder({
       ? String(initialSettings.timeLimitMin)
       : ""
   );
+  const [maxAttemptsInput, setMaxAttemptsInput] = useState<string>(
+    initialSettings?.maxAttempts != null && initialSettings.maxAttempts > 1
+      ? String(initialSettings.maxAttempts)
+      : ""
+  );
+  // Soal yang di-collapse (ringkas) — biar layar tidak penuh saat banyak soal.
+  const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
 
   const locked = hasAttempts;
 
@@ -379,6 +391,9 @@ export function FormBuilder({
             timeLimitMin: timeLimitInput
               ? parseInt(timeLimitInput, 10)
               : null,
+            maxAttempts: maxAttemptsInput
+              ? Math.min(10, Math.max(1, parseInt(maxAttemptsInput, 10) || 1))
+              : 1,
           },
           questions: questions.map((q) => ({
             id: q.id,
@@ -508,9 +523,28 @@ export function FormBuilder({
               }
             />
           </div>
+          <div className="space-y-1">
+            <Label htmlFor="maxattempts">
+              Jumlah percobaan (1–10, kosong = 1)
+            </Label>
+            <Input
+              id="maxattempts"
+              inputMode="numeric"
+              className="w-36"
+              placeholder="cth: 3"
+              value={maxAttemptsInput}
+              disabled={locked}
+              onChange={(e) =>
+                setMaxAttemptsInput(
+                  e.target.value.replace(/[^0-9]/g, "").slice(0, 2)
+                )
+              }
+            />
+          </div>
           <div className="text-xs text-muted-foreground pt-5">
             Timer berjalan sejak siswa mulai. Saat habis, jawaban tersimpan
-            otomatis dikirim.
+            otomatis dikirim. Percobaan &gt; 1: siswa boleh mengulang setelah
+            mengumpulkan — nilai yang dipakai percobaan terakhir.
           </div>
         </div>
       </Card>
@@ -532,6 +566,31 @@ export function FormBuilder({
                 <b className="text-foreground">{autoGradable}</b>
               </span>
             </div>
+            {questions.length > 1 ? (
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={() =>
+                  setCollapsed((prev) =>
+                    prev.size > 0
+                      ? new Set()
+                      : new Set(questions.map((q) => q.localId))
+                  )
+                }
+                title={
+                  collapsed.size > 0
+                    ? "Buka semua soal"
+                    : "Ringkas semua soal (biar tidak memenuhi layar)"
+                }
+              >
+                {collapsed.size > 0 ? (
+                  <ChevronsDownUp className="size-3.5 mr-1" />
+                ) : (
+                  <ChevronsUpDown className="size-3.5 mr-1" />
+                )}
+                {collapsed.size > 0 ? "Buka semua" : "Ringkas semua"}
+              </Button>
+            ) : null}
             <div className="flex items-center gap-1.5">
               <Button
                 size="sm"
@@ -573,82 +632,127 @@ export function FormBuilder({
         <div className="space-y-3">
           {questions.map((q, i) => {
             const meta = questionTypeMeta(q.type);
+            const isCollapsed = collapsed.has(q.localId);
             return (
               <Card key={q.localId} className="p-4 space-y-3">
                 {/* Question header */}
                 <div className="flex items-center gap-2 flex-wrap">
-                  <Badge variant="secondary" className="font-mono">
-                    #{i + 1}
-                  </Badge>
-                  <Select
-                    value={q.type}
-                    disabled={locked}
-                    onValueChange={(v) =>
-                      updateQuestion(q.localId, {
-                        type: v as FormQuestionType,
-                        correct: [],
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setCollapsed((prev) => {
+                        const next = new Set(prev);
+                        if (next.has(q.localId)) next.delete(q.localId);
+                        else next.add(q.localId);
+                        return next;
                       })
                     }
+                    className="flex items-center gap-1.5 rounded-md px-1.5 py-0.5 hover:bg-accent transition-colors"
+                    aria-label={
+                      isCollapsed ? "Buka soal ini" : "Ringkas soal ini"
+                    }
+                    title={
+                      isCollapsed ? "Buka soal ini" : "Ringkas soal ini"
+                    }
                   >
-                    <SelectTrigger className="w-[200px] h-8">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {FORM_QUESTION_TYPES.map((t) => (
-                        <SelectItem key={t.value} value={t.value}>
-                          {t.label}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                  <span className="text-xs text-muted-foreground hidden sm:inline">
-                    {meta.hint}
-                  </span>
-                  <div className="flex-1" />
-                  <div className="flex items-center gap-1">
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      className="size-7"
-                      disabled={locked || i === 0}
-                      onClick={() => moveQuestion(q.localId, -1)}
-                      aria-label="Naikkan"
-                    >
-                      <ArrowUp className="size-3.5" />
-                    </Button>
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      className="size-7"
-                      disabled={locked || i === questions.length - 1}
-                      onClick={() => moveQuestion(q.localId, 1)}
-                      aria-label="Turunkan"
-                    >
-                      <ArrowDown className="size-3.5" />
-                    </Button>
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      className="size-7"
-                      disabled={locked}
-                      onClick={() => duplicateQuestion(q.localId)}
-                      aria-label="Duplikat"
-                    >
-                      <Copy className="size-3.5" />
-                    </Button>
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      className="size-7 text-destructive hover:text-destructive"
-                      disabled={locked}
-                      onClick={() => removeQuestion(q.localId)}
-                      aria-label="Hapus soal"
-                    >
-                      <Trash2 className="size-3.5" />
-                    </Button>
+                    <Badge variant="secondary" className="font-mono">
+                      #{i + 1}
+                    </Badge>
+                    {isCollapsed ? (
+                      <ChevronRight className="size-4 text-muted-foreground" />
+                    ) : (
+                      <ChevronDown className="size-4 text-muted-foreground" />
+                    )}
+                  </button>
+                  {isCollapsed ? (
+                    <span className="text-sm text-muted-foreground truncate flex-1 min-w-0">
+                      {q.text.trim() || "(soal belum ditulis)"}
+                    </span>
+                  ) : null}
+                  <div className={cn("flex items-center gap-2 flex-wrap", isCollapsed && "ml-auto")}>
+                    {isCollapsed ? (
+                      <>
+                        <Badge variant="outline" className="text-[10px] shrink-0">
+                          {meta.label}
+                        </Badge>
+                        <Badge variant="secondary" className="text-[10px] shrink-0">
+                          {q.points} poin
+                        </Badge>
+                      </>
+                    ) : (
+                      <Select
+                        value={q.type}
+                        disabled={locked}
+                        onValueChange={(v) =>
+                          updateQuestion(q.localId, {
+                            type: v as FormQuestionType,
+                            correct: [],
+                          })
+                        }
+                      >
+                        <SelectTrigger className="w-[200px] h-8">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {FORM_QUESTION_TYPES.map((t) => (
+                            <SelectItem key={t.value} value={t.value}>
+                              {t.label}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    )}
+                    <span className="text-xs text-muted-foreground hidden sm:inline">
+                      {!isCollapsed ? meta.hint : ""}
+                    </span>
+                    <div className="flex-1" />
+                    <div className="flex items-center gap-1">
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="size-7"
+                        disabled={locked || i === 0}
+                        onClick={() => moveQuestion(q.localId, -1)}
+                        aria-label="Naikkan"
+                      >
+                        <ArrowUp className="size-3.5" />
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="size-7"
+                        disabled={locked || i === questions.length - 1}
+                        onClick={() => moveQuestion(q.localId, 1)}
+                        aria-label="Turunkan"
+                      >
+                        <ArrowDown className="size-3.5" />
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="size-7"
+                        disabled={locked}
+                        onClick={() => duplicateQuestion(q.localId)}
+                        aria-label="Duplikat"
+                      >
+                        <Copy className="size-3.5" />
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="size-7 text-destructive hover:text-destructive"
+                        disabled={locked}
+                        onClick={() => removeQuestion(q.localId)}
+                        aria-label="Hapus soal"
+                      >
+                        <Trash2 className="size-3.5" />
+                      </Button>
+                    </div>
                   </div>
                 </div>
 
+                {!isCollapsed ? (
+                  <>
                 {/* Question text */}
                 <div className="space-y-1.5">
                   <Label>Teks soal</Label>
@@ -820,6 +924,8 @@ export function FormBuilder({
                     Wajib dijawab
                   </label>
                 </div>
+                  </>
+                ) : null}
               </Card>
             );
           })}
