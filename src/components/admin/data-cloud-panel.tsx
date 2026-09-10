@@ -4,6 +4,7 @@ import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { PasswordInput } from "@/components/ui/password-input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -1178,8 +1179,7 @@ function CreateCloudAccountDialog({
               </div>
               <div className="space-y-1.5">
                 <Label>Password MEGA</Label>
-                <Input
-                  type="password"
+                <PasswordInput
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
                   placeholder="••••••••"
@@ -1250,8 +1250,7 @@ function CreateCloudAccountDialog({
               </div>
               <div className="space-y-1.5">
                 <Label>Secret Access Key</Label>
-                <Input
-                  type="password"
+                <PasswordInput
                   value={secretAccessKey}
                   onChange={(e) => setSecretAccessKey(e.target.value)}
                   className="font-mono text-xs"
@@ -1408,8 +1407,7 @@ function EditCloudAccountDialog({
               </div>
               <div className="space-y-1.5">
                 <Label>Secret Access Key baru (opsional)</Label>
-                <Input
-                  type="password"
+                <PasswordInput
                   value={secretAccessKey}
                   onChange={(e) => setSecretAccessKey(e.target.value)}
                   className="font-mono text-xs"
@@ -1431,8 +1429,7 @@ function EditCloudAccountDialog({
               </div>
               <div className="space-y-1.5">
                 <Label>Password baru (opsional)</Label>
-                <Input
-                  type="password"
+                <PasswordInput
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
                   placeholder={account.hasPassword ? "•••••••• (tidak diubah)" : "belum diisi"}

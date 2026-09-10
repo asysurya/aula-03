@@ -39,6 +39,7 @@ import {
 } from "@/components/ui/popover";
 import type { ChatAttachment, ChatMessage, ChatSender } from "./types";
 import { groupReactions } from "./types";
+import { MarkdownText } from "./markdown";
 import { cn } from "@/lib/utils";
 
 const MAX_EDIT_LENGTH = 4000;
@@ -554,11 +555,7 @@ export const MessageBubble = memo(function MessageBubble({
                 ) : null}
               </div>
             ) : null}
-            {hasContent ? (
-              <p className="text-sm text-foreground/95 whitespace-pre-wrap break-words">
-                {message.content}
-              </p>
-            ) : null}
+            {hasContent ? <MarkdownText text={message.content} /> : null}
             {hasAttachments ? (
               <div className="rounded-lg border border-border/60 bg-card/40 px-2 py-1.5 mt-1 max-w-full">
                 <Attachments attachments={attachments} />

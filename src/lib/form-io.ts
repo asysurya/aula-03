@@ -84,39 +84,125 @@ function normalizeOption(
 }
 
 /**
- * Parse + validasi teks JSON form. Melempar Error dengan pesan Bahasa
- * Indonesia yang menunjuk soal ke-(n) yang bermasalah — cocok untuk toast.
+ * Scanner blok JSON seimbang ({...} / [...]) pada teks bebas.
+ * Sadar string + karakter escape — kurung di dalam string tidak dihitung —
+ * sehingga mampu mengekstrak JSON utuh walau diselingi kalimat pengantar AI,
+ * pembungkus ```json, atau teks lain di sekitarnya.
+ * Mengembalikan kandidat diurutkan dari yang terpanjang duluan.
+ */
+export function extractJsonCandidates(text: string): string[] {
+  const n = text.length;
+  const out: string[] = [];
+  let i = 0;
+  while (i < n) {
+    const ch = text[i];
+    if (ch === '"' || ch === "'") {
+      // Lewati string — kutip tunggal bukan JSON valid, tapi tetap dilewati
+      // supaya apostrof di kalimat ("don't") tidak menggeser posisi kurung.
+      const quote = ch;
+      i++;
+      while (i < n && text[i] !== quote) {
+        if (text[i] === "\\") i++;
+        i++;
+      }
+      i++;
+      continue;
+    }
+    if (ch === "{" || ch === "[") {
+      const open = ch;
+      const close = open === "{" ? "}" : "]";
+      let depth = 0;
+      let j = i;
+      let closed = false;
+      while (j < n) {
+        const cj = text[j];
+        if (cj === '"') {
+          j++;
+          while (j < n && text[j] !== '"') {
+            if (text[j] === "\\") j++;
+            j++;
+          }
+          j++;
+          continue;
+        }
+        if (cj === open) depth++;
+        else if (cj === close) {
+          depth--;
+          if (depth === 0) {
+            j++;
+            closed = true;
+            break;
+          }
+        }
+        j++;
+      }
+      if (closed) {
+        out.push(text.slice(i, j));
+        i = j;
+      } else {
+        i++;
+      }
+      continue;
+    }
+    i++;
+  }
+  out.sort((a, b) => b.length - a.length);
+  return out;
+}
+
+/**
+ * Parse + validasi teks JSON form — TOLERAN terhadap teks di luar JSON.
+ * Kalimat pengantar/jawaban AI non-JSON, code fence ```json … ```, sapaan
+ * penutup, dsb. otomatis dibuang: cukup ada SATU blok JSON valid di mana
+ * pun dalam teks (mis. hasil copy-paste dari ChatGPT/Gemini).
+ * Melempar Error dengan pesan Bahasa Indonesia yang menunjuk soal ke-(n)
+ * yang bermasalah — cocok untuk toast.
  */
 export function parseFormJson(text: string): FormIOParsed {
-  let raw: string = text.trim();
+  const raw = text.trim();
   if (!raw) throw new Error("Teks JSON kosong");
 
-  // Buang pembungkus code fence ```json … ``` (sering dipakai AI).
-  const fence = raw.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/);
-  if (fence) raw = fence[1].trim();
+  // Kandidat: teks utuh dulu, lalu blok JSON yang tertanam di dalamnya.
+  const candidates = [raw, ...extractJsonCandidates(raw)];
 
-  // Kalau masih ada teks di sekeliling JSON, coba ambil blok {...} terbesar.
-  if (!raw.startsWith("{") && !raw.startsWith("[")) {
-    const s = raw.indexOf("{");
-    const e = raw.lastIndexOf("}");
-    if (s >= 0 && e > s) raw = raw.slice(s, e + 1);
-  }
+  let validationError: Error | null = null;
+  let sawJson = false;
 
-  let data: Record<string, unknown>;
-  try {
-    const parsed = JSON.parse(raw) as unknown;
+  for (const cand of candidates) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(cand);
+    } catch {
+      continue; // bukan JSON — coba kandidat berikutnya
+    }
+    sawJson = true;
+
+    let data: Record<string, unknown> | null = null;
     if (Array.isArray(parsed)) {
       // Bentuk singkat: array soal langsung.
       data = { questions: parsed };
     } else if (parsed && typeof parsed === "object") {
       data = parsed as Record<string, unknown>;
-    } else {
-      throw new Error("Bukan objek JSON");
     }
-  } catch {
-    throw new Error("JSON tidak valid — periksa tanda kurung dan tanda kutip");
+    if (!data) continue;
+
+    try {
+      return validateFormObject(data);
+    } catch (e) {
+      if (!validationError)
+        validationError = e instanceof Error ? e : new Error(String(e));
+      // Kandidat JSON lain mungkin lebih tepat — lanjut ke berikutnya.
+    }
   }
 
+  if (validationError) throw validationError;
+  if (sawJson) throw new Error('Tidak ada soal — sertakan array "questions"');
+  throw new Error(
+    "JSON tidak valid — teks non-JSON di sekitar sudah diabaikan otomatis; periksa tanda kurung dan tanda kutip"
+  );
+}
+
+function validateFormObject(data: Record<string, unknown>): FormIOParsed {
   const questionsRaw = Array.isArray(data.questions)
     ? (data.questions as unknown[])
     : [];

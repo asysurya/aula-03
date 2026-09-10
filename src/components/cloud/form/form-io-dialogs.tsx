@@ -1,18 +1,27 @@
 "use client";
 
 // Dialog import/export/AI untuk FormBuilder.
-// - AiGenerateDialog: prompt → endpoint AI → draf soal (tetap direview guru)
+// - AiGenerateDialog — 2 mode:
+//     1) "Buat langsung"  : prompt → AI internal aula → draf soal.
+//        Jika gagal (AI_GENERATE_FAILED dst.) tampil kotak error + tombol coba lagi.
+//     2) "Lewat AI lain"  : prompt siap-salin untuk ChatGPT/Gemini/Claude/dll.
+//        Guru menempel balasan AI apa adanya — parser JSON toleran otomatis
+//        membuang kalimat pengantar & code fence markdown di sekitarnya.
 // - FormImportDialog: paste teks JSON / pilih file .json → validasi → terapkan
 // - downloadFormJson: unduh form saat ini sebagai file .json
 
-import { useRef, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import {
+  AlertTriangle,
+  Check,
+  ClipboardCheck,
+  Copy,
   FileJson,
   Loader2,
   Plus,
-  Sparkles,
   Replace,
+  Sparkles,
   Upload,
 } from "lucide-react";
 
@@ -21,6 +30,11 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
+import {
+  Alert,
+  AlertDescription,
+  AlertTitle,
+} from "@/components/ui/alert";
 import {
   Dialog,
   DialogContent,
@@ -37,8 +51,14 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { questionTypeMeta, type FormSettings } from "@/lib/form-types";
-import { parseFormJson, exportFormJson, type FormIOParsedQuestion } from "@/lib/form-io";
+import {
+  parseFormJson,
+  exportFormJson,
+  type FormIOParsedQuestion,
+} from "@/lib/form-io";
+import { buildExternalPrompt } from "@/lib/form-ai";
 
 export type ApplyMode = "append" | "replace";
 
@@ -52,7 +72,11 @@ interface DialogProps {
   ) => void;
 }
 
-function QuestionPreviewList({ questions }: { questions: FormIOParsedQuestion[] }) {
+function QuestionPreviewList({
+  questions,
+}: {
+  questions: FormIOParsedQuestion[];
+}) {
   return (
     <div className="max-h-56 overflow-y-auto rounded-lg border border-border divide-y divide-border">
       {questions.slice(0, 30).map((q, i) => (
@@ -124,7 +148,7 @@ function ApplyModePicker({
   );
 }
 
-// ── AI generator dialog ───────────────────────────────────────────
+// ── AI generator dialog (2 mode) ──────────────────────────────────
 
 export function AiGenerateDialog({
   open,
@@ -133,23 +157,46 @@ export function AiGenerateDialog({
 }: DialogProps) {
   const [prompt, setPrompt] = useState("");
   const [countInput, setCountInput] = useState("10");
-  const [type, setType] = useState<"MIX" | "PG" | "MULTI_PG" | "SHORT" | "ESSAY">(
-    "MIX"
-  );
-  const [loading, setLoading] = useState(false);
-  const [result, setResult] = useState<FormIOParsedQuestion[] | null>(null);
+  const [type, setType] = useState<
+    "MIX" | "PG" | "MULTI_PG" | "SHORT" | "ESSAY"
+  >("MIX");
   const [mode, setMode] = useState<ApplyMode>("append");
+
+  // Mode 1 — AI internal aula
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [result, setResult] = useState<FormIOParsedQuestion[] | null>(null);
+
+  // Mode 2 — AI lain (salin prompt → tempel jawaban)
+  const [copied, setCopied] = useState(false);
+  const [reply, setReply] = useState("");
+  const [replyError, setReplyError] = useState<string | null>(null);
+  const [replyResult, setReplyResult] = useState<FormIOParsedQuestion[] | null>(
+    null
+  );
+
+  const count = Math.max(1, Math.min(40, parseInt(countInput, 10) || 10));
+  const types =
+    type === "MIX" ? ["PG", "MULTI_PG", "SHORT", "ESSAY"] : [type];
+
+  const externalPromptText = useMemo(() => {
+    const p = prompt.trim();
+    if (!p) return "";
+    const t = type === "MIX" ? ["PG", "MULTI_PG", "SHORT", "ESSAY"] : [type];
+    const c = Math.max(1, Math.min(40, parseInt(countInput, 10) || 10));
+    return buildExternalPrompt(p, c, t);
+  }, [prompt, countInput, type]);
 
   async function generate() {
     const p = prompt.trim();
     if (!p) {
-      toast.error("Tulis dulu prompt-nya — mis. topik, jenjang kelas, tingkat kesulitan");
+      toast.error(
+        "Tulis dulu prompt-nya — mis. topik, jenjang kelas, tingkat kesulitan"
+      );
       return;
     }
-    const count = Math.max(1, Math.min(40, parseInt(countInput, 10) || 10));
-    const types =
-      type === "MIX" ? ["PG", "MULTI_PG", "SHORT", "ESSAY"] : [type];
     setLoading(true);
+    setError(null);
     setResult(null);
     try {
       const res = await fetch("/api/forms/ai-generate", {
@@ -159,21 +206,58 @@ export function AiGenerateDialog({
       });
       const json = await res.json();
       if (!res.ok) {
-        toast.error(json?.error || "Gagal membuat draf soal — coba lagi");
+        setError(json?.error || "AI_GENERATE_FAILED — coba lagi sebentar");
         return;
       }
       setResult(json.questions as FormIOParsedQuestion[]);
-      toast.success(`${json.generatedCount} soal dibuat — periksa dulu sebelum dipakai`);
+      toast.success(
+        `${json.generatedCount} soal dibuat — periksa dulu sebelum dipakai`
+      );
     } catch {
-      toast.error("Koneksi terputus — coba lagi");
+      setError("Koneksi terputus — coba lagi sebentar");
     } finally {
       setLoading(false);
     }
   }
 
+  function validateReply() {
+    try {
+      const parsed = parseFormJson(reply);
+      setReplyResult(parsed.questions);
+      setReplyError(null);
+      toast.success(`${parsed.questions.length} soal terbaca dari jawaban AI`);
+    } catch (e) {
+      setReplyResult(null);
+      setReplyError(
+        e instanceof Error ? e.message : "Jawaban AI tidak valid"
+      );
+    }
+  }
+
+  async function copyPrompt() {
+    if (!externalPromptText) {
+      toast.error(
+        "Tulis dulu prompt-nya — mis. topik, jenjang kelas, tingkat kesulitan"
+      );
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(externalPromptText);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+      toast.success(
+        "Prompt disalin — buka ChatGPT/Gemini/AI lain, tempel, lalu salin jawabannya ke sini"
+      );
+    } catch {
+      toast.error(
+        "Gagal menyalin otomatis — salin manual dari kotak prompt di bawah"
+      );
+    }
+  }
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-xl">
+      <DialogContent className="max-w-xl max-h-[85vh] overflow-y-auto">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <Sparkles className="size-4 text-primary" /> Buat soal dengan AI
@@ -225,45 +309,180 @@ export function AiGenerateDialog({
             </div>
           </div>
 
-          {result ? (
-            <div className="space-y-2">
-              <p className="text-xs font-medium text-muted-foreground">
-                Draf {result.length} soal:
-              </p>
-              <QuestionPreviewList questions={result} />
-              <ApplyModePicker mode={mode} setMode={setMode} hasQuestions />
-            </div>
-          ) : null}
-        </div>
+          <Tabs defaultValue="internal">
+            <TabsList className="w-full">
+              <TabsTrigger value="internal" className="flex-1 gap-1.5">
+                <Sparkles className="size-3.5" /> Buat langsung
+              </TabsTrigger>
+              <TabsTrigger value="external" className="flex-1 gap-1.5">
+                <Copy className="size-3.5" /> Lewat AI lain
+              </TabsTrigger>
+            </TabsList>
 
-        <DialogFooter className="gap-2">
-          {result ? (
-            <>
-              <Button variant="outline" onClick={() => setResult(null)}>
-                Buat ulang
-              </Button>
+            {/* Mode 1 — AI internal aula */}
+            <TabsContent value="internal" className="space-y-3 pt-1">
+              {error ? (
+                <Alert variant="destructive">
+                  <AlertTriangle className="size-4" />
+                  <AlertTitle>{error}</AlertTitle>
+                  <AlertDescription className="mt-2">
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() => void generate()}
+                      disabled={loading}
+                    >
+                      {loading ? (
+                        <Loader2 className="size-3.5 animate-spin mr-1" />
+                      ) : null}
+                      Coba lagi
+                    </Button>
+                  </AlertDescription>
+                </Alert>
+              ) : null}
+              {result && !error ? (
+                <div className="space-y-2">
+                  <p className="text-xs font-medium text-muted-foreground">
+                    Draf {result.length} soal:
+                  </p>
+                  <QuestionPreviewList questions={result} />
+                  <ApplyModePicker mode={mode} setMode={setMode} hasQuestions />
+                  <div className="flex justify-end gap-2 pt-1">
+                    <Button variant="outline" onClick={() => setResult(null)}>
+                      Buat ulang
+                    </Button>
+                    <Button
+                      onClick={() => {
+                        onApply(result, mode);
+                        onOpenChange(false);
+                        setPrompt("");
+                        setResult(null);
+                        setError(null);
+                      }}
+                    >
+                      <Plus className="size-4 mr-1" /> Gunakan draf ini
+                    </Button>
+                  </div>
+                </div>
+              ) : null}
+              {!result && !error ? (
+                <Button
+                  onClick={() => void generate()}
+                  disabled={loading}
+                  className="w-full"
+                >
+                  {loading ? (
+                    <Loader2 className="size-4 animate-spin mr-1" />
+                  ) : (
+                    <Sparkles className="size-4 mr-1" />
+                  )}
+                  {loading ? "AI sedang menyusun soal…" : "Buat draf soal"}
+                </Button>
+              ) : null}
+            </TabsContent>
+
+            {/* Mode 2 — lewat AI lain (ChatGPT/Gemini/Claude/…) */}
+            <TabsContent value="external" className="space-y-3 pt-1">
+              <p className="text-xs text-muted-foreground">
+                Salin prompt di bawah ke AI lain (ChatGPT, Gemini, Claude,
+                dll.), lalu tempelkan jawabannya ke kotak paling bawah.
+                Kalimat pengantar AI &amp; blok kode markdown (```…```) di
+                sekitar jawaban otomatis dibuang saat validasi.
+              </p>
+              <div className="space-y-1.5">
+                <div className="flex items-center justify-between">
+                  <Label>Prompt untuk AI lain</Label>
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    onClick={() => void copyPrompt()}
+                  >
+                    {copied ? (
+                      <Check className="size-3.5 mr-1" />
+                    ) : (
+                      <Copy className="size-3.5 mr-1" />
+                    )}
+                    {copied ? "Tersalin" : "Salin prompt"}
+                  </Button>
+                </div>
+                <Textarea
+                  readOnly
+                  rows={4}
+                  value={externalPromptText}
+                  placeholder="Tulis prompt Anda dulu — prompt siap-salin muncul di sini"
+                  className="text-[11px] font-mono"
+                  onFocus={(e) => e.currentTarget.select()}
+                />
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="ai-reply">Jawaban AI (tempel apa adanya)</Label>
+                <Textarea
+                  id="ai-reply"
+                  rows={5}
+                  value={reply}
+                  onChange={(e) => {
+                    setReply(e.target.value);
+                    setReplyResult(null);
+                    setReplyError(null);
+                  }}
+                  placeholder="Tempel jawaban AI di sini — boleh ikut kalimat pengantarnya"
+                  className="text-xs font-mono"
+                />
+              </div>
               <Button
-                onClick={() => {
-                  onApply(result, mode);
-                  onOpenChange(false);
-                  setPrompt("");
-                  setResult(null);
-                }}
+                size="sm"
+                variant="secondary"
+                onClick={validateReply}
+                disabled={!reply.trim()}
               >
-                <Plus className="size-4 mr-1" /> Gunakan draf ini
+                <ClipboardCheck className="size-3.5 mr-1" /> Periksa &amp;
+                validasi
               </Button>
-            </>
-          ) : (
-            <Button onClick={() => void generate()} disabled={loading}>
-              {loading ? (
-                <Loader2 className="size-4 animate-spin mr-1" />
-              ) : (
-                <Sparkles className="size-4 mr-1" />
-              )}
-              {loading ? "AI sedang menyusun soal…" : "Buat draf soal"}
-            </Button>
-          )}
-        </DialogFooter>
+              {replyError ? (
+                <Alert variant="destructive">
+                  <AlertTriangle className="size-4" />
+                  <AlertTitle>{replyError}</AlertTitle>
+                  <AlertDescription>
+                    Periksa kembali jawaban AI, atau minta AI mengulang
+                    jawabannya sesuai format.
+                  </AlertDescription>
+                </Alert>
+              ) : null}
+              {replyResult ? (
+                <div className="space-y-2">
+                  <p className="text-xs font-medium text-muted-foreground">
+                    {replyResult.length} soal terbaca:
+                  </p>
+                  <QuestionPreviewList questions={replyResult} />
+                  <ApplyModePicker mode={mode} setMode={setMode} hasQuestions />
+                  <div className="flex justify-end gap-2 pt-1">
+                    <Button
+                      variant="outline"
+                      onClick={() => {
+                        setReply("");
+                        setReplyResult(null);
+                      }}
+                    >
+                      Tempel ulang
+                    </Button>
+                    <Button
+                      onClick={() => {
+                        onApply(replyResult, mode);
+                        onOpenChange(false);
+                        setPrompt("");
+                        setReply("");
+                        setReplyResult(null);
+                        setReplyError(null);
+                      }}
+                    >
+                      <Plus className="size-4 mr-1" /> Gunakan soal ini
+                    </Button>
+                  </div>
+                </div>
+              ) : null}
+            </TabsContent>
+          </Tabs>
+        </div>
       </DialogContent>
     </Dialog>
   );
@@ -287,10 +506,14 @@ export function FormImportDialog({
 
   function doParse(t: string) {
     try {
+      // Parser toleran: teks non-JSON di sekitar blok JSON otomatis dibuang
+      // (aman untuk hasil copy-paste dari AI / catatan berformat).
       const result = parseFormJson(t);
       setParsed(result);
       toast.success(
-        `${result.questions.length} soal terbaca${Object.keys(result.settings).length > 0 ? " + pengaturan" : ""}`
+        `${result.questions.length} soal terbaca${
+          Object.keys(result.settings).length > 0 ? " + pengaturan" : ""
+        }`
       );
     } catch (e) {
       setParsed(null);
@@ -320,7 +543,7 @@ export function FormImportDialog({
           </DialogTitle>
           <DialogDescription>
             Tempel teks JSON atau pilih file <code>.json</code> hasil export
-            sebelumnya. Format: <code>kind: &quot;aula-form&quot;</code>.
+            sebelumnya. Teks lain di sekitar JSON diabaikan otomatis.
           </DialogDescription>
         </DialogHeader>
 
@@ -350,7 +573,7 @@ export function FormImportDialog({
             <input
               ref={fileRef}
               type="file"
-              accept=".json,application/json"
+              accept=".json,application/json,text/plain"
               className="hidden"
               onChange={(e) => void onFilePicked(e.target.files)}
             />
@@ -395,7 +618,11 @@ export function FormImportDialog({
             disabled={!parsed}
             onClick={() => {
               if (!parsed) return;
-              onApply(parsed.questions, mode, applySettings ? parsed.settings : undefined);
+              onApply(
+                parsed.questions,
+                mode,
+                applySettings ? parsed.settings : undefined
+              );
               onOpenChange(false);
               setText("");
               setParsed(null);

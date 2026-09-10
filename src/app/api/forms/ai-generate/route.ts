@@ -2,6 +2,7 @@ import { NextRequest } from "next/server";
 import { requireUser } from "@/lib/session";
 import { errorResponse } from "@/lib/cloud-utils";
 import { parseFormJson, type FormIOParsedQuestion } from "@/lib/form-io";
+import { AI_TYPE_LABELS, buildAiSystemPrompt } from "@/lib/form-ai";
 import ZAI from "z-ai-web-dev-sdk";
 
 // POST /api/forms/ai-generate
@@ -16,55 +17,6 @@ export const maxDuration = 60;
 
 const MAX_PROMPT = 2000;
 const MAX_COUNT = 40;
-
-const TYPE_LABELS: Record<string, string> = {
-  PG: "Pilihan Ganda (satu jawaban benar)",
-  MULTI_PG: "Pilihan Ganda multi-jawaban",
-  SHORT: "Isian singkat",
-  ESSAY: "Esai",
-  FILE: "Upload file",
-  IMAGE: "Upload gambar/foto",
-};
-
-function buildSystemPrompt(count: number, types: string[]): string {
-  const typeList = types
-    .map((t) => `- ${t} (${TYPE_LABELS[t] ?? t})`)
-    .join("\n");
-  return `Kamu adalah generator soal ujian berkualitas untuk guru Indonesia.
-
-Tugas: buat ${count} soal berdasarkan permintaan pengguna, HANYA memakai jenis soal berikut:
-${typeList}
-
-Balas HANYA dengan satu objek JSON valid (tanpa teks lain, tanpa code fence) dengan struktur PERSIS:
-{
-  "kind": "aula-form",
-  "version": 1,
-  "questions": [
-    {
-      "type": "PG",
-      "text": "Teks pertanyaan yang jelas dan spesifik",
-      "points": 1,
-      "required": true,
-      "options": [
-        { "label": "Opsi jawaban benar", "correct": true },
-        { "label": "Pengecoh yang masuk akal" },
-        { "label": "Pengecoh lain" },
-        { "label": "Pengecoh lagi" }
-      ]
-    }
-  ]
-}
-
-Aturan penting:
-- Soal PG: 4-5 opsi, TEPAT SATU opsi dengan "correct": true.
-- Soal MULTI_PG: 4-6 opsi, 2-4 opsi dengan "correct": true.
-- SHORT/ESSAY: TANPA field "options".
-- FILE/IMAGE: gunakan untuk soal unggah jawaban; instruksikan format di teks soal; TANPA "options".
-- Bahasa Indonesia yang baik dan benar, sesuaikan jenjang dari prompt pengguna.
-- "text" maksimal 300 karakter. Jangan membocorkan jawaban di teks soal.
-- Urutan soal dari mudah ke sulit.
-- Jangan ulang soal yang sama persis.`;
-}
 
 export async function POST(req: NextRequest) {
   const user = await requireUser().catch(() => null);
@@ -82,7 +34,7 @@ export async function POST(req: NextRequest) {
   );
 
   const requestedTypes = Array.isArray(body?.types)
-    ? (body.types as unknown[]).map(String).filter((t) => TYPE_LABELS[t])
+    ? (body.types as unknown[]).map(String).filter((t) => AI_TYPE_LABELS[t])
     : [];
   const types = requestedTypes.length > 0 ? requestedTypes : ["PG"];
 
@@ -90,7 +42,7 @@ export async function POST(req: NextRequest) {
     const zai = await ZAI.create();
     const completion = await zai.chat.completions.create({
       messages: [
-        { role: "assistant", content: buildSystemPrompt(count, types) },
+        { role: "assistant", content: buildAiSystemPrompt(count, types) },
         { role: "user", content: prompt },
       ],
       thinking: { type: "disabled" },

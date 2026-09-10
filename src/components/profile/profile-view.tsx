@@ -4,6 +4,7 @@ import { useRef, useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { PasswordInput } from "@/components/ui/password-input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
@@ -279,8 +280,7 @@ export function ProfileView({ me }: { me: MeResponse }) {
           <CardContent className="space-y-3">
             <div className="space-y-1.5">
               <Label>Password saat ini</Label>
-              <Input
-                type="password"
+              <PasswordInput
                 value={curPw}
                 onChange={(e) => setCurPw(e.target.value)}
                 autoComplete="current-password"
@@ -289,8 +289,7 @@ export function ProfileView({ me }: { me: MeResponse }) {
             <div className="grid sm:grid-cols-2 gap-3">
               <div className="space-y-1.5">
                 <Label>Password baru</Label>
-                <Input
-                  type="password"
+                <PasswordInput
                   value={newPw}
                   onChange={(e) => setNewPw(e.target.value)}
                   autoComplete="new-password"
@@ -298,8 +297,7 @@ export function ProfileView({ me }: { me: MeResponse }) {
               </div>
               <div className="space-y-1.5">
                 <Label>Konfirmasi password baru</Label>
-                <Input
-                  type="password"
+                <PasswordInput
                   value={confPw}
                   onChange={(e) => setConfPw(e.target.value)}
                   autoComplete="new-password"
