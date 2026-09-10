@@ -251,8 +251,8 @@ function MessageActions({
   return (
     <div
       className={cn(
-        "absolute -top-3 right-2 z-10 flex items-center rounded-lg",
-        "opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-opacity"
+        "flex items-center shrink-0 self-center",
+        "opacity-70 hover:opacity-100 focus-within:opacity-100 transition-opacity"
       )}
     >
       {/* Popover emoji lengkap — terbuka dari menu titik-tiga, jangkar = tombol */}
