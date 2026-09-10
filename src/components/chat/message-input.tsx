@@ -13,15 +13,16 @@ import {
   PopoverTrigger,
 } from "@/components/ui/popover";
 import { FileIcon } from "@/components/cloud/file-icon";
-import { mimeToIcon } from "@/lib/cloud-format";
-import { uploadSmart } from "@/lib/upload-client";
 import {
   ALLOWED_MIMES,
   formatBytes,
   isImageMime,
   MAX_ATTACHMENTS_PER_MESSAGE,
   MAX_FILE_SIZE,
+  resolveMime,
 } from "@/lib/file-constants";
+import { mimeToIcon } from "@/lib/cloud-format";
+import { uploadSmart } from "@/lib/upload-client";
 import type { ChatMessage } from "./types";
 
 export interface PendingAttachment {
@@ -122,7 +123,9 @@ export function MessageInput({
         );
         continue;
       }
-      const mt = f.type || "application/octet-stream";
+      // Mimetype OS bisa kosong/salah (khususnya Android) — infer dari
+      // ekstensi dulu sebelum menolak.
+      const mt = resolveMime(f.name, f.type);
       if (!ALLOWED_MIMES.has(mt)) {
         toast.error(`Tipe file "${f.name}" tidak didukung`);
         continue;
@@ -136,8 +139,10 @@ export function MessageInput({
       id: `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
       name: f.name,
       size: f.size,
-      mimetype: f.type || "application/octet-stream",
-      previewUrl: isImageMime(f.type || "") ? URL.createObjectURL(f) : undefined,
+      mimetype: resolveMime(f.name, f.type),
+      previewUrl: isImageMime(resolveMime(f.name, f.type))
+        ? URL.createObjectURL(f)
+        : undefined,
     }));
     setUploading((prev) => [...prev, ...staged]);
 
@@ -410,8 +415,9 @@ export function MessageInput({
         onChange={(e) => {
           void handleFilesSelected(e.target.files);
         }}
-        accept={Array.from(ALLOWED_MIMES).join(",")}
       />
+      {/* Catatan: input sengaja TANPA accept supaya semua file terlihat di
+          pemilih file (mimetype OS kosong/aneh masih divalidasi di atas). */}
       <div className="flex items-end gap-2">
         <Textarea
           ref={ref}

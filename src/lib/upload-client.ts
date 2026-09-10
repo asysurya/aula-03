@@ -210,20 +210,38 @@ export async function uploadSmart<T = Record<string, unknown>>(
       return { ok: false, status: 400, json: { error: req.error } as never };
     }
     report({ phase: "uploading", loaded: 0, total: file.size, percent: 0 });
-    try {
-      const res = await xhrUpload(req.url, req.form, (loaded, total) => {
-        const percent = total > 0 ? Math.round((loaded / total) * 95) : 0;
-        report({ phase: "uploading", loaded, total, percent });
-      });
-      report({ phase: "done", loaded: file.size, total: file.size, percent: 100 });
-      return res as SmartUploadResult<T>;
-    } catch (e) {
-      return {
-        ok: false,
-        status: 0,
-        json: { error: e instanceof Error ? e.message : "Gagal mengunggah" } as never,
-      };
+    const onProgress = (loaded: number, total: number) => {
+      const percent = total > 0 ? Math.round((loaded / total) * 95) : 0;
+      report({ phase: "uploading", loaded, total, percent });
+    };
+    // Retry sekali kalau error jaringan murni (koneksi terputus sejenak) —
+    // sama seperti perilaku jalur chunked.
+    let lastError: unknown;
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      try {
+        const res = await xhrUpload(req.url, req.form, onProgress);
+        report({
+          phase: "done",
+          loaded: file.size,
+          total: file.size,
+          percent: 100,
+        });
+        return res as SmartUploadResult<T>;
+      } catch (e) {
+        lastError = e;
+        if (attempt < 2) await new Promise((r) => setTimeout(r, 1200));
+      }
     }
+    return {
+      ok: false,
+      status: 0,
+      json: {
+        error:
+          lastError instanceof Error
+            ? lastError.message
+            : "Gagal mengunggah",
+      } as never,
+    };
   }
 
   // ── Jalur 2: file besar → chunked via staging MongoDB ──

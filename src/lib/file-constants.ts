@@ -72,6 +72,98 @@ export const ALLOWED_MIMES: ReadonlySet<string> = new Set<string>([
 
 export const MAX_ATTACHMENTS_PER_MESSAGE = 5;
 
+// Peta ekstensi → mimetype untuk file yang mimetype OS-nya kosong/aneh
+// (sering terjadi di Android & file lama). Dipakai client & server:
+// kalau mimetype file tidak lolos ALLOWED_MIMES tapi ekstensinya dikenal,
+// gunakan mimetype dari ekstensi.
+export const EXT_MIME: Record<string, string> = {
+  // documents
+  pdf: "application/pdf",
+  doc: "application/msword",
+  docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  xls: "application/vnd.ms-excel",
+  xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  ppt: "application/vnd.ms-powerpoint",
+  pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  rtf: "application/rtf",
+  odt: "application/vnd.oasis.opendocument.text",
+  ods: "application/vnd.oasis.opendocument.spreadsheet",
+  odp: "application/vnd.oasis.opendocument.presentation",
+  epub: "application/epub+zip",
+  txt: "text/plain",
+  md: "text/markdown",
+  markdown: "text/markdown",
+  json: "application/json",
+  xml: "application/xml",
+  csv: "text/csv",
+  yaml: "text/yaml",
+  yml: "text/yaml",
+  sh: "text/x-shellscript",
+  js: "text/javascript",
+  mjs: "text/javascript",
+  css: "text/css",
+  html: "text/html",
+  htm: "text/html",
+  ics: "text/calendar",
+  vcf: "text/vcard",
+  eml: "message/rfc822",
+  // images
+  png: "image/png",
+  jpg: "image/jpeg",
+  jpeg: "image/jpeg",
+  gif: "image/gif",
+  webp: "image/webp",
+  svg: "image/svg+xml",
+  bmp: "image/bmp",
+  ico: "image/x-icon",
+  tif: "image/tiff",
+  tiff: "image/tiff",
+  heic: "image/heic",
+  heif: "image/heic",
+  avif: "image/avif",
+  // archives
+  zip: "application/zip",
+  rar: "application/vnd.rar",
+  "7z": "application/x-7z-compressed",
+  tar: "application/x-tar",
+  gz: "application/gzip",
+  bz2: "application/x-bzip2",
+  xz: "application/x-xz",
+  // audio
+  mp3: "audio/mpeg",
+  m4a: "audio/mp4",
+  wav: "audio/wav",
+  ogg: "audio/ogg",
+  flac: "audio/flac",
+  aac: "audio/aac",
+  // video
+  mp4: "video/mp4",
+  webm: "video/webm",
+  mov: "video/quicktime",
+  mkv: "video/x-matroska",
+  avi: "video/x-msvideo",
+};
+
+/**
+ * Mimetype final untuk sebuah file: pakai mimetype OS kalau valid,
+ * kalau tidak → infer dari ekstensi. Mengembalikan "application/octet-stream"
+ * bila tidak bisa ditentukan (tetap lolos — tipe asli dideteksi server
+ * saat serving via magic bytes).
+ */
+export function resolveMime(
+  filename: string,
+  osMime: string | null | undefined
+): string {
+  const m = (osMime || "").trim().toLowerCase();
+  if (m && ALLOWED_MIMES.has(m)) return m;
+  const ext = filename.includes(".")
+    ? filename.split(".").pop()!.toLowerCase()
+    : "";
+  const fromExt = ext ? EXT_MIME[ext] : undefined;
+  if (fromExt && ALLOWED_MIMES.has(fromExt)) return fromExt;
+  return m || fromExt || "application/octet-stream";
+}
+
 export function isImageMime(mime: string): boolean {
   return mime.startsWith("image/");
 }

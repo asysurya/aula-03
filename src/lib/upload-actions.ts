@@ -12,6 +12,7 @@ import {
   type UserRole,
 } from "@/lib/cloud-perms";
 import { ALLOWED_MIMES, MAX_FILE_SIZE, saveFile, deleteFile } from "@/lib/storage";
+import { resolveMime } from "@/lib/file-constants";
 import { megaUploadTo, describeMegaError, type MegaAccountLike } from "@/lib/mega-storage";
 import { canWriteMount } from "@/lib/mount-access";
 import { hardDeleteCloudFilesByIds } from "@/lib/hard-delete";
@@ -56,7 +57,10 @@ function fail(
 }
 
 // Validasi file standar: tidak kosong, ≤ MAX_FILE_SIZE, mimetype diizinkan.
+// Mimetype dinormalisasi dulu: OS bisa mengirim mimetype kosong/salah —
+// infer dari ekstensi (resolveMime) sebelum dicek.
 function validateStandard(file: UploadBytes): ActionResult | null {
+  file.mimetype = resolveMime(file.name, file.mimetype);
   if (file.size === 0) return fail("FILE_EMPTY", 400);
   if (file.size > MAX_FILE_SIZE)
     return fail("FILE_TOO_LARGE", 413, { maxBytes: MAX_FILE_SIZE });

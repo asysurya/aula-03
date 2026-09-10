@@ -2,6 +2,12 @@ import { NextRequest } from "next/server";
 import { db } from "@/lib/db";
 import { requireUser } from "@/lib/session";
 import { ALLOWED_MIMES, MAX_FILE_SIZE, saveFile } from "@/lib/storage";
+import { resolveMime } from "@/lib/file-constants";
+
+// Upload lampiran chat bisa menyentuh MEGA (login + upload) — beri waktu
+// cukup supaya tidak dibunuh limit default Vercel (penyebab "lampiran gagal").
+export const runtime = "nodejs";
+export const maxDuration = 60;
 
 // Conversation membership validation shared with /api/chat/messages.
 type ConversationKind = "classroom" | "group" | "dm";
@@ -77,7 +83,9 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  const mimetype = file.type || "application/octet-stream";
+  // Mimetype final: pakai mimetype OS kalau valid, kalau tidak → infer dari
+  // ekstensi (file Android/OS lama sering kosong atau salah).
+  const mimetype = resolveMime(file.name, file.type);
   if (!ALLOWED_MIMES.has(mimetype)) {
     return Response.json(
       { error: "MIME_NOT_ALLOWED", mimetype },
