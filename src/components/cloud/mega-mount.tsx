@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { formatDistanceToNow } from "date-fns";
 import { id as localeId } from "date-fns/locale";
@@ -79,7 +79,8 @@ import {
 
 import { FilePreview } from "@/components/cloud/file-preview";
 import { MegaLogo } from "@/components/cloud/mega-logo";
-import { uploadSmart, type UploadProgressInfo } from "@/lib/upload-client";
+import { TransferManagerButton } from "@/components/cloud/transfer-modal";
+import { useTransferStore } from "@/lib/transfer-store";
 import {
   formatBytes,
   mimetypeFromName,
@@ -196,25 +197,17 @@ export function MegaMountView({
     onError: (e: Error) => toast.error(e.message),
   });
 
-  // ── Upload (chunked utk file besar, progress bar) ──
-  const [uploadProgress, setUploadProgress] = useState<UploadProgressInfo | null>(null);
-  const uploadMut = useMutation({
-    mutationFn: async (file: File) => {
-      const res = await uploadSmart<Record<string, unknown>>(
-        file,
-        { kind: "mega", parentId: nodeId, accountId },
-        { onProgress: setUploadProgress }
-      );
-      if (!res.ok) throw new Error((res.json.error as string) || "Upload gagal");
-      return res.json;
-    },
-    onSuccess: () => {
-      refetch();
-      toast.success("File terunggah ke MEGA");
-    },
-    onError: (e: Error) => toast.error(e.message),
-    onSettled: () => setUploadProgress(null),
-  });
+  // ── Upload — berjalan di latar belakang lewat Manajer Transfer ──
+  // (pause/resume/cancel/antrean + progress tiap 2 detik; file besar
+  // otomatis chunked). Daftar mount di-refresh saat tiap upload selesai.
+  const enqueueUpload = useTransferStore((s) => s.enqueueUpload);
+  const enqueueDownload = useTransferStore((s) => s.enqueueDownload);
+  const allJobs = useTransferStore((s) => s.jobs);
+  // Filter di luar selector supaya referensi stabil (anti re-render loop).
+  const mountUploads = useMemo(
+    () => allJobs.filter((j) => j.kind === "upload" && j.context === "Mount MEGA"),
+    [allJobs]
+  );
 
   const onPickUpload = (f: File | null | undefined) => {
     if (!f) return;
@@ -222,7 +215,15 @@ export function MegaMountView({
       toast.error("File maksimal 100 MB");
       return;
     }
-    uploadMut.mutate(f);
+    enqueueUpload({
+      file: f,
+      target: { kind: "mega", parentId: nodeId, accountId },
+      context: "Mount MEGA",
+      onFileOps: () => refetch(),
+    });
+    toast.info(
+      `"${f.name}" diunggah ke MEGA di latar belakang — pantau di tombol Transfer.`
+    );
   };
 
   const usagePct =
@@ -233,7 +234,19 @@ export function MegaMountView({
   const foldersInCurrentDir = entries.filter((e) => e.isFolder);
 
   const downloadUrl = (entry: MegaEntry) =>
-    `/api/storage/mega:${accountId}:${entry.nodeId}?name=${encodeURIComponent(entry.name)}`;
+    `/api/storage/mega:${accountId}:${entry.nodeId}?name=${encodeURIComponent(entry.name)}&download=1`;
+
+  // Unduh berjalan di latar belakang via Manajer Transfer (pause/resume/
+  // cancel + progress tiap 2 detik), bukan <a download> yang memblokir.
+  const downloadBackground = (entry: MegaEntry) => {
+    enqueueDownload({
+      url: downloadUrl(entry),
+      name: entry.name,
+      size: entry.isFolder ? 0 : entry.size,
+      context: "Mount MEGA",
+      autoSave: true,
+    });
+  };
 
   // ── Selection helpers (perilaku drive standar) ──
   // 1 klik = pilih (ganti seleksi) · Ctrl/Cmd+klik = toggle ·
@@ -512,6 +525,7 @@ export function MegaMountView({
         ) : null}
 
         <div className="ml-auto sm:ml-0 flex items-center gap-1">
+          <TransferManagerButton />
           <Button
             size="sm"
             variant="ghost"
@@ -546,13 +560,9 @@ export function MegaMountView({
             size="sm"
             className="gap-1.5"
             onClick={() => uploadInputRef.current?.click()}
-            disabled={uploadMut.isPending || !data}
+            disabled={!data}
           >
-            {uploadMut.isPending ? (
-              <Loader2 className="size-4 animate-spin" />
-            ) : (
-              <FilePlus2 className="size-4" />
-            )}
+            <FilePlus2 className="size-4" />
             Unggah
           </Button>
           <input
@@ -629,13 +639,25 @@ export function MegaMountView({
           </>
         )}
 
-        {uploadProgress ? (
-          <div className="ml-2 flex items-center gap-2 min-w-[160px] max-w-[240px] flex-1">
-            <Progress value={uploadProgress.percent} className="h-1.5" />
+        {mountUploads.length > 0 ? (
+          <div className="ml-2 flex items-center gap-2 min-w-[160px] max-w-[260px] flex-1">
+            <Progress
+              value={
+                mountUploads[0].size > 0
+                  ? Math.min(
+                      100,
+                      Math.round(
+                        (mountUploads[0].loaded / mountUploads[0].size) * 100
+                      )
+                    )
+                  : 0
+              }
+              className="h-1.5"
+            />
             <span className="text-[10px] text-muted-foreground whitespace-nowrap">
-              {uploadProgress.phase === "finalizing"
-                ? "menyimpan…"
-                : `${formatBytes(uploadProgress.loaded)}`}
+              {mountUploads.length > 1
+                ? `${mountUploads.length} berjalan`
+                : `${formatBytes(mountUploads[0].loaded)}`}
             </span>
           </div>
         ) : (
@@ -726,7 +748,7 @@ export function MegaMountView({
                   toast.error(`"${f.name}" melebihi 100 MB`);
                   return;
                 }
-                uploadMut.mutate(f);
+                onPickUpload(f);
               });
             }}
           >
@@ -802,7 +824,7 @@ export function MegaMountView({
                         }
                       }}
                       canPaste={!!clipboard && canWrite}
-                      downloadUrl={downloadUrl(entry)}
+                      onDownload={() => downloadBackground(entry)}
                     />
                   );
                 })}
@@ -938,6 +960,7 @@ function MegaRow({
   onToggleSelect,
   onSelectRange,
   onPreview,
+  onDownload,
   onRename,
   onMove,
   onDelete,
@@ -945,7 +968,6 @@ function MegaRow({
   onCutOne,
   onPasteInto,
   canPaste,
-  downloadUrl,
 }: {
   entry: MegaEntry;
   accountId: string;
@@ -955,6 +977,7 @@ function MegaRow({
   onToggleSelect: (additive: boolean) => void;
   onSelectRange: () => void;
   onPreview: () => void;
+  onDownload: () => void;
   onRename: () => void;
   onMove: () => void;
   onDelete: () => void;
@@ -962,7 +985,6 @@ function MegaRow({
   onCutOne: () => void;
   onPasteInto: () => void;
   canPaste: boolean;
-  downloadUrl: string;
 }) {
   const timeLabel = entry.timestamp
     ? formatDistanceToNow(new Date(entry.timestamp), {
@@ -1050,7 +1072,7 @@ function MegaRow({
             onDelete={onDelete}
             onCopyOne={onCopyOne}
             onCutOne={onCutOne}
-            downloadUrl={downloadUrl}
+            onDownload={onDownload}
           />
           <ChevronRight className="size-4 text-muted-foreground opacity-0 group-hover:opacity-100 shrink-0" />
         </div>
@@ -1067,10 +1089,8 @@ function MegaRow({
           {entry.isFolder ? "Buka" : "Pratinjau"}
         </ContextMenuItem>
         {!entry.isFolder ? (
-          <ContextMenuItem asChild>
-            <a href={downloadUrl} download={entry.name}>
-              <Download className="size-4" /> Unduh
-            </a>
+          <ContextMenuItem onClick={onDownload}>
+            <Download className="size-4" /> Unduh
           </ContextMenuItem>
         ) : null}
         {canWrite ? (
@@ -1118,7 +1138,7 @@ function RowMenu({
   onDelete,
   onCopyOne,
   onCutOne,
-  downloadUrl,
+  onDownload,
 }: {
   entry: MegaEntry;
   canWrite: boolean;
@@ -1128,7 +1148,7 @@ function RowMenu({
   onDelete: () => void;
   onCopyOne: () => void;
   onCutOne: () => void;
-  downloadUrl: string;
+  onDownload: () => void;
 }) {
   return (
     <span
@@ -1153,10 +1173,8 @@ function RowMenu({
               <DropdownMenuItem onClick={onPreview}>
                 <Eye className="size-4" /> Pratinjau
               </DropdownMenuItem>
-              <DropdownMenuItem asChild>
-                <a href={downloadUrl} download={entry.name}>
-                  <Download className="size-4" /> Unduh
-                </a>
+              <DropdownMenuItem onClick={onDownload}>
+                <Download className="size-4" /> Unduh
               </DropdownMenuItem>
             </>
           )}

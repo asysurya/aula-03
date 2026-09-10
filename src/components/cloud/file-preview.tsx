@@ -6,6 +6,8 @@ import {
   Download,
   Loader2,
   FileWarning,
+  FileArchive,
+  FileText,
   Copy,
   Check,
   Maximize2,
@@ -26,6 +28,7 @@ import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import ReactMarkdown from "react-markdown";
 import { filePublicUrl } from "@/lib/file-constants";
 import { formatBytes, type CloudFileItem } from "@/lib/cloud-format";
+import { useTransferStore } from "@/lib/transfer-store";
 
 // ───────────────────────── Klasifikasi tipe preview ─────────────────────────
 // Diputuskan dari mimetype DAN ekstensi (mimetype DB bisa keliru — mis.
@@ -42,41 +45,109 @@ type PreviewKind =
   | "docx"
   | "xlsx"
   | "pptx"
+  | "archive"
+  | "binary-office"
   | "other";
 
 const EXT_KIND: Record<string, PreviewKind> = {
+  // gambar
   pdf: "pdf",
   png: "image",
   jpg: "image",
   jpeg: "image",
+  jpe: "image",
   gif: "image",
   webp: "image",
   svg: "image",
   bmp: "image",
+  ico: "image",
+  tif: "image",
+  tiff: "image",
+  avif: "image",
+  // video
   mp4: "video",
+  m4v: "video",
   webm: "video",
   mov: "video",
+  mkv: "video",
+  avi: "video",
+  wmv: "video",
+  flv: "video",
+  // audio
   mp3: "audio",
   wav: "audio",
   ogg: "audio",
+  oga: "audio",
   m4a: "audio",
+  flac: "audio",
+  aac: "audio",
+  opus: "audio",
+  // teks & kode
   txt: "text",
   log: "text",
-  md: "markdown",
+  ini: "text",
+  cfg: "text",
+  conf: "text",
+  env: "text",
   json: "text",
+  jsonl: "text",
+  ndjson: "text",
   xml: "text",
   html: "text",
   htm: "text",
   css: "text",
   js: "text",
+  mjs: "text",
+  cjs: "text",
   ts: "text",
+  tsx: "text",
+  jsx: "text",
+  py: "text",
+  rb: "text",
+  php: "text",
+  java: "text",
+  c: "text",
+  h: "text",
+  cpp: "text",
+  cs: "text",
+  go: "text",
+  rs: "text",
+  sh: "text",
+  bat: "text",
+  sql: "text",
+  yaml: "text",
+  yml: "text",
+  toml: "text",
+  ics: "text",
+  vcf: "text",
+  eml: "text",
+  md: "markdown",
+  markdown: "markdown",
+  // office
   csv: "xlsx",
+  tsv: "xlsx",
   xls: "xlsx",
   xlsx: "xlsx",
+  xlsm: "xlsx",
+  ods: "xlsx",
   doc: "docx",
   docx: "docx",
+  docm: "docx",
+  odt: "docx",
   ppt: "pptx",
   pptx: "pptx",
+  pptm: "pptx",
+  odp: "pptx",
+  // arsip
+  zip: "archive",
+  rar: "archive",
+  "7z": "archive",
+  tar: "archive",
+  gz: "archive",
+  bz2: "archive",
+  xz: "archive",
+  epub: "archive",
+  rtf: "binary-office",
 };
 
 function ext(name: string): string {
@@ -95,25 +166,34 @@ function classify(mime: string, name: string): PreviewKind {
   if (
     mime === "text/plain" ||
     mime === "application/json" ||
+    mime === "text/x-shellscript" ||
+    mime === "text/javascript" ||
     mime.startsWith("text/")
   )
     return "text";
   if (
     mime === "application/vnd.openxmlformats-officedocument.wordprocessingml.document" ||
-    mime === "application/msword"
+    mime === "application/msword" ||
+    mime === "application/vnd.oasis.opendocument.text"
   )
     return "docx";
   if (
     mime === "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" ||
     mime === "application/vnd.ms-excel" ||
-    mime === "text/csv"
+    mime === "text/csv" ||
+    mime === "application/vnd.oasis.opendocument.spreadsheet"
   )
     return "xlsx";
   if (
     mime === "application/vnd.openxmlformats-officedocument.presentationml.presentation" ||
-    mime === "application/vnd.ms-powerpoint"
+    mime === "application/vnd.ms-powerpoint" ||
+    mime === "application/vnd.oasis.opendocument.presentation"
   )
     return "pptx";
+  if (
+    /zip|rar|7z|tar|gzip|bzip2|xz|epub|compressed/.test(mime)
+  )
+    return "archive";
   return "other";
 }
 
@@ -242,7 +322,6 @@ function useOfficeBuffer(file: CloudFileItem, url: string) {
     return () => {
       cancelled = true;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [key, url, entry, error]);
 
   return { entry, error, progress };
@@ -328,6 +407,7 @@ function PreviewHeader({
   isFullscreen: boolean;
   onToggleFullscreen: () => void;
 }) {
+  const enqueueDownload = useTransferStore((s) => s.enqueueDownload);
   // File MEGA mentah (mount) butuh ?name= agar server tahu nama + mimetype.
   const url =
     filePublicUrl(file.storageKey) +
@@ -387,14 +467,27 @@ function PreviewHeader({
           <ExternalLink className="size-4" />
           <span className="hidden sm:inline">Tab Baru</span>
         </Button>
-        <Button asChild size="sm" variant="outline">
-          <a
-            href={`${url}${url.includes("?") ? "&" : "?"}download=1`}
-            download={file.name}
-            rel="noopener noreferrer"
-          >
-            <Download className="size-4" /> Unduh
-          </a>
+        <Button
+          size="sm"
+          variant="outline"
+          className="gap-1.5"
+          onClick={() => {
+            // Unduhan berjalan di latar belakang via Manajer Transfer
+            // (pause/cancel/progress tiap 2 detik) — dialog tetap terbuka.
+            enqueueDownload({
+              url: `${url}${url.includes("?") ? "&" : "?"}download=1`,
+              name: file.name,
+              size: file.size,
+              context: file.raw ? "Mount MEGA" : "Pratinjau",
+              autoSave: true,
+            });
+            toast.info(
+              `Mengunduh "${file.name}" di latar belakang — pantau di tombol Transfer.`
+            );
+          }}
+          title="Unduh (berjalan di latar belakang)"
+        >
+          <Download className="size-4" /> Unduh
         </Button>
       </div>
     </div>
@@ -468,6 +561,10 @@ function PreviewBody({
       return <OfficePreview file={file} url={url} type="xlsx" />;
     case "pptx":
       return <OfficePreview file={file} url={url} type="pptx" />;
+    case "archive":
+      return <ArchivePreview file={file} url={url} />;
+    case "binary-office":
+      return <NotAvailable file={file} url={url} />;
     default:
       return <NotAvailable file={file} url={url} />;
   }
@@ -510,20 +607,35 @@ function ErrorBlock({
   message,
   url,
   kindLabel,
+  name,
+  size,
 }: {
   message: string;
   url: string;
   kindLabel: string;
+  name?: string;
+  size?: number;
 }) {
+  const enqueueDownload = useTransferStore((s) => s.enqueueDownload);
   return (
     <div className="p-6 text-center text-sm">
       <p className="text-destructive mb-3">
         Gagal memuat pratinjau {kindLabel}: {message}
       </p>
-      <Button asChild size="sm" variant="outline">
-        <a href={`${url}${url.includes("?") ? "&" : "?"}download=1`} download>
-          <Download className="size-4" /> Unduh untuk melihat
-        </a>
+      <Button
+        size="sm"
+        variant="outline"
+        onClick={() =>
+          enqueueDownload({
+            url: `${url}${url.includes("?") ? "&" : "?"}download=1`,
+            name: name ?? "file",
+            size: size ?? 0,
+            context: "Pratinjau",
+            autoSave: true,
+          })
+        }
+      >
+        <Download className="size-4" /> Unduh untuk melihat
       </Button>
     </div>
   );
@@ -544,7 +656,15 @@ function OfficePreview({
   const kindLabel = type === "docx" ? ".docx" : type === "xlsx" ? ".xlsx" : ".pptx";
 
   if (error) {
-    return <ErrorBlock message={error} url={url} kindLabel={kindLabel} />;
+    return (
+      <ErrorBlock
+        message={error}
+        url={url}
+        kindLabel={kindLabel}
+        name={file.name}
+        size={file.size}
+      />
+    );
   }
   if (!entry) {
     return (
@@ -607,7 +727,16 @@ function DocxView({
     };
   }, [file.storageKey, entry.buffer, html]);
 
-  if (error) return <ErrorBlock message={error} url={url} kindLabel=".docx" />;
+  if (error)
+    return (
+      <ErrorBlock
+        message={error}
+        url={url}
+        kindLabel=".docx"
+        name={file.name}
+        size={file.size}
+      />
+    );
   if (!html) {
     return (
       <div className="p-6 flex items-center justify-center text-sm text-muted-foreground min-h-[40vh]">
@@ -678,7 +807,16 @@ function XlsxView({
     };
   }, [file.storageKey, entry.buffer, sheets]);
 
-  if (error) return <ErrorBlock message={error} url={url} kindLabel=".xlsx" />;
+  if (error)
+    return (
+      <ErrorBlock
+        message={error}
+        url={url}
+        kindLabel=".xlsx"
+        name={file.name}
+        size={file.size}
+      />
+    );
   if (!sheets) {
     return (
       <div className="p-6 flex items-center justify-center text-sm text-muted-foreground min-h-[40vh]">
@@ -752,7 +890,16 @@ function PptxView({
     };
   }, [entry.buffer]);
 
-  if (error) return <ErrorBlock message={error} url={url} kindLabel=".pptx" />;
+  if (error)
+    return (
+      <ErrorBlock
+        message={error}
+        url={url}
+        kindLabel=".pptx"
+        name={file.name}
+        size={file.size}
+      />
+    );
   return (
     <ScrollArea className="h-full min-h-[60vh]">
       {!ready ? (
@@ -886,6 +1033,7 @@ function NotAvailable({
   file: CloudFileItem;
   url: string;
 }) {
+  const enqueueDownload = useTransferStore((s) => s.enqueueDownload);
   return (
     <div className="flex flex-col items-center justify-center gap-3 p-12 text-center min-h-[40vh]">
       <FileWarning className="size-12 text-muted-foreground/60" />
@@ -896,11 +1044,224 @@ function NotAvailable({
           ditampilkan langsung di browser.
         </p>
       </div>
-      <Button asChild size="sm">
-        <a href={`${url}${url.includes("?") ? "&" : "?"}download=1`} download={file.name}>
-          <Download className="size-4" /> Unduh untuk melihat
-        </a>
+      <Button
+        size="sm"
+        onClick={() =>
+          enqueueDownload({
+            url: `${url}${url.includes("?") ? "&" : "?"}download=1`,
+            name: file.name,
+            size: file.size,
+            context: "Pratinjau",
+            autoSave: true,
+          })
+        }
+      >
+        <Download className="size-4" /> Unduh untuk melihat
       </Button>
+    </div>
+  );
+}
+
+// ───────────────────────── Arsip (ZIP dkk) — daftar isi in-app ─────────────────────────
+// File arsip TIDAK di-download otomatis. Untuk .zip kita daftar isinya
+// (fflate, client-side); rar/7z/tar dkk → kartu info + tombol unduh.
+
+interface ZipEntryInfo {
+  path: string;
+  size: number;
+  compressedSize?: number;
+  isFile: boolean;
+}
+
+function ArchivePreview({
+  file,
+  url,
+}: {
+  file: CloudFileItem;
+  url: string;
+}) {
+  const enqueueDownload = useTransferStore((s) => s.enqueueDownload);
+  const [entries, setEntries] = useState<ZipEntryInfo[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [query, setQuery] = useState("");
+  const ext2 = ext(file.name);
+  // Batas aman: zip raksasa dkk → kartu info (decompress semua isinya
+  // bisa memberatkan browser).
+  const ZIP_LIST_LIMIT = 60 * 1024 * 1024;
+  const isZip =
+    (ext2 === "zip" || ext2 === "epub" || file.mimetype === "application/zip") &&
+    (file.size || 0) <= ZIP_LIST_LIMIT;
+
+  useEffect(() => {
+    if (!isZip) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const { unzip } = await import("fflate");
+        const res = await fetch(url);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const buf = new Uint8Array(await res.arrayBuffer());
+        // unzip sync hanya membaca central directory → ringan.
+        unzip(buf, (err, unzipped) => {
+          if (cancelled) return;
+          if (err) {
+            setError("Bukan arsip ZIP yang valid.");
+            return;
+          }
+          const list: ZipEntryInfo[] = Object.entries(unzipped).map(
+            ([path, data]) => ({
+              path,
+              size: data.byteLength,
+              isFile: !path.endsWith("/"),
+            })
+          );
+          list.sort((a, b) => a.path.localeCompare(b.path));
+          setEntries(list);
+        });
+      } catch (e) {
+        if (!cancelled)
+          setError(e instanceof Error ? e.message : "Gagal memuat arsip");
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [url, isZip]);
+
+  if (!isZip) {
+    return (
+      <div className="flex flex-col items-center justify-center gap-3 p-12 text-center min-h-[40vh]">
+        <FileArchive className="size-12 text-muted-foreground/60" />
+        <div>
+          <p className="text-sm font-medium">Arsip .{ext2 || "?"}</p>
+          <p className="text-xs text-muted-foreground mt-1 max-w-sm">
+            Format arsip ini tidak bisa dibuka langsung di browser. Unduh
+            untuk mengekstrak isinya di perangkat Anda.
+          </p>
+        </div>
+        <Button
+          size="sm"
+          onClick={() =>
+            enqueueDownload({
+              url: `${url}${url.includes("?") ? "&" : "?"}download=1`,
+              name: file.name,
+              size: file.size,
+              context: "Pratinjau",
+              autoSave: true,
+            })
+          }
+        >
+          <Download className="size-4" /> Unduh arsip
+        </Button>
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="flex flex-col items-center justify-center gap-3 p-12 text-center min-h-[40vh]">
+        <FileWarning className="size-12 text-muted-foreground/60" />
+        <p className="text-sm text-destructive">Gagal membaca arsip: {error}</p>
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={() =>
+            enqueueDownload({
+              url: `${url}${url.includes("?") ? "&" : "?"}download=1`,
+              name: file.name,
+              size: file.size,
+              context: "Pratinjau",
+              autoSave: true,
+            })
+          }
+        >
+          <Download className="size-4" /> Unduh
+        </Button>
+      </div>
+    );
+  }
+
+  if (entries === null) {
+    return (
+      <div className="p-6 flex items-center justify-center text-sm text-muted-foreground min-h-[40vh]">
+        <Loader2 className="size-4 animate-spin mr-2" /> Membaca isi arsip…
+      </div>
+    );
+  }
+
+  const files = entries.filter((e) => e.isFile);
+  const folders = entries.filter((e) => !e.isFile).length;
+  const totalUncompressed = files.reduce((s, e) => s + e.size, 0);
+  const filtered = query
+    ? files.filter((e) =>
+        e.path.toLowerCase().includes(query.toLowerCase())
+      )
+    : files.slice(0, 300);
+  const hiddenCount = query ? 0 : files.length - filtered.length;
+
+  return (
+    <div className="h-full min-h-[50vh] flex flex-col">
+      <div className="px-4 py-3 border-b border-border flex flex-wrap items-center gap-3">
+        <FileArchive className="size-5 text-amber-500 shrink-0" />
+        <div className="min-w-0 flex-1">
+          <p className="text-sm font-medium truncate">
+            {files.length} file{folders > 0 ? ` · ${folders} folder` : ""}
+          </p>
+          <p className="text-[11px] text-muted-foreground">
+            Total {formatBytes(totalUncompressed)} (belum terkompresi)
+          </p>
+        </div>
+        <input
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder="Cari dalam arsip…"
+          className="h-8 rounded-md border border-input bg-card px-2 text-xs w-40 sm:w-56"
+        />
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={() =>
+            enqueueDownload({
+              url: `${url}${url.includes("?") ? "&" : "?"}download=1`,
+              name: file.name,
+              size: file.size,
+              context: "Pratinjau",
+              autoSave: true,
+            })
+          }
+        >
+          <Download className="size-4" /> Unduh
+        </Button>
+      </div>
+      <ScrollArea className="flex-1">
+        <div className="p-2">
+          {filtered.map((e) => (
+            <div
+              key={e.path}
+              className="flex items-center gap-2 px-2 py-1.5 rounded-md hover:bg-accent/60 text-sm"
+            >
+              <FileText className="size-3.5 text-muted-foreground shrink-0" />
+              <span className="flex-1 min-w-0 truncate font-mono text-xs">
+                {e.path}
+              </span>
+              <span className="text-[11px] text-muted-foreground tabular-nums shrink-0">
+                {formatBytes(e.size)}
+              </span>
+            </div>
+          ))}
+          {hiddenCount > 0 ? (
+            <p className="text-xs text-muted-foreground p-3 text-center">
+              … {hiddenCount} file lain tidak ditampilkan. Gunakan pencarian
+              atau unduh arsipnya.
+            </p>
+          ) : null}
+          {filtered.length === 0 ? (
+            <p className="text-xs text-muted-foreground p-6 text-center">
+              Tidak ada file yang cocok dengan pencarian.
+            </p>
+          ) : null}
+        </div>
+      </ScrollArea>
     </div>
   );
 }

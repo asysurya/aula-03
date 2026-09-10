@@ -62,6 +62,14 @@ export async function POST(
       { status: 400 }
     );
   }
+  // Tolak string yang jelas bukan emoji (ID/cuid/storageKey — sisa bug klien
+  // lama yang mengirim ID pesan sebagai emoji).
+  if (/^[A-Za-z0-9:_\-]+$/.test(emoji)) {
+    return NextResponse.json(
+      { error: "Emoji tidak valid" },
+      { status: 400 }
+    );
+  }
 
   const message = await db.message.findUnique({
     where: { id: messageId },

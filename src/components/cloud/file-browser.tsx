@@ -75,6 +75,8 @@ import { AssignmentDetail } from "@/components/cloud/assignment-detail";
 import { FilePreview } from "@/components/cloud/file-preview";
 import { MegaMountView } from "@/components/cloud/mega-mount";
 import { MegaLogo } from "@/components/cloud/mega-logo";
+import { TransferManagerButton } from "@/components/cloud/transfer-modal";
+import { useTransferStore } from "@/lib/transfer-store";
 import {
   formatBytes,
   mimeToIcon,
@@ -612,6 +614,8 @@ export function FileBrowser({
         </Breadcrumb>
 
         <div className="ml-auto flex items-center gap-2 flex-wrap">
+          <TransferManagerButton />
+
           {clipboard && clipboard.ids.length > 0 ? (
             <Button
               size="sm"
@@ -1253,6 +1257,16 @@ function FileRow({
   const canEdit = canManageItem || isTeacher(me, classroomId);
   // Delete is stricter: only admin/guru/owner (not classroom teachers).
   const canDelete = canManageItem;
+  const enqueueDownload = useTransferStore((s) => s.enqueueDownload);
+  function downloadBackground() {
+    enqueueDownload({
+      url: `/api/storage/${file.storageKey}?download=1`,
+      name: file.name,
+      size: file.size,
+      context: "Cloud",
+      autoSave: true,
+    });
+  }
   // Permissions (visibility + grants) UI is admin + owner only.
   const canShowPermissions = canManagePermissions(me, file.uploadedBy);
 
@@ -1324,23 +1338,19 @@ function FileRow({
                 <Tooltip>
                   <TooltipTrigger asChild>
                     <Button
-                      asChild
                       variant="ghost"
                       size="icon"
                       className="size-8"
-                      onClick={stop}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        downloadBackground();
+                      }}
+                      title="Unduh (latar belakang)"
                     >
-                      <a
-                        href={`/api/storage/${file.storageKey}`}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        download={file.name}
-                      >
-                        <Download className="size-4" />
-                      </a>
+                      <Download className="size-4" />
                     </Button>
                   </TooltipTrigger>
-                  <TooltipContent>Unduh</TooltipContent>
+                  <TooltipContent>Unduh — berjalan di latar belakang</TooltipContent>
                 </Tooltip>
               </TooltipProvider>
             </div>

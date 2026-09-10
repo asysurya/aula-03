@@ -58,6 +58,7 @@ import {
 import { FileUpload } from "@/components/cloud/file-upload";
 import { FileIcon } from "@/components/cloud/file-icon";
 import { FilePreview } from "@/components/cloud/file-preview";
+import { useTransferStore } from "@/lib/transfer-store";
 import { FormBuilder } from "@/components/cloud/form/form-builder";
 import { FormPlayer } from "@/components/cloud/form/form-player";
 import { FormReview } from "@/components/cloud/form/form-review";
@@ -163,6 +164,7 @@ export function AssignmentDetail({
   // Form tugas (anti-nyontek) — dimuat paralel dengan detail tugas.
   const [showBuilder, setShowBuilder] = useState(false);
   const [previewFile, setPreviewFile] = useState<CloudFileItem | null>(null);
+  const enqueueDownload = useTransferStore((s) => s.enqueueDownload);
   const { data: formData } = useQuery<FormGetResponse>({
     queryKey: formQueryKey,
     queryFn: async () => {
@@ -454,18 +456,21 @@ export function AssignmentDetail({
                       <Tooltip>
                         <TooltipTrigger asChild>
                           <Button
-                            asChild
                             variant="ghost"
                             size="icon"
                             className="size-8"
+                            title="Unduh (latar belakang)"
+                            onClick={() =>
+                              enqueueDownload({
+                                url: `/api/storage/${f.storageKey}?download=1`,
+                                name: f.name,
+                                size: f.size,
+                                context: "Materi",
+                                autoSave: true,
+                              })
+                            }
                           >
-                            <a
-                              href={`/api/storage/${f.storageKey}`}
-                              target="_blank"
-                              rel="noopener noreferrer"
-                            >
-                              <Download className="size-4" />
-                            </a>
+                            <Download className="size-4" />
                           </Button>
                         </TooltipTrigger>
                         <TooltipContent>Unduh</TooltipContent>
@@ -508,6 +513,7 @@ function StudentSubmissionPanel({
   const [note, setNote] = useState(mySubmission?.note ?? "");
   const [busy, setBusy] = useState(false);
   const [pendingFileId, setPendingFileId] = useState<string | null>(null);
+  const enqueueDownload = useTransferStore((s) => s.enqueueDownload);
 
   // Keep note synced when remote submission changes.
   useMemo(() => {
@@ -618,14 +624,22 @@ function StudentSubmissionPanel({
             >
               <Eye className="size-4" />
             </Button>
-            <Button asChild variant="ghost" size="icon" className="size-8">
-              <a
-                href={`/api/storage/${submittedFile.storageKey}`}
-                target="_blank"
-                rel="noopener noreferrer"
-              >
-                <Download className="size-4" />
-              </a>
+            <Button
+              variant="ghost"
+              size="icon"
+              className="size-8"
+              title="Unduh (latar belakang)"
+              onClick={() =>
+                enqueueDownload({
+                  url: `/api/storage/${submittedFile.storageKey}?download=1`,
+                  name: submittedFile.name,
+                  size: submittedFile.size,
+                  context: "Pengumpulan",
+                  autoSave: true,
+                })
+              }
+            >
+              <Download className="size-4" />
             </Button>
           </div>
         </div>
@@ -774,6 +788,7 @@ function TeacherRosterPanel({
   summary: AssignmentDetailResponse["summary"];
   onPreview: (file: SubmissionFile, uploaderName: string) => void;
 }) {
+  const enqueueDownload = useTransferStore((s) => s.enqueueDownload);
   if (!roster) return null;
   const submittedCount = summary?.submittedCount ?? roster.filter((r) => r.submitted).length;
   const studentCount = summary?.studentCount ?? roster.filter((r) => r.role === "STUDENT").length;
@@ -845,18 +860,22 @@ function TeacherRosterPanel({
                         <Eye className="size-3.5" />
                       </Button>
                       <Button
-                        asChild
                         variant="ghost"
                         size="icon"
                         className="size-7"
+                        title="Unduh (latar belakang)"
+                        onClick={() => {
+                          if (!r.file) return;
+                          enqueueDownload({
+                            url: `/api/storage/${r.file.storageKey}?download=1`,
+                            name: r.file.name,
+                            size: r.file.size,
+                            context: "Jawaban Form",
+                            autoSave: true,
+                          });
+                        }}
                       >
-                        <a
-                          href={`/api/storage/${r.file.storageKey}`}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                        >
-                          <Download className="size-3.5" />
-                        </a>
+                        <Download className="size-3.5" />
                       </Button>
                     </span>
                   ) : (

@@ -454,7 +454,7 @@ function AnswerRow({
           </Button>
           <Button asChild size="sm" variant="ghost" className="h-8">
             <a
-              href={`/api/storage/${answer.file.storageKey}`}
+              href={`/api/storage/${answer.file.storageKey}?download=1`}
               target="_blank"
               rel="noopener noreferrer"
               download={answer.file.name}

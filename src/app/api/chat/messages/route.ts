@@ -142,6 +142,35 @@ function toDto(m: MessageWithRelations): MessageDto {
   };
 }
 
+// Emoji korup = sisa bug klien lama yang mengirim ID pesan sebagai emoji
+// (tampil sebagai teks aneh seperti cuid). Disaring dari hasil + dihapus.
+const BAD_EMOJI_RE = /^[A-Za-z0-9:_-]+$/;
+
+function sanitizeMessages(messages: MessageWithRelations[]): MessageWithRelations[] {
+  let dirty = false;
+  const cleaned = messages.map((m) => {
+    if (!m.reactions || m.reactions.length === 0) return m;
+    const ok = m.reactions.filter((r) => !BAD_EMOJI_RE.test(r.emoji));
+    if (ok.length !== m.reactions.length) {
+      dirty = true;
+      return { ...m, reactions: ok };
+    }
+    return m;
+  });
+  if (dirty) {
+    // Hapus baris korup di latar belakang (fire-and-forget).
+    const badIds = messages.flatMap((m) =>
+      (m.reactions ?? []).filter((r) => BAD_EMOJI_RE.test(r.emoji)).map((r) => r.id)
+    );
+    if (badIds.length > 0) {
+      void db.messageReaction
+        .deleteMany({ where: { id: { in: badIds } } })
+        .catch(() => {});
+    }
+  }
+  return cleaned;
+}
+
 const messageInclude = {
   sender: { select: senderSelect },
   attachments: { include: attachmentInclude },
@@ -196,7 +225,7 @@ export async function GET(req: NextRequest) {
     include: messageInclude,
   })) as unknown as MessageWithRelations[];
 
-  return NextResponse.json({ messages: messages.map(toDto) });
+  return NextResponse.json({ messages: sanitizeMessages(messages).map(toDto) });
 }
 
 // POST /api/chat/messages  body: { kind, id, content, attachmentFileIds?, replyToId? }

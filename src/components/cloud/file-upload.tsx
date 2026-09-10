@@ -1,20 +1,19 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
-import { UploadCloud } from "lucide-react";
+import { ArrowUpDown, UploadCloud } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { Progress } from "@/components/ui/progress";
 import { MAX_FILE_SIZE_MB } from "@/lib/constants";
-import { uploadSmart, type UploadProgressInfo } from "@/lib/upload-client";
+import { useTransferStore } from "@/lib/transfer-store";
 import { formatBytes } from "@/lib/cloud-format";
 
 const MAX_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024;
 
 // Drag-and-drop file upload with a hidden input fallback.
-// Calls onUploaded(fileId) on success. Optional `folderId` for target folder.
-// File besar (> 4 MB) otomatis dipecah jadi chunk supaya lolos batas
-// body serverless Vercel — dengan progress bar.
+// Upload BERJALAN DI LATAR BELAKANG lewat Manajer Transfer (pause/resume/
+// cancel/antrean + progress yang di-update tiap 2 detik) — UI tidak
+// terblokir; file baru muncul di daftar setelah selesai (invalidate query).
 export function FileUpload({
   folderId,
   classroomId,
@@ -28,10 +27,22 @@ export function FileUpload({
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [dragging, setDragging] = useState(false);
-  const [uploading, setUploading] = useState(false);
-  const [progress, setProgress] = useState<UploadProgressInfo | null>(null);
+  const enqueueUpload = useTransferStore((s) => s.enqueueUpload);
+  const jobs = useTransferStore((s) => s.jobs);
+  // Filter di luar selector supaya referensi stabil (anti re-render loop).
+  const myActive = useMemo(
+    () =>
+      jobs.filter(
+        (j) =>
+          j.kind === "upload" &&
+          (j.status === "active" ||
+            j.status === "queued" ||
+            j.status === "paused")
+      ),
+    [jobs]
+  );
 
-  async function uploadFile(file: File) {
+  function uploadFile(file: File) {
     if (file.size === 0) {
       toast.error("File kosong.");
       return;
@@ -42,47 +53,27 @@ export function FileUpload({
       );
       return;
     }
-    setUploading(true);
-    setProgress({ phase: "uploading", loaded: 0, total: file.size, percent: 0 });
-    try {
-      const res = await uploadSmart<
-        { file?: { id: string }; error?: string } & Record<string, unknown>
-      >(
-        file,
-        {
-          kind: "cloud-file",
-          folderId: folderId ?? null,
-          classroomId: classroomId ?? null,
-        },
-        { onProgress: setProgress }
-      );
-      if (!res.ok) {
-        toast.error(res.json.error || `Gagal unggah (${res.status})`);
-        return;
-      }
-      toast.success(`"${file.name}" terunggah.`);
-      onUploaded?.((res.json.file?.id as string) ?? "");
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : "Kesalahan jaringan";
-      toast.error(msg);
-    } finally {
-      setUploading(false);
-      setProgress(null);
-    }
+    enqueueUpload({
+      file,
+      target: {
+        kind: "cloud-file",
+        folderId: folderId ?? null,
+        classroomId: classroomId ?? null,
+      },
+      context: folderId ? "Folder Cloud" : "Cloud (root)",
+      onDoneFile: (fileId) => {
+        if (fileId) onUploaded?.(fileId);
+      },
+      onFileOps: () => onUploaded?.(""),
+    });
+    toast.info(`"${file.name}" diunggah di latar belakang — pantau di tombol Transfer.`);
   }
 
   function handleFiles(files: FileList | null) {
     if (!files || files.length === 0) return;
-    // Sequential upload (simple, predictable).
     Array.from(files).forEach(uploadFile);
+    if (inputRef.current) inputRef.current.value = "";
   }
-
-  const progressLabel =
-    progress?.phase === "finalizing"
-      ? "Menyelesaikan upload…"
-      : progress
-        ? `Mengunggah… ${formatBytes(progress.loaded)} / ${formatBytes(progress.total)}`
-        : "Mengunggah…";
 
   if (compact) {
     return (
@@ -91,8 +82,12 @@ export function FileUpload({
           type="button"
           variant="outline"
           size="sm"
-          disabled={uploading}
           onClick={() => inputRef.current?.click()}
+          title={
+            myActive.length > 0
+              ? `${myActive.length} upload berjalan di latar belakang`
+              : "Unggah file (berjalan di latar belakang)"
+          }
         >
           <UploadCloud className="size-4" />
           Unggah
@@ -104,7 +99,6 @@ export function FileUpload({
           className="hidden"
           onChange={(e) => {
             handleFiles(e.target.files);
-            e.target.value = "";
           }}
         />
       </>
@@ -123,7 +117,7 @@ export function FileUpload({
         setDragging(false);
         handleFiles(e.dataTransfer.files);
       }}
-      onClick={() => !uploading && inputRef.current?.click()}
+      onClick={() => inputRef.current?.click()}
       role="button"
       tabIndex={0}
       onKeyDown={(e) => {
@@ -139,15 +133,32 @@ export function FileUpload({
       }`}
     >
       <div className="flex flex-col items-center gap-1.5">
-        {uploading ? (
+        {myActive.length > 0 ? (
           <>
-            <UploadCloud className="size-6 animate-pulse text-muted-foreground" />
-            <p className="text-sm font-medium">{progressLabel}</p>
-            {progress ? (
-              <div className="w-56 max-w-full">
-                <Progress value={progress.percent} className="h-1.5" />
-              </div>
-            ) : null}
+            <div className="flex items-center gap-2 text-primary">
+              <ArrowUpDown className="size-5 animate-pulse" />
+              <p className="text-sm font-medium">
+                {myActive.length} upload berjalan di latar belakang
+              </p>
+            </div>
+            <p className="text-xs text-muted-foreground">
+              {myActive
+                .slice(0, 2)
+                .map(
+                  (j) =>
+                    `${j.name} · ${
+                      j.size > 0
+                        ? `${Math.min(100, Math.round((j.loaded / j.size) * 100))}%`
+                        : formatBytes(j.loaded)
+                    }`
+                )
+                .join(" · ")}
+              {myActive.length > 2 ? ` · +${myActive.length - 2} lainnya` : ""}
+            </p>
+            <p className="text-[11px] text-muted-foreground mt-1">
+              Kamu bisa terus menjelajah — pantau & atur lewat tombol Transfer
+              di atas. Tarik file lagi untuk menambah antrean.
+            </p>
           </>
         ) : (
           <>
@@ -156,7 +167,8 @@ export function FileUpload({
               Tarik file ke sini atau klik untuk pilih
             </p>
             <p className="text-xs text-muted-foreground">
-              Maksimal {MAX_FILE_SIZE_MB} MB per file.
+              Maksimal {MAX_FILE_SIZE_MB} MB per file · berjalan di latar
+              belakang.
             </p>
           </>
         )}
@@ -168,7 +180,6 @@ export function FileUpload({
         className="hidden"
         onChange={(e) => {
           handleFiles(e.target.files);
-          e.target.value = "";
         }}
       />
     </div>

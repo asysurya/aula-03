@@ -11,6 +11,8 @@ import {
   Pencil,
   Smile,
   Trash2,
+  Copy,
+  Check,
 } from "lucide-react";
 import EmojiPicker, { Theme as EmojiTheme } from "emoji-picker-react";
 import { useTheme } from "next-themes";
@@ -32,8 +34,8 @@ import {
 } from "@/components/ui/dropdown-menu";
 import {
   Popover,
+  PopoverAnchor,
   PopoverContent,
-  PopoverTrigger,
 } from "@/components/ui/popover";
 import type { ChatAttachment, ChatMessage, ChatSender } from "./types";
 import { groupReactions } from "./types";
@@ -224,61 +226,113 @@ function MessageActions({
   onDelete?: () => void;
   onReact?: (messageId: string, emoji: string) => Promise<void>;
 }) {
-  const [reactOpen, setReactOpen] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
+  const [emojiOpen, setEmojiOpen] = useState(false);
+  const [copied, setCopied] = useState(false);
   const { resolvedTheme } = useTheme();
   const emojiTheme: EmojiTheme =
     resolvedTheme === "dark" ? EmojiTheme.DARK : EmojiTheme.LIGHT;
 
-  // Discord-style floating action bar (visible on hover)
-  const quickEmojis = ["👍", "❤️", "😂", "🎉", "🙏"];
+  // Aksi pesan dikumpulkan di SATU tombol titik-tiga (Discord style).
+  // Reaksi cepat tampil sebagai baris emoji di dalam menu.
+  const quickEmojis = ["👍", "❤️", "😂", "🎉", "🙏", "👀", "🔥"];
+
+  async function copyText() {
+    try {
+      await navigator.clipboard.writeText(message.content);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+      toast.success("Teks pesan disalin.");
+    } catch {
+      toast.error("Gagal menyalin teks.");
+    }
+  }
 
   return (
     <div
       className={cn(
-        "absolute -top-3 right-2 z-10 flex items-center gap-0.5 rounded-lg border border-border bg-popover shadow-md px-1 py-0.5",
+        "absolute -top-3 right-2 z-10 flex items-center rounded-lg",
         "opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-opacity"
       )}
     >
-      {quickEmojis.map((e) => (
-        <button
-          key={e}
-          type="button"
-          disabled={busy}
-          onClick={() => void onReact?.(message.id, e)}
-          className="h-6 w-6 rounded-md text-sm hover:bg-accent transition-colors disabled:opacity-50"
-          title={`Reaksi ${e}`}
-        >
-          {e}
-        </button>
-      ))}
-      <Button
-        type="button"
-        size="icon"
-        variant="ghost"
-        onClick={() => onReply?.(message)}
-        disabled={busy}
-        aria-label="Balas"
-        title="Balas"
-        className="h-6 w-6 rounded-md text-muted-foreground hover:text-foreground hover:bg-accent"
-      >
-        <CornerUpLeft className="h-3.5 w-3.5" />
-      </Button>
+      {/* Popover emoji lengkap — terbuka dari menu titik-tiga, jangkar = tombol */}
+      <Popover open={emojiOpen} onOpenChange={setEmojiOpen}>
+        <PopoverAnchor asChild>
+          <DropdownMenu open={menuOpen} onOpenChange={setMenuOpen}>
+            <DropdownMenuTrigger asChild>
+              <Button
+                type="button"
+                size="icon"
+                variant="ghost"
+                disabled={busy}
+                aria-label="Aksi pesan"
+                title="Aksi pesan (balas, reaksi, edit, hapus)"
+                className="h-6 w-6 rounded-md border border-border bg-popover shadow-md text-muted-foreground hover:text-foreground hover:bg-accent"
+              >
+                <MoreHorizontal className="h-3.5 w-3.5" />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" className="w-52">
+              {/* Reaksi cepat */}
+              <div className="px-1.5 pt-1.5 pb-1 flex items-center gap-0.5 flex-wrap">
+                {quickEmojis.map((e) => (
+                  <button
+                    key={e}
+                    type="button"
+                    disabled={busy}
+                    onClick={() => {
+                      void onReact?.(message.id, e);
+                      setMenuOpen(false);
+                    }}
+                    className="h-7 w-7 rounded-md text-base hover:bg-accent transition-colors disabled:opacity-50"
+                    title={`Reaksi ${e}`}
+                  >
+                    {e}
+                  </button>
+                ))}
+              </div>
+              <DropdownMenuItem onSelect={() => onReply?.(message)}>
+                <CornerUpLeft className="h-4 w-4" /> Balas
+              </DropdownMenuItem>
+              <DropdownMenuItem
+                onSelect={() => {
+                  setMenuOpen(false);
+                  // Buka popover emoji setelah menu tertutup (hindari konflik layer).
+                  setTimeout(() => setEmojiOpen(true), 80);
+                }}
+              >
+                <Smile className="h-4 w-4" /> Reaksi dengan emoji
+              </DropdownMenuItem>
+              {message.content.length > 0 ? (
+                <DropdownMenuItem onSelect={() => void copyText()}>
+                  {copied ? (
+                    <Check className="h-4 w-4" />
+                  ) : (
+                    <Copy className="h-4 w-4" />
+                  )}{" "}
+                  Salin teks
+                </DropdownMenuItem>
+              ) : null}
+              {isOwn ? (
+                <DropdownMenuItem onSelect={() => onEdit?.()}>
+                  <Pencil className="h-4 w-4" /> Edit
+                </DropdownMenuItem>
+              ) : null}
+              {isOwn || canDelete ? (
+                <>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem
+                    onSelect={() => onDelete?.()}
+                    className="text-destructive focus:text-destructive"
+                  >
+                    <Trash2 className="h-4 w-4" /> Hapus
+                  </DropdownMenuItem>
+                </>
+              ) : null}
+            </DropdownMenuContent>
+          </DropdownMenu>
+        </PopoverAnchor>
 
-      <Popover open={reactOpen} onOpenChange={setReactOpen}>
-        <PopoverTrigger asChild>
-          <Button
-            type="button"
-            size="icon"
-            variant="ghost"
-            disabled={busy}
-            aria-label="Reaksi"
-            title="Reaksi"
-            className="h-6 w-6 rounded-md text-muted-foreground hover:text-foreground hover:bg-accent"
-          >
-            <Smile className="h-3.5 w-3.5" />
-          </Button>
-        </PopoverTrigger>
         <PopoverContent
           align="end"
           side="top"
@@ -288,7 +342,7 @@ function MessageActions({
             theme={emojiTheme}
             onEmojiClick={(emojiData) => {
               void onReact?.(message.id, emojiData.emoji);
-              setReactOpen(false);
+              setEmojiOpen(false);
             }}
             previewConfig={{ showPreview: false }}
             searchPlaceHolder="Cari emoji"
@@ -297,46 +351,6 @@ function MessageActions({
           />
         </PopoverContent>
       </Popover>
-
-      <DropdownMenu open={menuOpen} onOpenChange={setMenuOpen}>
-        <DropdownMenuTrigger asChild>
-          <Button
-            type="button"
-            size="icon"
-            variant="ghost"
-            disabled={busy}
-            aria-label="Aksi pesan"
-            title="Aksi pesan"
-            className="h-6 w-6 rounded-md text-muted-foreground hover:text-foreground hover:bg-accent"
-          >
-            <MoreHorizontal className="h-3.5 w-3.5" />
-          </Button>
-        </DropdownMenuTrigger>
-        <DropdownMenuContent align="end" className="w-44">
-          <DropdownMenuItem onSelect={() => onReply?.(message)}>
-            <CornerUpLeft className="h-4 w-4" /> Balas
-          </DropdownMenuItem>
-          <DropdownMenuItem onSelect={() => setReactOpen(true)}>
-            <Smile className="h-4 w-4" /> Reaksi dengan emoji
-          </DropdownMenuItem>
-          {isOwn ? (
-            <DropdownMenuItem onSelect={() => onEdit?.()}>
-              <Pencil className="h-4 w-4" /> Edit
-            </DropdownMenuItem>
-          ) : null}
-          {isOwn || canDelete ? (
-            <>
-              <DropdownMenuSeparator />
-              <DropdownMenuItem
-                onSelect={() => onDelete?.()}
-                className="text-destructive focus:text-destructive"
-              >
-                <Trash2 className="h-4 w-4" /> Hapus
-              </DropdownMenuItem>
-            </>
-          ) : null}
-        </DropdownMenuContent>
-      </DropdownMenu>
     </div>
   );
 }
@@ -559,7 +573,7 @@ export const MessageBubble = memo(function MessageBubble({
         )}
       </div>
 
-      {/* Floating hover actions (Discord style) */}
+      {/* Floating hover actions — SATU tombol titik-tiga (Discord style) */}
       {!editing ? (
         <MessageActions
           message={message}
@@ -569,7 +583,10 @@ export const MessageBubble = memo(function MessageBubble({
           onReply={onReply}
           onEdit={() => setEditing(true)}
           onDelete={handleDelete}
-          onReact={handleReact}
+          // PENTING: MessageActions memanggil onReact(messageId, emoji).
+          // handleReact di sini hanya menerima (emoji) — bungkus adapter
+          // supaya emoji tidak tertukar dengan ID pesan (bug reaksi aneh).
+          onReact={(messageId, emoji) => handleReact(emoji)}
         />
       ) : null}
     </div>

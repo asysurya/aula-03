@@ -234,6 +234,16 @@ export async function DELETE(
     select: { fileId: true },
   });
   await db.messageAttachment.deleteMany({ where: { messageId: id } });
+  // Reaksi & tanda baca harus dibersihkan dulu — kalau tidak, Prisma
+  // menolak menghapus pesan (relasi wajib) → error 500 "gagal hapus".
+  await db.messageReaction.deleteMany({ where: { messageId: id } });
+  await db.readReceipt.deleteMany({ where: { messageId: id } });
+  // Pesan lain yang membalas pesan ini → lepas tautan balasan
+  // (tetap tampil, tanpa indikator balasan).
+  await db.message.updateMany({
+    where: { replyToId: id },
+    data: { replyToId: null },
+  });
   await db.message.delete({ where: { id } });
   await hardDeleteCloudFilesByIds(attachments.map((a) => a.fileId));
 

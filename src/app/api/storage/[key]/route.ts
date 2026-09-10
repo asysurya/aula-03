@@ -90,16 +90,22 @@ function effectiveMimetype(bytes: Buffer, declared: string, name: string): strin
 
 // ───────────────────────── Content helpers ─────────────────────────
 
-const INLINE_MIME_RE =
-  /^(image\/|video\/|audio\/|text\/|application\/(pdf|json|octet-stream)$)/;
+function isInlineMime(_mime: string): boolean {
+  // SELALU inline kecuali user meminta unduhan eksplisit (?download=1
+  // atau atribut download pada <a> yang men-trigger query sama).
+  // Browser sendiri yang memutuskan bisa-tidaknya merender tipe tsb;
+  // disposition=inline mencegah browser MEMAKSA unduh — pratinjau
+  // (iframe/img/video/office via konversi client) jadi selalu mulus.
+  // Unduhan tetap tersedia lewat tombol "Unduh" yang menambah ?download=1.
+  return true;
+}
 
-function isInlineMime(mime: string): boolean {
-  if (INLINE_MIME_RE.test(mime)) return true;
-  // Keluarga office: inline supaya bisa di-fetch untuk pratinjau (mammoth/
-  // sheetjs/pptx) — download tetap bisa via atribut download/tombol Unduh.
-  if (/officedocument|msword|ms-excel|ms-powerpoint/.test(mime)) return true;
-  if (mime === "application/zip" || mime === "application/zip-container") return false;
-  return false;
+/** Nama file aman untuk header ASCII (fallback RFC 5987). */
+function asciiFilename(name: string): string {
+  const base = (name || "file").split("/").pop() || "file";
+  const cleaned = base.replace(/[\r\n"\\]/g, "_").replace(/[\x00-\x1f]/g, "");
+  // Ganti karakter non-ASCII dengan _ supaya header tetap valid.
+  return cleaned.replace(/[^\x20-\x7e]/g, "_") || "file";
 }
 
 function etagFor(key: string, size: number): string {
@@ -151,19 +157,34 @@ function serveFile(req: NextRequest, opts: ServeOptions): NextResponse {
   const disposition =
     opts.forceDownload || req.nextUrl.searchParams.get("download") === "1"
       ? "attachment"
-      : isInlineMime(mime)
-        ? "inline"
-        : "attachment";
+      : "inline";
+
+  // RFC 5987: filename* UTF-8 untuk nama non-ASCII + fallback ASCII.
+  // (Sebelumnya encodeURIComponent bikin nama file jadi %20 dll di unduhan.)
+  const ascii = asciiFilename(name);
+  const dispositionValue =
+    `${disposition}; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(name)}`;
 
   const baseHeaders: Record<string, string> = {
     "Content-Type": mime,
-    "Content-Disposition": `${disposition}; filename="${encodeURIComponent(name)}"`,
+    "Content-Disposition": dispositionValue,
     ETag: etag,
     // Key file tidak pernah berubah isinya (upload baru = key/node baru)
     // → aman untuk cache immutable.
     "Cache-Control": "private, max-age=86400, immutable",
     "Accept-Ranges": "bytes",
+    // Cegah eksekusi skrip jika nama file HTML/SVG — pratinjau tetap jalan
+    // karena elemen <img>/<video>/<iframe> & fetch blob tidak eksekusi
+    // skrip pada response dengan sandbox header ini... kecuali SVG <img>
+    // yang aman secara native.
+    "X-Content-Type-Options": "nosniff",
   };
+
+  // Konten yang bisa berisi skrip (svg/html) → sandbox agar aman saat dibuka
+  // langsung di tab, tanpa mengganggu pratinjau <img>/<iframe> dari app.
+  if (mime === "image/svg+xml" || mime === "text/html") {
+    baseHeaders["Content-Security-Policy"] = "sandbox";
+  }
 
   // ── Range request (seek video/audio) ──
   const rangeHeader = req.headers.get("range");
