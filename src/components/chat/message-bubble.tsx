@@ -9,10 +9,13 @@ import {
   Loader2,
   MoreHorizontal,
   Pencil,
+  Pin,
+  PinOff,
   Smile,
   Trash2,
   Copy,
   Check,
+  Volume2,
 } from "lucide-react";
 import EmojiPicker, { Theme as EmojiTheme } from "emoji-picker-react";
 import { useTheme } from "next-themes";
@@ -40,6 +43,7 @@ import {
 import type { ChatAttachment, ChatMessage, ChatSender } from "./types";
 import { groupReactions } from "./types";
 import { MarkdownText } from "./markdown";
+import { AssignmentCardView } from "./assignment-card";
 import { cn } from "@/lib/utils";
 
 const MAX_EDIT_LENGTH = 4000;
@@ -51,17 +55,24 @@ interface MessageBubbleProps {
   onlineIds: Set<string>;
   currentUserId: string;
   canDelete: boolean; // own or admin
+  canPin: boolean; // own, teacher of classroom, or admin
   onAvatarClick?: (sender: ChatSender) => void;
   onReply?: (message: ChatMessage) => void;
   onEdit?: (messageId: string, content: string) => Promise<void>;
   onDelete?: (messageId: string) => Promise<void>;
   onReact?: (messageId: string, emoji: string) => Promise<void>;
+  onPin?: (messageId: string, pinned: boolean) => Promise<void>;
   onScrollToMessage?: (id: string) => void;
 }
 
 // Lampiran pesan — klik = PRATINJAU (dialog, semua tipe: pdf/docx/xlsx/
 // gambar/video/audio/teks), bukan memaksa unduh. Tombol unduh tetap ada
-// di dalam pratinjau.
+// di dalam pratinjau. File AUDIO dirender sebagai player inline;
+// label "24j" hanya untuk file sementara (expiresAt terisi).
+function isAudioMime(m: string): boolean {
+  return m.startsWith("audio/");
+}
+
 function Attachments({ attachments }: { attachments: ChatAttachment[] }) {
   const [previewFile, setPreviewFile] = useState<CloudFileItem | null>(null);
   if (!attachments || attachments.length === 0) return null;
@@ -94,6 +105,37 @@ function Attachments({ attachments }: { attachments: ChatAttachment[] }) {
           const { file } = a;
           const url = `/api/storage/${file.storageKey}`;
           const isImg = isImageMime(file.mimetype);
+          const isAudio = isAudioMime(file.mimetype);
+          const isTemp = !!file.expiresAt;
+
+          if (isAudio) {
+            return (
+              <div
+                key={a.id}
+                className="flex items-center gap-2.5 rounded-lg border border-border bg-card/70 px-3 py-2 max-w-[320px]"
+                title={file.name}
+              >
+                <Volume2 className="size-4.5 shrink-0 text-primary" />
+                <div className="min-w-0 flex-1">
+                  <p className="text-[11px] font-medium truncate mb-0.5">
+                    {file.name.startsWith("suara-") ? "Pesan suara" : file.name}
+                  </p>
+                  <audio
+                    controls
+                    preload="metadata"
+                    src={url}
+                    className="h-8 w-[200px] max-w-full"
+                  />
+                </div>
+                {isTemp ? (
+                  <span className="inline-flex items-center gap-0.5 rounded-full bg-black/70 text-white text-[9px] px-1.5 py-0.5 shrink-0">
+                    <Clock className="h-2.5 w-2.5" /> 24j
+                  </span>
+                ) : null}
+              </div>
+            );
+          }
+
           if (isImg) {
             return (
               <button
@@ -109,9 +151,11 @@ function Attachments({ attachments }: { attachments: ChatAttachment[] }) {
                   alt={file.name}
                   className="h-[140px] w-[140px] object-cover group-hover:opacity-90 transition-opacity"
                 />
-                <span className="absolute bottom-1 right-1 inline-flex items-center gap-0.5 rounded-full bg-black/70 text-white text-[9px] px-1.5 py-0.5 backdrop-blur-sm">
-                  <Clock className="h-2.5 w-2.5" /> 24j
-                </span>
+                {isTemp ? (
+                  <span className="absolute bottom-1 right-1 inline-flex items-center gap-0.5 rounded-full bg-black/70 text-white text-[9px] px-1.5 py-0.5 backdrop-blur-sm">
+                    <Clock className="h-2.5 w-2.5" /> 24j
+                  </span>
+                ) : null}
               </button>
             );
           }
@@ -130,7 +174,13 @@ function Attachments({ attachments }: { attachments: ChatAttachment[] }) {
               <div className="min-w-0 flex-1">
                 <p className="text-xs font-medium truncate">{file.name}</p>
                 <p className="text-[10px] text-muted-foreground flex items-center gap-1">
-                  <Clock className="h-2.5 w-2.5" /> 24j · {formatBytes(file.size)}
+                  {isTemp ? (
+                    <>
+                      <Clock className="h-2.5 w-2.5" /> 24j · {formatBytes(file.size)}
+                    </>
+                  ) : (
+                    <>{formatBytes(file.size)} · permanen</>
+                  )}
                 </p>
               </div>
               <Eye className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
@@ -212,20 +262,24 @@ function MessageActions({
   message,
   isOwn,
   canDelete,
+  canPin,
   busy,
   onReply,
   onEdit,
   onDelete,
   onReact,
+  onPin,
 }: {
   message: ChatMessage;
   isOwn: boolean;
   canDelete: boolean;
+  canPin: boolean;
   busy: boolean;
   onReply?: (message: ChatMessage) => void;
   onEdit?: () => void;
   onDelete?: () => void;
   onReact?: (messageId: string, emoji: string) => Promise<void>;
+  onPin?: (messageId: string, pinned: boolean) => Promise<void>;
 }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const [emojiOpen, setEmojiOpen] = useState(false);
@@ -295,6 +349,21 @@ function MessageActions({
               <DropdownMenuItem onSelect={() => onReply?.(message)}>
                 <CornerUpLeft className="h-4 w-4" /> Balas
               </DropdownMenuItem>
+              {canPin && onPin ? (
+                <DropdownMenuItem
+                  onSelect={() => void onPin(message.id, !message.pinnedAt)}
+                >
+                  {message.pinnedAt ? (
+                    <>
+                      <PinOff className="h-4 w-4" /> Lepas Sematan
+                    </>
+                  ) : (
+                    <>
+                      <Pin className="h-4 w-4" /> Sematkan Pesan
+                    </>
+                  )}
+                </DropdownMenuItem>
+              ) : null}
               <DropdownMenuItem
                 onSelect={() => {
                   setMenuOpen(false);
@@ -436,11 +505,13 @@ export const MessageBubble = memo(function MessageBubble({
   onlineIds,
   currentUserId,
   canDelete,
+  canPin,
   onAvatarClick,
   onReply,
   onEdit,
   onDelete,
   onReact,
+  onPin,
   onScrollToMessage,
 }: MessageBubbleProps) {
   const [editing, setEditing] = useState(false);
@@ -485,6 +556,23 @@ export const MessageBubble = memo(function MessageBubble({
       await onReact(message.id, emoji);
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "Gagal memberi reaksi");
+    }
+  }
+
+  async function handlePin(pinned: boolean) {
+    if (!onPin) return;
+    setBusy(true);
+    try {
+      await onPin(message.id, pinned);
+      if (pinned) {
+        toast.success("Pesan disematkan");
+      } else {
+        toast.success("Sematan dilepas");
+      }
+      setBusy(false);
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Gagal menyematkan");
+      setBusy(false);
     }
   }
 
@@ -536,7 +624,7 @@ export const MessageBubble = memo(function MessageBubble({
               onScrollToMessage={onScrollToMessage}
             />
             {showHeader ? (
-              <div className="flex items-baseline gap-2">
+              <div className="flex items-baseline gap-2 flex-wrap">
                 <span
                   className={cn(
                     "text-sm font-semibold truncate",
@@ -553,9 +641,23 @@ export const MessageBubble = memo(function MessageBubble({
                     (diedit)
                   </span>
                 ) : null}
+                {message.pinnedAt ? (
+                  <span
+                    className="inline-flex items-center gap-0.5 text-[10px] font-medium text-primary shrink-0"
+                    title="Pesan disematkan"
+                  >
+                    <Pin className="h-3 w-3" /> sematan
+                  </span>
+                ) : null}
               </div>
             ) : null}
             {hasContent ? <MarkdownText text={message.content} /> : null}
+            {message.assignmentId ? (
+              <AssignmentCardView
+                assignment={message.assignment ?? null}
+                deleted={!message.assignment}
+              />
+            ) : null}
             {hasAttachments ? (
               <div className="rounded-lg border border-border/60 bg-card/40 px-2 py-1.5 mt-1 max-w-full">
                 <Attachments attachments={attachments} />
@@ -576,10 +678,12 @@ export const MessageBubble = memo(function MessageBubble({
           message={message}
           isOwn={isOwn}
           canDelete={canDelete}
+          canPin={canPin}
           busy={busy}
           onReply={onReply}
           onEdit={() => setEditing(true)}
           onDelete={handleDelete}
+          onPin={handlePin}
           // PENTING: MessageActions memanggil onReact(messageId, emoji).
           // handleReact di sini hanya menerima (emoji) — bungkus adapter
           // supaya emoji tidak tertukar dengan ID pesan (bug reaksi aneh).

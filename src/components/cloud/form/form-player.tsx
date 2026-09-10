@@ -17,17 +17,22 @@ import {
   FileUp,
   Gamepad2,
   ImagePlus,
+  Layers,
   ListChecks,
   Loader2,
   Maximize2,
+  MessageSquareText,
   Minimize2,
   Play,
+  Printer,
   RotateCcw,
+  Save,
   Send,
   ShieldAlert,
   Timer,
   Trophy,
   Upload,
+  XCircle,
   Zap,
 } from "lucide-react";
 
@@ -59,6 +64,7 @@ import {
   type FormSubmitResult,
   type FormViolation,
 } from "@/lib/form-types";
+import { Flashcards } from "./flashcards";
 
 // ── Local answer state ─────────────────────────────────────────────
 
@@ -133,6 +139,8 @@ export function FormPlayer({
   const [retrying, setRetrying] = useState(false);
   // Game Kuis Kilat (latihan soal PG race-time)
   const [quizOpen, setQuizOpen] = useState(false);
+  // Mode flashcard belajar
+  const [flashOpen, setFlashOpen] = useState(false);
   // Layar penuh saat mengerjakan (anti-nyontek tambahan)
   const [isFullscreen, setIsFullscreen] = useState(false);
 
@@ -566,6 +574,84 @@ export function FormPlayer({
     (q) => q.type === "PG" && q.correct && q.correct.length === 1
   );
 
+  // ── Cetak hasil (jendela cetak bersih) ──
+  function printResult() {
+    const attemptData = attempt;
+    const myScore = result?.score ?? attemptData?.score ?? null;
+    const myMax = result?.maxScore ?? attemptData?.maxScore ?? 0;
+    const answersByQ = new Map(
+      (attemptData?.answers ?? []).map((a) => [a.questionId, a])
+    );
+    const rowsHtml = qs
+      .map((q, i) => {
+        const a = answersByQ.get(q.id);
+        const correct = q.correct ?? [];
+        let mine = "—";
+        if (a?.optionIds?.length) {
+          mine = q.options
+            .filter((o) => a.optionIds!.includes(o.id))
+            .map((o) => o.label)
+            .join(", ");
+        } else if (a?.text) {
+          mine = a.text.slice(0, 200);
+        } else if (a?.file?.name) {
+          mine = `(file: ${a.file.name})`;
+        }
+        const right =
+          correct.length > 0 &&
+          !!a?.optionIds &&
+          a.optionIds.length === correct.length &&
+          correct.every((c) => a.optionIds!.includes(c));
+        return `
+          <tr>
+            <td style="text-align:center">${i + 1}</td>
+            <td>${escapeHtml(q.text)}</td>
+            <td>${escapeHtml(mine)}</td>
+            <td style="text-align:center">${
+              correct.length
+                ? escapeHtml(
+                    q.options.filter((o) => correct.includes(o.id)).map((o) => o.label).join(", ")
+                  )
+                : "(dinilai guru)"
+            }</td>
+            <td style="text-align:center">${
+              correct.length ? (right ? "Benar" : "Salah") : "—"
+            }</td>
+            <td style="text-align:center">${a?.score != null ? a.score : "—"}</td>
+          </tr>`;
+      })
+      .join("");
+    const html = `<!doctype html><html><head><meta charset="utf-8"><title>Hasil Tugas</title>
+      <style>
+        body { font-family: system-ui, -apple-system, sans-serif; padding: 32px; color: #111; }
+        h1 { font-size: 18px; }
+        p.meta { color: #555; font-size: 12px; }
+        .score { font-size: 28px; font-weight: 700; margin: 8px 0; }
+        table { width: 100%; border-collapse: collapse; margin-top: 12px; font-size: 11px; }
+        th, td { border: 1px solid #ccc; padding: 5px 7px; text-align: left; vertical-align: top; }
+        th { background: #f3f4f6; }
+      </style></head><body>
+      <h1>Hasil Pengerjaan Tugas</h1>
+      <p class="meta">Dicetak ${format(new Date(), "d MMM yyyy HH:mm")}</p>
+      <div class="score">${
+        myScore != null ? `${myScore} / ${myMax}` : "Menunggu penilaian guru"
+      }</div>
+      <table>
+        <thead><tr><th>No</th><th>Soal</th><th>Jawabanmu</th><th>Kunci</th><th>Status</th><th>Nilai</th></tr></thead>
+        <tbody>${rowsHtml}</tbody>
+      </table>
+      </body></html>`;
+    const w = window.open("", "_blank", "width=900,height=700");
+    if (!w) {
+      toast.error("Popup diblokir — izinkan popup untuk mencetak");
+      return;
+    }
+    w.document.write(html);
+    w.document.close();
+    w.focus();
+    setTimeout(() => w.print(), 350);
+  }
+
   // ── INTRO (belum mulai) ───────────────────────────────────────────
   if (phase === "intro") {
     return (
@@ -772,6 +858,13 @@ export function FormPlayer({
           </div>
         ) : null}
 
+        {/* Tombol cetak hasil */}
+        <div className="flex items-center justify-end">
+          <Button variant="outline" size="sm" onClick={printResult} className="gap-1.5">
+            <Printer className="size-3.5" /> Cetak Hasil
+          </Button>
+        </div>
+
         {/* Ulangi percobaan (guru mengizinkan maxAttempts > 1) */}
         {canRetry ? (
           <div className="rounded-lg border border-primary/30 bg-primary/5 p-4 space-y-2.5">
@@ -791,6 +884,34 @@ export function FormPlayer({
                 <RotateCcw className="size-4" />
               )}
               {retrying ? "Menyiapkan…" : "Ulangi pengerjaan"}
+            </Button>
+          </div>
+        ) : null}
+
+        {/* Pembahasan + umpan balik guru (setelah submit, kunci terbuka) */}
+        {showResult && quizQuestions.length >= 1 ? (
+          <ReviewWithFeedback
+            questions={qs}
+            attempt={myAttempt}
+          />
+        ) : null}
+
+        {/* Mode Flashcard — belajar dari soal tugas */}
+        {quizQuestions.length >= 3 ? (
+          <div className="rounded-lg border border-cyan-500/30 bg-cyan-500/5 p-4 space-y-2.5">
+            <p className="text-sm flex items-start gap-2">
+              <Layers className="size-4 text-cyan-500 shrink-0 mt-0.5" />
+              <span>
+                Hafalkan materinya lewat <b>Mode Flashcard</b> — kartu soal yang
+                dibalik untuk melihat kunci + jawabanmu sendiri.
+              </span>
+            </p>
+            <Button
+              variant="outline"
+              onClick={() => setFlashOpen(true)}
+              className="gap-1.5 border-cyan-500/40 text-cyan-600 dark:text-cyan-400 hover:bg-cyan-500/10"
+            >
+              <Layers className="size-4" /> Mode Flashcard
             </Button>
           </div>
         ) : null}
@@ -863,6 +984,17 @@ export function FormPlayer({
           <QuickQuiz
             questions={quizQuestions}
             onClose={() => setQuizOpen(false)}
+          />
+        ) : null}
+
+        {/* Mode Flashcard */}
+        {flashOpen ? (
+          <Flashcards
+            questions={quizQuestions}
+            answersByQuestion={Object.fromEntries(
+              (myAttempt?.answers ?? []).map((a) => [a.questionId, a.optionIds ?? []])
+            )}
+            onClose={() => setFlashOpen(false)}
           />
         ) : null}
       </Card>
@@ -1181,6 +1313,64 @@ function QuickQuiz({
   const [bestStreak, setBestStreak] = useState(0);
   const [correctCount, setCorrectCount] = useState(0);
   const [finished, setFinished] = useState(false);
+  // Papan skor arcade.
+  const [savingScore, setSavingScore] = useState(false);
+  const [scoreSaved, setScoreSaved] = useState(false);
+  const [board, setBoard] = useState<
+    | {
+        rank: number;
+        userName: string;
+        score: number;
+        accuracy: number;
+        mine: boolean;
+      }[]
+    | null
+  >(null);
+
+  async function loadBoard() {
+    try {
+      const res = await fetch("/api/forms/quickquiz-score", {
+        cache: "no-store",
+      });
+      if (!res.ok) return;
+      const data = (await res.json()) as {
+        top: { rank: number; userName: string; score: number; accuracy: number; mine: boolean }[];
+      };
+      setBoard(data.top ?? []);
+    } catch {
+      /* abaikan */
+    }
+  }
+
+  async function saveScore() {
+    if (savingScore || scoreSaved) return;
+    setSavingScore(true);
+    try {
+      const res = await fetch("/api/forms/quickquiz-score", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          score,
+          correct: correctCount,
+          total: deck.length,
+          bestStreak,
+        }),
+      });
+      if (res.ok) {
+        setScoreSaved(true);
+        toast.success("Skor tersimpan di papan skor");
+        await loadBoard();
+      } else {
+        toast.error("Gagal menyimpan skor");
+      }
+    } finally {
+      setSavingScore(false);
+    }
+  }
+
+  useEffect(() => {
+    if (finished) void loadBoard();
+  }, [finished]);
 
   const q = deck[idx];
 
@@ -1291,7 +1481,51 @@ function QuickQuiz({
                   </p>
                 </div>
               </div>
+              <Button
+                onClick={() => void saveScore()}
+                disabled={savingScore || scoreSaved}
+                variant="outline"
+                className="gap-1.5"
+              >
+                {savingScore ? (
+                  <Loader2 className="size-4 animate-spin" />
+                ) : (
+                  <Save className="size-4" />
+                )}
+                {scoreSaved ? "Skor tersimpan" : "Simpan ke Papan Skor"}
+              </Button>
             </div>
+            {/* Papan skor */}
+            {board && board.length > 0 ? (
+              <div className="space-y-1.5">
+                <p className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground flex items-center gap-1.5">
+                  <Trophy className="size-3 text-amber-400" /> Papan Skor Kuis
+                  Kilat
+                </p>
+                <div className="rounded-lg border border-border divide-y divide-border">
+                  {board.slice(0, 8).map((row) => (
+                    <div
+                      key={`${row.rank}-${row.userName}`}
+                      className={cn(
+                        "flex items-center gap-2 px-2.5 py-1.5 text-xs",
+                        row.mine && "bg-primary/5"
+                      )}
+                    >
+                      <span className="w-5 text-center font-semibold text-muted-foreground tabular-nums">
+                        {row.rank}
+                      </span>
+                      <span className="flex-1 truncate">{row.userName}</span>
+                      <span className="text-[10px] text-muted-foreground tabular-nums">
+                        {row.accuracy}%
+                      </span>
+                      <span className="font-bold tabular-nums">
+                        {row.score}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ) : null}
             <DialogFooter className="gap-2">
               <Button variant="outline" onClick={restart}>
                 <RotateCcw className="size-4 mr-1" /> Main lagi
@@ -1398,6 +1632,112 @@ function Rule({ text }: { text: string }) {
       {text}
     </p>
   );
+}
+
+// ── Pembahasan + umpan balik guru (tampil setelah submit) ────────
+function ReviewWithFeedback({
+  questions,
+  attempt,
+}: {
+  questions: FormQuestionDTO[];
+  attempt: FormAttemptDTO | null;
+}) {
+  const answersByQ = new Map(
+    (attempt?.answers ?? []).map((a) => [a.questionId, a])
+  );
+  return (
+    <div className="space-y-2.5">
+      <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+        Pembahasan &amp; umpan balik
+      </p>
+      {questions.map((q, i) => {
+        const a = answersByQ.get(q.id);
+        const correct = q.correct ?? [];
+        const selected = a?.optionIds ?? [];
+        const isAuto = correct.length > 0;
+        const isRight =
+          isAuto &&
+          selected.length === correct.length &&
+          correct.every((c) => selected.includes(c));
+        const hasFeedback = !!(a as { feedback?: string | null } | undefined)
+          ?.feedback;
+        const answeredSomething =
+          selected.length > 0 || !!a?.text || !!a?.fileId;
+        return (
+          <div
+            key={q.id}
+            className="rounded-lg border border-border p-3 space-y-2"
+          >
+            <div className="flex items-start justify-between gap-2">
+              <p className="text-sm font-medium min-w-0 flex-1 flex items-start gap-2">
+                <span className="text-muted-foreground font-mono text-xs shrink-0 mt-0.5">
+                  #{i + 1}
+                </span>
+                <span className="line-clamp-2">{q.text}</span>
+              </p>
+              {isAuto && answeredSomething ? (
+                isRight ? (
+                  <CheckCircle2 className="size-4 text-emerald-500 shrink-0" />
+                ) : (
+                  <XCircle className="size-4 text-destructive shrink-0" />
+                )
+              ) : null}
+            </div>
+            {isAuto ? (
+              <div className="flex flex-wrap gap-1.5">
+                {q.options.map((o) => {
+                  const isCorrect = correct.includes(o.id);
+                  const isMine = selected.includes(o.id);
+                  return (
+                    <span
+                      key={o.id}
+                      className={cn(
+                        "rounded-md border px-2 py-1 text-xs",
+                        isCorrect
+                          ? "border-emerald-500/50 bg-emerald-500/10"
+                          : isMine
+                            ? "border-destructive/50 bg-destructive/10"
+                            : "border-border"
+                      )}
+                    >
+                      {o.label}
+                      {isCorrect ? " ✓" : isMine ? " ✗" : ""}
+                    </span>
+                  );
+                })}
+              </div>
+            ) : a?.text ? (
+              <p className="text-xs text-muted-foreground rounded-md bg-muted/50 border border-border px-2.5 py-1.5 whitespace-pre-wrap max-h-24 overflow-y-auto">
+                {a.text}
+              </p>
+            ) : null}
+            {a?.score != null ? (
+              <Badge variant="secondary" className="text-[10px]">
+                Nilai: {a.score}/{q.points}
+              </Badge>
+            ) : null}
+            {hasFeedback ? (
+              <div className="rounded-md border border-primary/30 bg-primary/5 px-3 py-2 flex items-start gap-2">
+                <MessageSquareText className="size-3.5 text-primary shrink-0 mt-0.5" />
+                <p className="text-xs whitespace-pre-wrap">
+                  {(a as { feedback?: string | null })?.feedback}
+                </p>
+              </div>
+            ) : null}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function escapeHtml(s: string): string {
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
 }
 
 function QuestionCard({

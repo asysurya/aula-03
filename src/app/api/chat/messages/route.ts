@@ -3,6 +3,12 @@ import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
 import { db } from "@/lib/db";
 import type { Prisma } from "@prisma/client";
+import {
+  hydrateAssignments,
+  type AssignmentCardDto,
+} from "@/lib/chat-sync";
+import { folderClassroomId, getClassroomRole } from "@/lib/cloud-utils";
+import { canViewFile, canViewFolder, type UserRole } from "@/lib/cloud-perms";
 
 type ConversationKind = "classroom" | "group" | "dm";
 
@@ -20,6 +26,7 @@ interface AttachmentFileDto {
   size: number;
   mimetype: string;
   storageKey: string;
+  expiresAt: string | null;
 }
 
 interface AttachmentDto {
@@ -49,6 +56,9 @@ interface MessageDto {
   attachments: AttachmentDto[];
   reactions: ReactionDto[];
   replyTo: ReplyToDto | null;
+  assignmentId: string | null;
+  assignment: AssignmentCardDto | null;
+  pinnedAt: string | null;
 }
 
 const senderSelect = {
@@ -79,8 +89,16 @@ const attachmentInclude = {
       size: true,
       mimetype: true,
       storageKey: true,
+      expiresAt: true,
     },
   },
+} as const;
+
+const messageInclude = {
+  sender: { select: senderSelect },
+  attachments: { include: attachmentInclude },
+  reactions: { include: { user: { select: reactionUserSelect } } },
+  replyTo: { include: { sender: { select: replyToSenderSelect } } },
 } as const;
 
 async function assertMembership(
@@ -108,25 +126,9 @@ async function assertMembership(
   return false;
 }
 
-type MessageWithRelations = {
-  id: string;
-  content: string;
-  createdAt: Date;
-  editedAt: Date | null;
-  senderId: string;
-  sender: SenderDto;
-  attachments: Array<{ id: string; file: AttachmentFileDto }>;
-  reactions: Array<{
-    id: string;
-    emoji: string;
-    user: { id: string; name: string; username: string };
-  }>;
-  replyTo: {
-    id: string;
-    content: string;
-    sender: { id: string; name: string; username: string };
-  } | null;
-};
+type MessageWithRelations = Prisma.MessageGetPayload<{
+  include: typeof messageInclude;
+}>;
 
 function toDto(m: MessageWithRelations): MessageDto {
   return {
@@ -135,10 +137,25 @@ function toDto(m: MessageWithRelations): MessageDto {
     createdAt: m.createdAt.toISOString(),
     editedAt: m.editedAt ? m.editedAt.toISOString() : null,
     senderId: m.senderId,
-    sender: m.sender,
-    attachments: m.attachments,
-    reactions: m.reactions,
-    replyTo: m.replyTo,
+    sender: m.sender as SenderDto,
+    attachments: m.attachments.map((a) => ({
+      id: a.id,
+      file: {
+        id: a.file.id,
+        name: a.file.name,
+        size: a.file.size,
+        mimetype: a.file.mimetype,
+        storageKey: a.file.storageKey,
+        expiresAt: a.file.expiresAt
+          ? new Date(a.file.expiresAt).toISOString()
+          : null,
+      },
+    })) as AttachmentDto[],
+    reactions: m.reactions as ReactionDto[],
+    replyTo: m.replyTo as ReplyToDto | null,
+    assignmentId: m.assignmentId ?? null,
+    assignment: null,
+    pinnedAt: m.pinnedAt ? new Date(m.pinnedAt).toISOString() : null,
   };
 }
 
@@ -170,13 +187,6 @@ function sanitizeMessages(messages: MessageWithRelations[]): MessageWithRelation
   }
   return cleaned;
 }
-
-const messageInclude = {
-  sender: { select: senderSelect },
-  attachments: { include: attachmentInclude },
-  reactions: { include: { user: { select: reactionUserSelect } } },
-  replyTo: { include: { sender: { select: replyToSenderSelect } } },
-} as const;
 
 // GET /api/chat/messages?kind=group&id=abc&since=ISO
 export async function GET(req: NextRequest) {
@@ -224,20 +234,25 @@ export async function GET(req: NextRequest) {
     }
   }
 
-  const messages = (await db.message.findMany({
+  const messages = await db.message.findMany({
     where,
     orderBy: { createdAt: "asc" },
     take: 200,
     include: messageInclude,
-  })) as unknown as MessageWithRelations[];
+  });
+
+  const hydrated = await hydrateAssignments(
+    sanitizeMessages(messages).map(toDto)
+  );
 
   return NextResponse.json({
-    messages: sanitizeMessages(messages).map(toDto),
+    messages: hydrated,
     serverTime,
   });
 }
 
-// POST /api/chat/messages  body: { kind, id, content, attachmentFileIds?, replyToId? }
+// POST /api/chat/messages
+// body: { kind, id, content, attachmentFileIds?, replyToId?, assignmentId? }
 export async function POST(req: NextRequest) {
   const session = await getServerSession(authOptions);
   if (!session?.user) {
@@ -263,6 +278,11 @@ export async function POST(req: NextRequest) {
     typeof replyToIdRaw === "string" && replyToIdRaw.length > 0
       ? replyToIdRaw
       : null;
+  const assignmentIdRaw = body.assignmentId;
+  const assignmentId =
+    typeof assignmentIdRaw === "string" && assignmentIdRaw.length > 0
+      ? assignmentIdRaw
+      : null;
 
   if (!kind || !id) {
     return NextResponse.json(
@@ -273,8 +293,8 @@ export async function POST(req: NextRequest) {
   if (!["classroom", "group", "dm"].includes(kind)) {
     return NextResponse.json({ error: "Invalid kind" }, { status: 400 });
   }
-  // Content may be empty if there are attachments.
-  if (!content && attachmentFileIds.length === 0) {
+  // Content may be empty if there are attachments / tugas.
+  if (!content && attachmentFileIds.length === 0 && !assignmentId) {
     return NextResponse.json(
       { error: "Pesan tidak boleh kosong" },
       { status: 400 }
@@ -318,12 +338,89 @@ export async function POST(req: NextRequest) {
     }
   }
 
-  // Validate each attachment file id: exists, expiresAt set (temp chat file),
-  // and uploadedBy === currentUser (security: can't attach someone else's file).
+  // ── Validasi tugas yang dilampirkan ──────────────────────────────
+  // Tugas harus berada di folder kelas tempat user adalah anggota DAN
+  // foldernya terlihat oleh user (ALL/TEACHERS/PRIVATE sesuai aturan).
+  if (assignmentId) {
+    const assignment = await db.assignment.findUnique({
+      where: { id: assignmentId },
+      select: {
+        id: true,
+        folder: {
+          select: {
+            id: true,
+            visibility: true,
+            createdBy: true,
+            classroomId: true,
+            grants: { select: { userId: true } },
+          },
+        },
+      },
+    });
+    if (!assignment || !assignment.folder.classroomId) {
+      return NextResponse.json(
+        { error: "Tugas tidak ditemukan" },
+        { status: 400 }
+      );
+    }
+    const isMember =
+      (session.user as any).role === "ADMIN" ||
+      (await db.classroomMember.findUnique({
+        where: {
+          classroomId_userId: {
+            classroomId: assignment.folder.classroomId,
+            userId,
+          },
+        },
+      }));
+    if (!isMember) {
+      return NextResponse.json(
+        { error: "Kamu bukan anggota kelas tugas ini" },
+        { status: 403 }
+      );
+    }
+    const classroomRole =
+      (session.user as any).role === "ADMIN"
+        ? "TEACHER"
+        : await getClassroomRole(assignment.folder.classroomId, userId);
+    if (
+      !canViewFolder(
+        {
+          id: assignment.folder.id,
+          visibility: assignment.folder.visibility as "ALL" | "TEACHERS" | "PRIVATE",
+          createdBy: assignment.folder.createdBy,
+          grants: assignment.folder.grants ?? [],
+        },
+        userId,
+        (session.user as any).role as UserRole,
+        classroomRole
+      )
+    ) {
+      return NextResponse.json(
+        { error: "Tugas tidak boleh kamu bagikan" },
+        { status: 403 }
+      );
+    }
+  }
+
+  // ── Validasi lampiran file ───────────────────────────────────────
+  // Dua jalur sah:
+  //  1. File sementara chat (expiresAt terisi) → wajib milik sendiri.
+  //  2. File permanen cloud (expiresAt null) → wajib TERLIHAT oleh user
+  //     (aturan visibility folder/kelas + grants). FIX bug lama: file
+  //     permanen dari Cloud Picker dulunya ditolak "File lampiran tidak
+  //     valid" meski picker menampilkannya.
   if (attachmentFileIds.length > 0) {
     const files = await db.cloudFile.findMany({
       where: { id: { in: attachmentFileIds } },
-      select: { id: true, uploadedBy: true, expiresAt: true },
+      select: {
+        id: true,
+        uploadedBy: true,
+        expiresAt: true,
+        folderId: true,
+        visibility: true,
+        grants: { select: { userId: true } },
+      },
     });
     if (files.length !== attachmentFileIds.length) {
       return NextResponse.json(
@@ -331,16 +428,56 @@ export async function POST(req: NextRequest) {
         { status: 400 }
       );
     }
+    const userRole = (session.user as any).role as UserRole;
+    // Cache classroom role per classroomId (hemat query).
+    const roleCache = new Map<string, "TEACHER" | "STUDENT" | null>();
+    const getRole = async (classroomId: string) => {
+      if (roleCache.has(classroomId)) return roleCache.get(classroomId) ?? null;
+      const r =
+        userRole === "ADMIN"
+          ? "TEACHER"
+          : await getClassroomRole(classroomId, userId);
+      roleCache.set(classroomId, r);
+      return r;
+    };
     for (const f of files) {
-      if (!f.expiresAt) {
+      if (f.expiresAt) {
+        // File sementara (unggahan chat 24 jam) — milik sendiri saja.
+        if (f.uploadedBy !== userId) {
+          return NextResponse.json(
+            { error: "File lampiran bukan milik Anda" },
+            { status: 403 }
+          );
+        }
+        continue;
+      }
+      // File permanen cloud.
+      if (f.uploadedBy === userId || userRole === "ADMIN") continue;
+      if (!f.folderId) {
         return NextResponse.json(
           { error: "File lampiran tidak valid" },
           { status: 400 }
         );
       }
-      if (f.uploadedBy !== userId) {
+      const cid = await folderClassroomId(f.folderId);
+      const classroomRole = cid ? await getRole(cid) : null;
+      if (
+        !cid ||
+        !canViewFile(
+          {
+            id: f.id,
+            folderId: f.folderId,
+            visibility: f.visibility as "ALL" | "TEACHERS" | "PRIVATE",
+            uploadedBy: f.uploadedBy,
+            grants: f.grants ?? [],
+          },
+          userId,
+          userRole,
+          classroomRole
+        )
+      ) {
         return NextResponse.json(
-          { error: "File lampiran bukan milik Anda" },
+          { error: "File lampiran tidak boleh kamu bagikan" },
           { status: 403 }
         );
       }
@@ -350,6 +487,7 @@ export async function POST(req: NextRequest) {
   const data: Prisma.MessageCreateInput = {
     content,
     sender: { connect: { id: userId } },
+    assignmentId: assignmentId ?? undefined,
   };
   if (kind === "classroom") data.classroom = { connect: { id } };
   else if (kind === "group") data.group = { connect: { id } };
@@ -365,10 +503,12 @@ export async function POST(req: NextRequest) {
     };
   }
 
-  const message = (await db.message.create({
+  const message = await db.message.create({
     data,
     include: messageInclude,
-  })) as unknown as MessageWithRelations;
+  });
 
-  return NextResponse.json({ message: toDto(message) }, { status: 201 });
+  const [dto] = await hydrateAssignments([toDto(message)]);
+
+  return NextResponse.json({ message: dto }, { status: 201 });
 }

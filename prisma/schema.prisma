@@ -142,6 +142,11 @@ model Message {
   groupId     String?
   dmId        String?
   replyToId   String?
+  // Tugas yang dilampirkan ke pesan (kartu tugas). Nullable + TANPA relasi
+  // Prisma — kompatibel dengan DB produksi lama (MongoDB schemaless).
+  assignmentId String?
+  // Pesan disematkan (pin) — nullable, sama seperti assignmentId.
+  pinnedAt    DateTime?
   createdAt   DateTime  @default(now())
   editedAt    DateTime?
 
@@ -499,6 +504,8 @@ model FormAnswer {
   optionIds  String? // JSON array of selected option ids (PG / MULTI_PG)
   fileId     String? // FILE / IMAGE upload answer
   score      Int?    // manual grade by teacher (ESSAY / SHORT / FILE)
+  // Umpan balik tertulis guru per jawaban (nullable — aman tanpa migrasi).
+  feedback   String?
 
   attempt  FormAttempt  @relation(fields: [attemptId], references: [id], onDelete: Cascade, onUpdate: Cascade)
   question FormQuestion @relation(fields: [questionId], references: [id], onDelete: Cascade, onUpdate: Cascade)
@@ -536,4 +543,62 @@ model UploadChunk {
   session UploadSession @relation(fields: [sessionId], references: [id], onDelete: Cascade, onUpdate: Cascade)
 
   @@unique([sessionId, idx])
+}
+
+// ───────────────────────── Indikator mengetik ─────────────────────────
+// "X sedang menulis…" per percakapan. Koleksi baru — MongoDB membuatnya
+// otomatis saat insert pertama (tanpa migrasi). userName di-denormalisasi
+// supaya GET tidak perlu join. Baris lama dibersihkan oportunis.
+model TypingState {
+  id              String   @id @default(cuid()) @map("_id")
+  conversationKey String // "classroom:<id>" | "group:<id>" | "dm:<id>"
+  userId          String
+  userName        String
+  updatedAt       DateTime @default(now())
+
+  @@unique([conversationKey, userId])
+  @@index([conversationKey])
+}
+
+// ───────────────────────── Bank soal pribadi guru ─────────────────────────
+// Simpan soal favorit untuk dipakai ulang lintas tugas/perangkat.
+// Koleksi baru — aman tanpa migrasi.
+model QuestionBank {
+  id        String   @id @default(cuid()) @map("_id")
+  userId    String
+  type      String // PG | MULTI_PG | ESSAY | SHORT | FILE | IMAGE
+  text      String
+  options   String   @default("[]") // JSON [{id,label}]
+  correct   String? // JSON array of correct option ids
+  points    Int      @default(1)
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+}
+
+// ───────────────────── Papan skor Kuis Kilat (arcade) ─────────────────────
+model QuickQuizScore {
+  id         String   @id @default(cuid()) @map("_id")
+  userId     String
+  userName   String
+  score      Int
+  correct    Int
+  total      Int
+  bestStreak Int
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+}
+
+// ───────────────────────── Favorit file/folder cloud ─────────────────────────
+model Favorite {
+  id        String   @id @default(cuid()) @map("_id")
+  userId    String
+  fileId    String?
+  folderId  String?
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+  @@index([userId, fileId])
+  @@index([userId, folderId])
 }

@@ -15,8 +15,10 @@ import {
 } from "@/components/ui/select";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
-import { Users, MessageSquare } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { Users, MessageSquare, Trophy } from "lucide-react";
 import { formatDistanceToNow } from "date-fns";
+import { LeaderboardDialog } from "@/components/shared/leaderboard-dialog";
 
 interface MemberUser {
   id: string;
@@ -41,8 +43,11 @@ export function MembersView({
   const membersClassroomId = useUIStore((s) => s.membersClassroomId);
   const openMembers = useUIStore((s) => s.openMembers);
   const [picked, setPicked] = useState<string | null>(null);
+  const [leaderboardOpen, setLeaderboardOpen] = useState(false);
   const classroomId =
     picked ?? membersClassroomId ?? me.classrooms[0]?.id ?? null;
+  const classroomName =
+    me.classrooms.find((c) => c.id === classroomId)?.name ?? "";
 
   const { data, isLoading } = useQuery<{ users: MemberUser[] }>({
     queryKey: ["members", classroomId],
@@ -69,25 +74,45 @@ export function MembersView({
             </p>
           </div>
         </div>
-        <Select
-          value={classroomId || undefined}
-          onValueChange={(v) => {
-            setPicked(v);
-            openMembers(v);
-          }}
-        >
-          <SelectTrigger className="w-56">
-            <SelectValue placeholder="Pilih kelas…" />
-          </SelectTrigger>
-          <SelectContent>
-            {me.classrooms.map((c) => (
-              <SelectItem key={c.id} value={c.id}>
-                {c.name}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
+        <div className="flex items-center gap-2">
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => setLeaderboardOpen(true)}
+            className="gap-1.5"
+            title="Papan peringkat kelas (total poin tugas)"
+          >
+            <Trophy className="h-4 w-4 text-amber-400" />
+            <span className="hidden sm:inline">Papan Peringkat</span>
+          </Button>
+          <Select
+            value={classroomId || undefined}
+            onValueChange={(v) => {
+              setPicked(v);
+              openMembers(v);
+            }}
+          >
+            <SelectTrigger className="w-56">
+              <SelectValue placeholder="Pilih kelas…" />
+            </SelectTrigger>
+            <SelectContent>
+              {me.classrooms.map((c) => (
+                <SelectItem key={c.id} value={c.id}>
+                  {c.name}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
       </div>
+
+      <LeaderboardDialog
+        open={leaderboardOpen}
+        onOpenChange={setLeaderboardOpen}
+        classroomId={classroomId}
+        classroomName={classroomName}
+        myUserId={me.user?.id ?? ""}
+      />
 
       <div className="flex-1 overflow-y-auto px-4 md:px-6 py-4">
         {!classroomId ? (

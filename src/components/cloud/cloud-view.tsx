@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Cloud, FolderClosed, RefreshCw } from "lucide-react";
+import { Cloud, FolderClosed, RefreshCw, Search, Star } from "lucide-react";
 import { useQueryClient } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
 import {
@@ -13,7 +13,10 @@ import {
 } from "@/components/ui/select";
 import { FileBrowser } from "@/components/cloud/file-browser";
 import { DocEditor } from "@/components/cloud/doc-editor";
+import { CloudSearchDialog } from "@/components/cloud/cloud-search";
+import { FavoritesDialog } from "@/components/cloud/favorites-dialog";
 import { useUIStore } from "@/stores/ui-store";
+import { useFavoritesStore } from "@/stores/favorites-store";
 import type { MeResponse } from "@/hooks/use-me";
 
 export function CloudView({ me }: { me: MeResponse }) {
@@ -21,6 +24,9 @@ export function CloudView({ me }: { me: MeResponse }) {
   const cloudClassroomId = useUIStore((s) => s.cloudClassroomId);
   const cloudDocId = useUIStore((s) => s.cloudDocId);
   const openCloudFolder = useUIStore((s) => s.openCloudFolder);
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [favoritesOpen, setFavoritesOpen] = useState(false);
+  const loadFavorites = useFavoritesStore((s) => s.load);
 
   const classrooms = me.classrooms ?? [];
   const selectedClassroom = classrooms.find((c) => c.id === cloudClassroomId);
@@ -32,6 +38,11 @@ export function CloudView({ me }: { me: MeResponse }) {
       openCloudFolder(null, classrooms[0].id);
     }
   }, [cloudClassroomId, classrooms, openCloudFolder]);
+
+  // Muat daftar favorit sekali (untuk ikon bintang di baris file).
+  useEffect(() => {
+    void loadFavorites();
+  }, [loadFavorites]);
 
   if (classrooms.length === 0) {
     return (
@@ -57,6 +68,8 @@ export function CloudView({ me }: { me: MeResponse }) {
         classrooms={classrooms}
         classroomId={classroomId}
         onClassroomChange={(id) => openCloudFolder(null, id)}
+        onSearchClick={() => setSearchOpen(true)}
+        onFavoritesClick={() => setFavoritesOpen(true)}
       />
       <div className="flex-1 min-h-0 overflow-hidden">
         {cloudDocId ? (
@@ -69,6 +82,9 @@ export function CloudView({ me }: { me: MeResponse }) {
           />
         )}
       </div>
+
+      <CloudSearchDialog open={searchOpen} onOpenChange={setSearchOpen} />
+      <FavoritesDialog open={favoritesOpen} onOpenChange={setFavoritesOpen} />
     </div>
   );
 }
@@ -78,11 +94,15 @@ function Header({
   classrooms,
   classroomId,
   onClassroomChange,
+  onSearchClick,
+  onFavoritesClick,
 }: {
   classroomName: string | null;
   classrooms?: MeResponse["classrooms"];
   classroomId?: string | null;
   onClassroomChange?: (id: string) => void;
+  onSearchClick?: () => void;
+  onFavoritesClick?: () => void;
 }) {
   const qc = useQueryClient();
   const [reloading, setReloading] = useState(false);
@@ -108,6 +128,26 @@ function Header({
         </div>
       </div>
       <div className="ml-auto flex items-center gap-2">
+        <Button
+          size="sm"
+          variant="ghost"
+          onClick={onSearchClick}
+          className="gap-1.5"
+          title="Cari di semua cloud (folder, tugas, file, dokumen)"
+        >
+          <Search className="h-4 w-4" />
+          <span className="hidden sm:inline">Cari</span>
+        </Button>
+        <Button
+          size="sm"
+          variant="ghost"
+          onClick={onFavoritesClick}
+          className="gap-1.5"
+          title="Favorit saya (file yang ditandai bintang)"
+        >
+          <Star className="h-4 w-4" />
+          <span className="hidden sm:inline">Favorit</span>
+        </Button>
         <Button
           size="sm"
           variant="ghost"

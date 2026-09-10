@@ -14,11 +14,26 @@ export interface ChatAttachmentFile {
   size: number;
   mimetype: string;
   storageKey: string;
+  /** null = file permanen cloud (tanpa label "24j"). */
+  expiresAt?: string | null;
 }
 
 export interface ChatAttachment {
   id: string;
   file: ChatAttachmentFile;
+}
+
+// Kartu tugas yang dilampirkan ke pesan.
+export interface AssignmentCard {
+  id: string;
+  folderId: string;
+  title: string;
+  description: string | null;
+  deadline: string; // ISO
+  maxScore: number | null;
+  classroomName: string | null;
+  questionCount: number | null;
+  deadlinePassed: boolean;
 }
 
 export interface ChatReaction {
@@ -43,6 +58,9 @@ export interface ChatMessage {
   attachments?: ChatAttachment[];
   reactions?: ChatReaction[];
   replyTo?: ChatReplyTo | null;
+  assignmentId?: string | null;
+  assignment?: AssignmentCard | null;
+  pinnedAt?: string | null; // ISO — pesan disematkan
 }
 
 export type UserRole = "ADMIN" | "GURU" | "STUDENT";

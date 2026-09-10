@@ -91,6 +91,8 @@ export const ALLOWED_MIMES = new Set<string>([
   "audio/ogg",
   "audio/flac",
   "audio/aac",
+  "audio/webm",
+  "audio/webm;codecs=opus",
   "video/mp4",
   "video/webm",
   "video/quicktime",

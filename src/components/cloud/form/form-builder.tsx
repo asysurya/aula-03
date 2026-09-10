@@ -6,6 +6,8 @@ import { toast } from "sonner";
 import {
   ArrowDown,
   ArrowUp,
+  BookMarked,
+  BookOpen,
   CheckCircle2,
   ChevronDown,
   ChevronRight,
@@ -17,6 +19,7 @@ import {
   FileJson,
   FileQuestion,
   ImagePlus,
+  LayoutTemplate,
   Loader2,
   Plus,
   Save,
@@ -35,6 +38,13 @@ import { Card } from "@/components/ui/card";
 import { Switch } from "@/components/ui/switch";
 import { Separator } from "@/components/ui/separator";
 import { uploadSmart } from "@/lib/upload-client";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import {
   Select,
   SelectContent,
@@ -60,6 +70,8 @@ import {
   downloadFormJson,
   type ApplyMode,
 } from "./form-io-dialogs";
+import { QuestionBankDialog } from "./question-bank-dialog";
+import { FORM_TEMPLATES } from "./form-templates";
 
 // ── Local question model (editable, may have local ids) ──────────
 
@@ -129,6 +141,8 @@ export function FormBuilder({
   const [saving, setSaving] = useState(false);
   const [aiOpen, setAiOpen] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
+  const [bankOpen, setBankOpen] = useState(false);
+  const [templateOpen, setTemplateOpen] = useState(false);
   const [timeLimitInput, setTimeLimitInput] = useState<string>(
     initialSettings?.timeLimitMin != null
       ? String(initialSettings.timeLimitMin)
@@ -200,6 +214,66 @@ export function FormBuilder({
       })),
       `form-tugas-${folderId.slice(-8)}`
     );
+  }
+
+  // ── Simpan satu soal ke Bank Soal pribadi ──
+  async function saveToBank(localId: string) {
+    const q = questions.find((x) => x.localId === localId);
+    if (!q) return;
+    if (!q.text.trim()) {
+      toast.error("Tulis dulu teks soalnya sebelum disimpan ke bank");
+      return;
+    }
+    try {
+      const res = await fetch("/api/forms/question-bank", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          type: q.type,
+          text: q.text,
+          points: q.points,
+          options: q.options.map((o) => ({ id: o.id, label: o.label })),
+          correct: q.type === "PG" || q.type === "MULTI_PG" ? q.correct : [],
+        }),
+      });
+      const json = await res.json();
+      if (!res.ok) {
+        toast.error(json?.error || "Gagal menyimpan ke bank soal");
+        return;
+      }
+      toast.success("Soal tersimpan ke bank soalmu");
+    } catch {
+      toast.error("Gagal menyimpan ke bank soal");
+    }
+  }
+
+  // ── Terapkan template siap pakai ──
+  function applyTemplate(key: string) {
+    const tpl = FORM_TEMPLATES.find((t) => t.key === key);
+    if (!tpl) return;
+    if (
+      questions.length > 0 &&
+      !window.confirm(
+        `Template "${tpl.name}" akan MENGGANTI ${questions.length} soal yang sekarang. Lanjut?`
+      )
+    ) {
+      return;
+    }
+    applyImported(tpl.questions, "replace", tpl.settings);
+    if (tpl.settings.maxAttempts != null) {
+      setMaxAttemptsInput(
+        tpl.settings.maxAttempts > 1 ? String(tpl.settings.maxAttempts) : ""
+      );
+    }
+    if (tpl.settings.timeLimitMin !== undefined) {
+      setTimeLimitInput(
+        tpl.settings.timeLimitMin != null
+          ? String(tpl.settings.timeLimitMin)
+          : ""
+      );
+    }
+    setTemplateOpen(false);
+    toast.success(`Template "${tpl.name}" diterapkan — sesuaikan teksnya`);
   }
 
   function addQuestion() {
@@ -595,6 +669,23 @@ export function FormBuilder({
               <Button
                 size="sm"
                 variant="outline"
+                onClick={() => setTemplateOpen(true)}
+                disabled={locked}
+                title="Template tugas siap pakai"
+              >
+                <LayoutTemplate className="size-3.5 mr-1" /> Template
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => setBankOpen(true)}
+                title="Ambil soal dari Bank Soal pribadi"
+              >
+                <BookOpen className="size-3.5 mr-1" /> Bank
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
                 onClick={() => setAiOpen(true)}
                 disabled={locked}
                 title="Buat draf soal dengan AI dari prompt bebas"
@@ -707,6 +798,17 @@ export function FormBuilder({
                     </span>
                     <div className="flex-1" />
                     <div className="flex items-center gap-1">
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="size-7"
+                        disabled={locked}
+                        onClick={() => void saveToBank(q.localId)}
+                        aria-label="Simpan ke bank soal"
+                        title="Simpan soal ini ke Bank Soal pribadi"
+                      >
+                        <BookMarked className="size-3.5" />
+                      </Button>
                       <Button
                         variant="ghost"
                         size="icon"
@@ -961,6 +1063,67 @@ export function FormBuilder({
         onOpenChange={setImportOpen}
         onApply={applyImported}
       />
+
+      {/* Bank soal pribadi */}
+      <QuestionBankDialog
+        open={bankOpen}
+        onOpenChange={setBankOpen}
+        onPick={(q) => {
+          setQuestions((prev) => [
+            ...prev,
+            {
+              localId: makeQuestionId(),
+              type: q.type,
+              text: q.text,
+              points: q.points,
+              required: q.required,
+              options: q.options.map((o) => ({ ...o })),
+              correct: [...q.correct],
+              imageFileId: null,
+              imagePreview: null,
+            },
+          ]);
+        }}
+      />
+
+      {/* Template tugas siap pakai */}
+      <Dialog open={templateOpen} onOpenChange={setTemplateOpen}>
+        <DialogContent className="max-w-lg max-h-[75vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <LayoutTemplate className="size-5 text-primary" /> Template Tugas
+            </DialogTitle>
+            <DialogDescription>
+              Struktur soal + pengaturan anti-nyontek yang sudah terisi —
+              tinggal sesuaikan teksnya.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="grid gap-2">
+            {FORM_TEMPLATES.map((t) => (
+              <button
+                key={t.key}
+                type="button"
+                onClick={() => applyTemplate(t.key)}
+                disabled={locked}
+                className="flex items-start gap-3 rounded-lg border border-border p-3 text-left hover:border-primary/50 hover:bg-accent/40 transition-colors disabled:opacity-50"
+              >
+                <span className="text-xl shrink-0">{t.emoji}</span>
+                <div className="min-w-0">
+                  <p className="text-sm font-semibold">{t.name}</p>
+                  <p className="text-xs text-muted-foreground">{t.description}</p>
+                  <p className="text-[10px] text-muted-foreground mt-1">
+                    {t.questions.length} soal
+                    {t.settings.timeLimitMin ? ` · ${t.settings.timeLimitMin} menit` : ""}
+                    {t.settings.maxAttempts && t.settings.maxAttempts > 1
+                      ? ` · ${t.settings.maxAttempts} percobaan`
+                      : ""}
+                  </p>
+                </div>
+              </button>
+            ))}
+          </div>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

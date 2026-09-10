@@ -2,6 +2,8 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  BarChart3,
+  ClipboardList,
   Eye,
   EyeOff,
   Loader2,
@@ -37,7 +39,10 @@ import {
   AttachmentPicker,
   type CloudPickerFile,
 } from "./attachment-picker";
-import type { ChatMessage } from "./types";
+import { VoiceRecorder } from "./voice-recorder";
+import { PollComposer } from "./poll-composer";
+import { AssignmentAttachDialog } from "./assignment-attach-dialog";
+import type { AssignmentCard, ChatMessage } from "./types";
 import { cn } from "@/lib/utils";
 
 export interface PendingAttachment {
@@ -49,7 +54,12 @@ export interface PendingAttachment {
 }
 
 interface MessageInputProps {
-  onSend: (content: string, attachmentFileIds: string[]) => Promise<void>;
+  // Mengembalikan id pesan nyata (untuk auto-react polling) atau null.
+  onSend: (
+    content: string,
+    attachmentFileIds: string[],
+    assignmentId?: string | null
+  ) => Promise<string | null>;
   placeholder?: string;
   disabled?: boolean;
   // Conversation context used to upload attachments.
@@ -117,6 +127,13 @@ export function MessageInput({
   const [pickerOpen, setPickerOpen] = useState(false);
   const [previewMd, setPreviewMd] = useState(false);
   const [slashIndex, setSlashIndex] = useState(0);
+  // Tugas yang dilampirkan (kartu tugas) + polling.
+  const [pendingAssignment, setPendingAssignment] =
+    useState<AssignmentCard | null>(null);
+  const [assignmentOpen, setAssignmentOpen] = useState(false);
+  const [pollOpen, setPollOpen] = useState(false);
+  // Throttle kirim sinyal "sedang menulis".
+  const lastTypingSentRef = useRef(0);
   const dragDepth = useRef(0);
   const ref = useRef<HTMLTextAreaElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -156,7 +173,24 @@ export function MessageInput({
     !sending &&
     !disabled &&
     !isUploadingAny &&
-    (trimmed.length > 0 || pending.length > 0);
+    (trimmed.length > 0 || pending.length > 0 || !!pendingAssignment);
+
+  // ── Sinyal "sedang menulis" ── kirim maks 1× tiap 2,5 dtk saat
+  // pengguna aktif mengetik (server menyimpannya 5 dtk).
+  useEffect(() => {
+    if (!trimmed || disabled) return;
+    const now = Date.now();
+    if (now - lastTypingSentRef.current < 2500) return;
+    lastTypingSentRef.current = now;
+    fetch("/api/chat/typing", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        kind: conversation.kind,
+        id: conversation.id,
+      }),
+    }).catch(() => {});
+  }, [value, trimmed, disabled, conversation.kind, conversation.id]);
 
   // Deteksi slash command di awal kata pertama.
   const slashMatches = useMemo(() => {
@@ -363,12 +397,14 @@ export function MessageInput({
     if (!canSend) return;
     const content = trimmed;
     const attachmentFileIds = pending.map((p) => p.fileId);
+    const assignmentId = pendingAssignment?.id ?? null;
     setValue("");
     setSending(true);
     try {
-      await onSend(content, attachmentFileIds);
-      // On success: clear pending attachments + reply target + draft.
+      await onSend(content, attachmentFileIds, assignmentId);
+      // On success: clear pending attachments + tugas + reply target + draft.
       setPending([]);
+      setPendingAssignment(null);
       onCancelReply?.();
       try {
         localStorage.removeItem(draftKey);
@@ -380,6 +416,12 @@ export function MessageInput({
       // refocus for fast typing
       requestAnimationFrame(() => ref.current?.focus());
     }
+  }
+
+  // Polling dikirim lewat jalur sama (konten teks terformat) — dipakai
+  // untuk auto-react angka setelah pesan nyata dibuat.
+  async function sendPollContent(content: string): Promise<string | null> {
+    return onSend(content, [], null);
   }
 
   // Shift+Enter to send; plain Enter = newline (default behavior).
@@ -461,6 +503,24 @@ export function MessageInput({
             onClick={onCancelReply}
             className="shrink-0 rounded-full p-0.5 hover:bg-muted text-muted-foreground"
             aria-label="Batal balas"
+          >
+            <X className="h-3.5 w-3.5" />
+          </button>
+        </div>
+      ) : null}
+
+      {/* Kartu tugas yang menunggu dikirim */}
+      {pendingAssignment ? (
+        <div className="flex items-center gap-2 mb-2 rounded-md border border-primary/40 bg-primary/5 px-2 py-1.5 text-xs">
+          <ClipboardList className="size-3.5 text-primary shrink-0" />
+          <span className="font-medium text-primary truncate flex-1">
+            Tugas: {pendingAssignment.title}
+          </span>
+          <button
+            type="button"
+            onClick={() => setPendingAssignment(null)}
+            className="shrink-0 rounded-full p-0.5 hover:bg-muted text-muted-foreground"
+            aria-label="Lepas tugas"
           >
             <X className="h-3.5 w-3.5" />
           </button>
@@ -660,6 +720,40 @@ export function MessageInput({
             <Eye className="h-4 w-4" />
           )}
         </Button>
+        <VoiceRecorder
+          conversation={conversation}
+          disabled={disabled || isUploadingAny}
+          onUploaded={(v) => {
+            setPending((prev) => [...prev, v]);
+          }}
+        />
+        <Button
+          type="button"
+          size="icon"
+          variant="ghost"
+          onClick={() => setPollOpen(true)}
+          disabled={disabled}
+          aria-label="Buat polling cepat"
+          title="Buat polling cepat (voting lewat reaksi)"
+          className="h-10 w-10 shrink-0 rounded-full"
+        >
+          <BarChart3 className="h-4 w-4" />
+        </Button>
+        <Button
+          type="button"
+          size="icon"
+          variant="ghost"
+          onClick={() => setAssignmentOpen(true)}
+          disabled={disabled}
+          aria-label="Lampirkan tugas"
+          title="Lampirkan tugas (kartu tugas dengan tombol buka)"
+          className={cn(
+            "h-10 w-10 shrink-0 rounded-full",
+            pendingAssignment && "text-primary bg-primary/10 hover:bg-primary/15"
+          )}
+        >
+          <ClipboardList className="h-4 w-4" />
+        </Button>
         <Button
           type="button"
           size="icon"
@@ -699,6 +793,21 @@ export function MessageInput({
         pendingFileIds={pending.map((p) => p.fileId)}
         maxAttachments={MAX_ATTACHMENTS_PER_MESSAGE}
         onAttach={onAttachCloud}
+      />
+
+      {/* Lampirkan tugas */}
+      <AssignmentAttachDialog
+        open={assignmentOpen}
+        onOpenChange={setAssignmentOpen}
+        currentAssignmentId={pendingAssignment?.id ?? null}
+        onAttach={(a) => setPendingAssignment(a)}
+      />
+
+      {/* Polling cepat */}
+      <PollComposer
+        open={pollOpen}
+        onOpenChange={setPollOpen}
+        onSendPoll={sendPollContent}
       />
     </div>
   );

@@ -15,6 +15,9 @@ import {
   Download,
   Eye,
   Loader2,
+  MessageSquareText,
+  Printer,
+  Radio,
   RotateCcw,
   ShieldAlert,
   Table2,
@@ -24,6 +27,8 @@ import {
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
+import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { Card } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -49,6 +54,7 @@ import {
 
 interface ReviewAnswer extends FormAnswerDTO {
   id: string;
+  feedback?: string | null;
 }
 
 interface ReviewAttempt {
@@ -89,6 +95,8 @@ interface ReviewResponse {
 
 export function FormReview({ folderId }: { folderId: string }) {
   const qc = useQueryClient();
+  // Live monitoring: auto-refresh 5 dtk (bisa dimatikan).
+  const [live, setLive] = useState(true);
   const { data, isLoading, error, refetch } = useQuery<ReviewResponse>({
     queryKey: ["cloud", "form-review", folderId],
     queryFn: async () => {
@@ -99,7 +107,7 @@ export function FormReview({ folderId }: { folderId: string }) {
       if (!res.ok) throw new Error("Gagal memuat data pengerjaan");
       return res.json();
     },
-    refetchInterval: 10_000,
+    refetchInterval: live ? 5_000 : false,
   });
 
   if (isLoading) {
@@ -197,6 +205,59 @@ export function FormReview({ folderId }: { folderId: string }) {
     toast.success("Data nilai diexport ke CSV");
   }
 
+  // Cetak rekap nilai — buka jendela cetak bersih (tanpa CSS aplikasi).
+  function printRecap() {
+    if (!data) return;
+    const rows = data.attempts
+      .map(
+        (a) => `
+        <tr>
+          <td>${escapeHtml(a.user.name)}</td>
+          <td>@${escapeHtml(a.user.username)}</td>
+          <td>${a.status === "SUBMITTED" ? "Terkumpul" : "Berlangsung"}</td>
+          <td style="text-align:center">${
+            a.status === "SUBMITTED" && a.score != null
+              ? `${a.score} / ${a.maxScore}`
+              : "—"
+          }</td>
+          <td style="text-align:center">${a.violations.length}</td>
+          <td>${
+            a.submittedAt
+              ? format(new Date(a.submittedAt), "d MMM yyyy HH:mm")
+              : "—"
+          }</td>
+        </tr>`
+      )
+      .join("");
+    const html = `<!doctype html><html><head><meta charset="utf-8"><title>Rekap Nilai</title>
+      <style>
+        body { font-family: system-ui, -apple-system, sans-serif; padding: 32px; color: #111; }
+        h1 { font-size: 18px; }
+        p.meta { color: #555; font-size: 12px; }
+        table { width: 100%; border-collapse: collapse; margin-top: 12px; font-size: 12px; }
+        th, td { border: 1px solid #ccc; padding: 6px 8px; text-align: left; }
+        th { background: #f3f4f6; }
+      </style></head><body>
+      <h1>Rekap Nilai Tugas</h1>
+      <p class="meta">Dicetak ${format(new Date(), "d MMM yyyy HH:mm", {
+        locale: localeId,
+      })} · ${submitted.length} terkumpul · rata-rata ${avg ?? "—"}</p>
+      <table>
+        <thead><tr><th>Nama</th><th>Username</th><th>Status</th><th>Nilai</th><th>Pelanggaran</th><th>Dikumpulkan</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+      </body></html>`;
+    const w = window.open("", "_blank", "width=900,height=700");
+    if (!w) {
+      toast.error("Popup diblokir — izinkan popup untuk mencetak");
+      return;
+    }
+    w.document.write(html);
+    w.document.close();
+    w.focus();
+    setTimeout(() => w.print(), 350);
+  }
+
   return (
     <div className="space-y-4">
       {/* Summary */}
@@ -219,7 +280,32 @@ export function FormReview({ folderId }: { folderId: string }) {
             pelanggaran
           </Badge>
         ) : null}
+        {/* Live monitoring toggle */}
+        <button
+          type="button"
+          onClick={() => setLive((v) => !v)}
+          title={
+            live
+              ? "Pantau langsung aktif — data diperbarui tiap 5 detik. Klik untuk mematikan."
+              : "Pantau langsung mati — klik untuk mengaktifkan (perbarui tiap 5 detik)."
+          }
+          className={`inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-[11px] font-medium transition-colors ${
+            live
+              ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400"
+              : "border-border text-muted-foreground"
+          }`}
+        >
+          {live ? (
+            <Radio className="size-3 animate-pulse" />
+          ) : (
+            <Radio className="size-3" />
+          )}
+          {live ? "Live" : "Live mati"}
+        </button>
         <div className="flex-1" />
+        <Button size="sm" variant="outline" onClick={printRecap}>
+          <Printer className="size-3.5 mr-1" /> Cetak
+        </Button>
         <Button size="sm" variant="outline" onClick={exportCsv}>
           <Table2 className="size-3.5 mr-1" /> Export CSV
         </Button>
@@ -531,6 +617,11 @@ function AnswerRow({
     answer?.score != null ? String(answer.score) : ""
   );
   const [saving, setSaving] = useState(false);
+  // Umpan balik (feedback) guru per jawaban.
+  const [feedbackInput, setFeedbackInput] = useState<string>(
+    answer?.feedback ?? ""
+  );
+  const [savingFeedback, setSavingFeedback] = useState(false);
 
   const selected = answer?.optionIds ?? [];
   const correct = q.correct ?? [];
@@ -570,6 +661,33 @@ function AnswerRow({
       onGraded();
     } finally {
       setSaving(false);
+    }
+  }
+
+  async function saveFeedback() {
+    if (!answer) return;
+    setSavingFeedback(true);
+    try {
+      const res = await fetch(
+        `/api/cloud/assignments/${folderId}/form/feedback`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            answerId: answer.id,
+            feedback: feedbackInput,
+          }),
+        }
+      );
+      if (!res.ok) {
+        const json = await res.json().catch(() => null);
+        toast.error(json?.error || "Gagal menyimpan umpan balik");
+        return;
+      }
+      toast.success("Umpan balik tersimpan — siswa melihatnya di hasilnya");
+      onGraded();
+    } finally {
+      setSavingFeedback(false);
     }
   }
 
@@ -710,6 +828,56 @@ function AnswerRow({
           Bisa dinilai setelah siswa mengumpulkan jawaban.
         </p>
       ) : null}
+
+      {/* Umpan balik guru per jawaban (feedback) */}
+      {answer && submitted ? (
+        <div className="space-y-1.5 pt-1 border-t border-border/60">
+          <div className="flex items-center gap-1.5">
+            <MessageSquareText className="size-3.5 text-primary" />
+            <Label className="text-[11px] font-medium">
+              Umpan balik untuk siswa
+            </Label>
+            {answer.feedback ? (
+              <Badge variant="secondary" className="text-[9px]">
+                tersimpan
+              </Badge>
+            ) : null}
+          </div>
+          <div className="flex items-start gap-2">
+            <Textarea
+              value={feedbackInput}
+              onChange={(e) => setFeedbackInput(e.target.value)}
+              placeholder="cth: Jawabanmu hampir tepat, tapi perhatikan rumus di langkah kedua…"
+              rows={2}
+              maxLength={1000}
+              className="text-xs"
+            />
+            <Button
+              size="sm"
+              variant="outline"
+              className="h-8 shrink-0"
+              onClick={() => void saveFeedback()}
+              disabled={savingFeedback}
+              title="Simpan umpan balik"
+            >
+              {savingFeedback ? (
+                <Loader2 className="size-3.5 animate-spin" />
+              ) : (
+                <ClipboardCheck className="size-3.5" />
+              )}
+            </Button>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
+}
+
+function escapeHtml(s: string): string {
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
 }

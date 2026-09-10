@@ -18,6 +18,7 @@ import {
   Shield,
   Lock,
   EyeOff,
+  Star,
   X,
   Pencil,
   FolderInput,
@@ -77,6 +78,8 @@ import { MegaMountView } from "@/components/cloud/mega-mount";
 import { MegaLogo } from "@/components/cloud/mega-logo";
 import { TransferManagerButton } from "@/components/cloud/transfer-modal";
 import { useTransferStore } from "@/lib/transfer-store";
+import { useFavoritesStore } from "@/stores/favorites-store";
+import { cn } from "@/lib/utils";
 import {
   formatBytes,
   mimeToIcon,
@@ -1258,6 +1261,9 @@ function FileRow({
   // Delete is stricter: only admin/guru/owner (not classroom teachers).
   const canDelete = canManageItem;
   const enqueueDownload = useTransferStore((s) => s.enqueueDownload);
+  // Favorit (bintang).
+  const isFav = useFavoritesStore((s) => s.fileIds.has(file.id));
+  const toggleFavorite = useFavoritesStore((s) => s.toggleFile);
   function downloadBackground() {
     enqueueDownload({
       url: `/api/storage/${file.storageKey}?download=1`,
@@ -1334,6 +1340,34 @@ function FileRow({
               </div>
             </div>
             <div className="flex items-center gap-1 shrink-0">
+              <TooltipProvider>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="size-8"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        void toggleFavorite();
+                      }}
+                      title={isFav ? "Hapus dari favorit" : "Tambahkan ke favorit"}
+                    >
+                      <Star
+                        className={cn(
+                          "size-4",
+                          isFav
+                            ? "fill-amber-400 text-amber-400"
+                            : "text-muted-foreground"
+                        )}
+                      />
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent>
+                    {isFav ? "Hapus dari favorit" : "Tambahkan ke favorit"}
+                  </TooltipContent>
+                </Tooltip>
+              </TooltipProvider>
               <TooltipProvider>
                 <Tooltip>
                   <TooltipTrigger asChild>

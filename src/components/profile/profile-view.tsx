@@ -1,7 +1,7 @@
 "use client";
 
 import { useRef, useState } from "react";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { PasswordInput } from "@/components/ui/password-input";
@@ -315,7 +315,103 @@ export function ProfileView({ me }: { me: MeResponse }) {
             </Button>
           </CardContent>
         </Card>
+
+        {/* Statistik penyimpanan cloud */}
+        <StorageStatsCard />
       </div>
     </div>
   );
+}
+
+// ── Statistik penyimpanan cloud milik user ──
+function StorageStatsCard() {
+  const { data, isLoading } = useQuery<{
+    fileCount: number;
+    totalSize: number;
+    tempCount: number;
+    docCount: number;
+    perClassroom: { classroomName: string; fileCount: number; totalSize: number }[];
+  }>({
+    queryKey: ["cloud", "storage-stats"],
+    queryFn: async () => {
+      const res = await fetch("/api/cloud/storage-stats", { cache: "no-store" });
+      if (!res.ok) throw new Error("Gagal memuat statistik");
+      return res.json();
+    },
+  });
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="text-base">Cloud Saya</CardTitle>
+        <CardDescription>
+          Ringkasan file & dokumen yang kamu unggah ke cloud.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        {isLoading || !data ? (
+          <p className="text-sm text-muted-foreground">Memuat…</p>
+        ) : (
+          <>
+            <div className="grid grid-cols-3 gap-2 text-center">
+              <div className="rounded-lg border border-border p-2.5">
+                <p className="text-lg font-bold tabular-nums">{data.fileCount}</p>
+                <p className="text-[10px] text-muted-foreground uppercase">
+                  File
+                </p>
+              </div>
+              <div className="rounded-lg border border-border p-2.5">
+                <p className="text-lg font-bold tabular-nums">
+                  {formatBytesLocal(data.totalSize)}
+                </p>
+                <p className="text-[10px] text-muted-foreground uppercase">
+                  Total ukuran
+                </p>
+              </div>
+              <div className="rounded-lg border border-border p-2.5">
+                <p className="text-lg font-bold tabular-nums">{data.docCount}</p>
+                <p className="text-[10px] text-muted-foreground uppercase">
+                  Dokumen
+                </p>
+              </div>
+            </div>
+            {data.perClassroom.length > 0 ? (
+              <div className="space-y-1.5 pt-1">
+                <p className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+                  Per kelas
+                </p>
+                {data.perClassroom.map((c) => (
+                  <div
+                    key={c.classroomName}
+                    className="flex items-center justify-between text-xs"
+                  >
+                    <span className="truncate">{c.classroomName}</span>
+                    <span className="text-muted-foreground tabular-nums shrink-0">
+                      {c.fileCount} file · {formatBytesLocal(c.totalSize)}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            ) : null}
+            <p className="text-[10px] text-muted-foreground">
+              File sementara chat (24 jam) tidak dihitung. Data storage di cloud
+              MEGA/S3.
+            </p>
+          </>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function formatBytesLocal(n: number): string {
+  if (!n) return "0 B";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let i = 0;
+  let v = n;
+  while (v >= 1024 && i < units.length - 1) {
+    v /= 1024;
+    i++;
+  }
+  return `${v.toFixed(v >= 100 || i === 0 ? 0 : 1)} ${units[i]}`;
 }

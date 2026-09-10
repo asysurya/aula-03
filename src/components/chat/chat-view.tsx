@@ -9,6 +9,10 @@ import {
   Check,
   Users,
   Loader2,
+  Search,
+  Pin,
+  BellRing,
+  BellOff,
 } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
@@ -31,8 +35,11 @@ import { MessageBubble } from "./message-bubble";
 import { MessageInput } from "./message-input";
 import { GroupCreateDialog } from "./group-create-dialog";
 import { GroupJoinDialog } from "./group-join-dialog";
+import { MessageSearch } from "./message-search";
+import { PinnedMessages } from "./pinned-messages";
 import { groupMessages, type ChatMessage, type ChatSender, type GroupInfo } from "./types";
 import { Skeleton } from "@/components/ui/skeleton";
+import { cn } from "@/lib/utils";
 
 function conversationName(c: Conversation): string {
   if (c.kind === "dm") return c.peerName;
@@ -51,6 +58,46 @@ const meAsSender = (me: MeResponse): ChatSender | null => {
   };
 };
 
+// ── Notifikasi ringan (tanpa aset) ──────────────────────────────
+// Bunyi "blip" lewat WebAudio oscillator + judul tab berkedip saat ada
+// pesan baru dari orang lain dan tab sedang TIDAK terlihat.
+function playBlip() {
+  try {
+    const AudioCtx =
+      window.AudioContext ??
+      (window as unknown as { webkitAudioContext?: typeof AudioContext })
+        .webkitAudioContext;
+    if (!AudioCtx) return;
+    const ctx = new AudioCtx();
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.type = "sine";
+    osc.frequency.setValueAtTime(880, ctx.currentTime);
+    osc.frequency.exponentialRampToValueAtTime(520, ctx.currentTime + 0.12);
+    gain.gain.setValueAtTime(0.06, ctx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.15);
+    osc.start();
+    osc.stop(ctx.currentTime + 0.16);
+    setTimeout(() => void ctx.close().catch(() => {}), 400);
+  } catch {
+    /* abaikan */
+  }
+}
+
+const NOTIF_PREF_KEY = "chat-notif-enabled";
+
+function readNotifPref(): boolean {
+  try {
+    return localStorage.getItem(NOTIF_PREF_KEY) !== "off";
+  } catch {
+    return true;
+  }
+}
+
+const POLL_NUMBER_EMOJIS = ["1\u20e3", "2\u20e3", "3\u20e3", "4\u20e3", "5\u20e3"];
+
 export function ChatView({
   conversation,
   me,
@@ -67,6 +114,44 @@ export function ChatView({
   const [createOpen, setCreateOpen] = useState(false);
   const [joinOpen, setJoinOpen] = useState(false);
   const [replyTo, setReplyTo] = useState<ChatMessage | null>(null);
+  // Fitur baru: pencarian, sematan, typing, notifikasi.
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [pinnedOpen, setPinnedOpen] = useState(false);
+  const [typingUsers, setTypingUsers] = useState<string[]>([]);
+  const [notifEnabled, setNotifEnabled] = useState(false);
+  const unseenCountRef = useRef(0);
+  const baseTitleRef = useRef("");
+  const notifEnabledRef = useRef(false);
+
+  // Muat preferensi notifikasi sekali saat mount.
+  useEffect(() => {
+    setNotifEnabled(readNotifPref());
+    notifEnabledRef.current = readNotifPref();
+    baseTitleRef.current = document.title;
+  }, []);
+
+  function toggleNotif() {
+    const next = !notifEnabled;
+    setNotifEnabled(next);
+    notifEnabledRef.current = next;
+    try {
+      localStorage.setItem(NOTIF_PREF_KEY, next ? "on" : "off");
+    } catch {
+      /* abaikan */
+    }
+    if (
+      next &&
+      typeof Notification !== "undefined" &&
+      Notification.permission === "default"
+    ) {
+      void Notification.requestPermission();
+    }
+    toast.success(
+      next
+        ? "Notifikasi pesan baru dinyalakan"
+        : "Notifikasi pesan baru dimatikan"
+    );
+  }
 
   const seenIdsRef = useRef<Set<string>>(new Set());
   const lastCreatedAtRef = useRef<string | null>(null);
@@ -207,6 +292,42 @@ export function ChatView({
       deletedIds?: string[];
       serverTime?: string;
     }) => {
+      if (data.new?.length) {
+        // Notifikasi ringan: pesan dari ORANG LAIN saat tab tersembunyi.
+        const fromOthers = data.new.filter((m) => m.senderId !== myId);
+        if (
+          fromOthers.length > 0 &&
+          typeof document !== "undefined" &&
+          document.hidden
+        ) {
+          if (notifEnabledRef.current) {
+            playBlip();
+            const last = fromOthers[fromOthers.length - 1];
+            if (
+              typeof Notification !== "undefined" &&
+              Notification.permission === "granted"
+            ) {
+              const snippet = (last.content || "mengirim lampiran").slice(0, 90);
+              try {
+                const n = new Notification(
+                  `${last.sender.name} · ${conversationName(conversation)}`,
+                  { body: snippet, tag: "aula-chat" }
+                );
+                n.onclick = () => {
+                  window.focus();
+                  n.close();
+                };
+              } catch {
+                /* abaikan */
+              }
+            }
+          }
+          unseenCountRef.current += fromOthers.length;
+          document.title = `(${unseenCountRef.current}) ${
+            baseTitleRef.current || "Aula"
+          }`;
+        }
+      }
       if (data.new?.length) mergeMessages(data.new);
       if (data.changed?.length) {
         const changedMap = new Map(data.changed.map((c) => [c.id, c]));
@@ -219,8 +340,46 @@ export function ChatView({
       }
       if (data.serverTime) lastPollRef.current = data.serverTime;
     },
-    [mergeMessages]
+    [mergeMessages, myId, conversation]
   );
+
+  // Reset judul tab saat kembali terlihat.
+  useEffect(() => {
+    const onVis = () => {
+      if (!document.hidden) {
+        unseenCountRef.current = 0;
+        document.title = baseTitleRef.current || "Aula";
+      }
+    };
+    document.addEventListener("visibilitychange", onVis);
+    return () => document.removeEventListener("visibilitychange", onVis);
+  }, []);
+
+  // ── Typing indicator: poll ringan tiap 3 dtk ──
+  useEffect(() => {
+    const key = `${conversation.kind}:${conversation.id}`;
+    setTypingUsers([]);
+    const t = setInterval(async () => {
+      if (document.hidden) return;
+      if (conversationKeyRef.current !== key) return;
+      try {
+        const params = new URLSearchParams({
+          kind: conversation.kind,
+          id: conversation.id,
+        });
+        const res = await fetch(`/api/chat/typing?${params.toString()}`, {
+          cache: "no-store",
+        });
+        if (!res.ok) return;
+        const data = (await res.json()) as { typing: string[] };
+        if (conversationKeyRef.current !== key) return;
+        setTypingUsers(data.typing ?? []);
+      } catch {
+        /* abaikan */
+      }
+    }, 3000);
+    return () => clearInterval(t);
+  }, [conversation.kind, conversation.id]);
 
   // ── Realtime "0-delay": SSE stream ──
   // Server mendorong delta (pesan/edit/hapus/reaksi) seketika begitu
@@ -378,8 +537,12 @@ export function ChatView({
   }, []);
 
   const handleSend = useCallback(
-    async (content: string, attachmentFileIds: string[]) => {
-      if (!mySender) return;
+    async (
+      content: string,
+      attachmentFileIds: string[],
+      assignmentId?: string | null
+    ): Promise<string | null> => {
+      if (!mySender) return null;
       const tempId = `temp_${Date.now()}_${Math.random()
         .toString(36)
         .slice(2, 8)}`;
@@ -392,6 +555,9 @@ export function ChatView({
         sender: mySender,
         attachments: [],
         reactions: [],
+        assignmentId: assignmentId ?? null,
+        assignment: null,
+        pinnedAt: null,
         replyTo: replyTo
           ? {
               id: replyTo.id,
@@ -419,6 +585,7 @@ export function ChatView({
             content,
             attachmentFileIds,
             replyToId: replyTo?.id ?? undefined,
+            assignmentId: assignmentId ?? undefined,
           }),
         });
         const data = await res.json();
@@ -447,14 +614,54 @@ export function ChatView({
         ) {
           lastCreatedAtRef.current = real.createdAt;
         }
+        return real.id;
       } catch (e) {
         // Revert optimistic
         seenIdsRef.current.delete(tempId);
         setMessages((prev) => prev.filter((m) => m.id !== tempId));
         toast.error(e instanceof Error ? e.message : "Gagal mengirim pesan");
+        return null;
       }
     },
     [conversation.id, conversation.kind, mySender, replyTo]
+  );
+
+  // Sematkan / lepas sematan pesan (pin).
+  const handlePin = useCallback(
+    async (messageId: string, pinned: boolean) => {
+      const prevPinnedAt =
+        messages.find((m) => m.id === messageId)?.pinnedAt ?? null;
+      // Optimistic.
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === messageId
+            ? { ...m, pinnedAt: pinned ? new Date().toISOString() : null }
+            : m
+        )
+      );
+      try {
+        const res = await fetch(`/api/chat/messages/${messageId}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ pinned }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data?.error || "Gagal menyematkan");
+        const updated = data.message as ChatMessage;
+        setMessages((prev) =>
+          prev.map((m) => (m.id === messageId ? updated : m))
+        );
+      } catch (e) {
+        // Revert.
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === messageId ? { ...m, pinnedAt: prevPinnedAt } : m
+          )
+        );
+        throw e;
+      }
+    },
+    [messages]
   );
 
   const handleEdit = useCallback(
@@ -674,6 +881,13 @@ export function ChatView({
   const openConversation = useUIStore((s) => s.openConversation);
   const openProfile = useUIStore((s) => s.openProfile);
 
+  // Hak sematkan (pin): pesan sendiri, admin, atau guru kelas percakapan ini.
+  const isTeacherHere =
+    conversation.kind === "classroom" &&
+    (me.classrooms.find((c) => c.id === conversation.id)?.memberRole ===
+      "TEACHER" ||
+      false);
+
   const handleAvatarClick = useCallback(
     (sender: ChatSender) => {
       if (sender.id === myId) {
@@ -714,6 +928,10 @@ export function ChatView({
         groupInfo={groupInfo}
         onCreateClick={() => setCreateOpen(true)}
         onJoinClick={() => setJoinOpen(true)}
+        onSearchClick={() => setSearchOpen(true)}
+        onPinnedClick={() => setPinnedOpen(true)}
+        notifEnabled={notifEnabled}
+        onToggleNotif={toggleNotif}
       />
 
       {/* Messages */}
@@ -790,11 +1008,17 @@ export function ChatView({
                 onlineIds={onlineIds}
                 currentUserId={myId}
                 canDelete={canDeleteAny || message.senderId === myId}
+                canPin={
+                  message.senderId === myId ||
+                  canDeleteAny ||
+                  (conversation.kind === "classroom" && isTeacherHere)
+                }
                 onAvatarClick={handleAvatarClick}
                 onReply={(msg) => setReplyTo(msg)}
                 onEdit={handleEdit}
                 onDelete={handleDelete}
                 onReact={handleReact}
+                onPin={handlePin}
                 onScrollToMessage={handleScrollToMessage}
               />
             ))}
@@ -802,6 +1026,22 @@ export function ChatView({
           </div>
         )}
       </div>
+
+      {/* Indikator "sedang menulis…" */}
+      {typingUsers.length > 0 ? (
+        <div className="px-4 sm:px-6 pb-1 -mt-1 flex items-center gap-1.5 text-[11px] text-muted-foreground">
+          <span className="inline-flex gap-0.5">
+            <span className="inline-block size-1 rounded-full bg-muted-foreground/70 animate-bounce [animation-delay:0ms]" />
+            <span className="inline-block size-1 rounded-full bg-muted-foreground/70 animate-bounce [animation-delay:150ms]" />
+            <span className="inline-block size-1 rounded-full bg-muted-foreground/70 animate-bounce [animation-delay:300ms]" />
+          </span>
+          <span className="truncate">
+            {typingUsers.slice(0, 2).join(" dan ")}
+            {typingUsers.length > 2 ? ` +${typingUsers.length - 2}` : ""}{" "}
+            sedang menulis…
+          </span>
+        </div>
+      ) : null}
 
       {/* Input */}
       {mySender ? (
@@ -817,6 +1057,20 @@ export function ChatView({
       {/* Group create/join dialogs (controlled) */}
       <GroupCreateDialog me={me} open={createOpen} onOpenChange={setCreateOpen} />
       <GroupJoinDialog open={joinOpen} onOpenChange={setJoinOpen} />
+
+      {/* Pencarian pesan + daftar sematan */}
+      <MessageSearch
+        open={searchOpen}
+        onOpenChange={setSearchOpen}
+        messages={messages}
+        onJump={handleScrollToMessage}
+      />
+      <PinnedMessages
+        open={pinnedOpen}
+        onOpenChange={setPinnedOpen}
+        conversation={{ kind: conversation.kind, id: conversation.id }}
+        onJump={handleScrollToMessage}
+      />
     </div>
   );
 }
@@ -827,12 +1081,20 @@ function ChatHeader({
   groupInfo,
   onCreateClick,
   onJoinClick,
+  onSearchClick,
+  onPinnedClick,
+  notifEnabled,
+  onToggleNotif,
 }: {
   conversation: Conversation;
   onlineIds: Set<string>;
   groupInfo: GroupInfo | null;
   onCreateClick: () => void;
   onJoinClick: () => void;
+  onSearchClick: () => void;
+  onPinnedClick: () => void;
+  notifEnabled: boolean;
+  onToggleNotif: () => void;
 }) {
   const [copied, setCopied] = useState(false);
 
@@ -911,6 +1173,49 @@ function ChatHeader({
             </Badge>
           )
         ) : null}
+
+        {/* Aksi cepat: notifikasi, sematan, pencarian */}
+        <Button
+          variant="ghost"
+          size="icon"
+          onClick={onToggleNotif}
+          aria-label={notifEnabled ? "Matikan notifikasi" : "Nyalakan notifikasi"}
+          title={
+            notifEnabled
+              ? "Notifikasi pesan baru: AKTIF (bunyi + judul tab saat tab tersembunyi)"
+              : "Notifikasi pesan baru: MATI"
+          }
+          className={cn(
+            "h-9 w-9 shrink-0",
+            notifEnabled && "text-primary bg-primary/10 hover:bg-primary/15"
+          )}
+        >
+          {notifEnabled ? (
+            <BellRing className="h-4.5 w-4.5" />
+          ) : (
+            <BellOff className="h-4.5 w-4.5" />
+          )}
+        </Button>
+        <Button
+          variant="ghost"
+          size="icon"
+          onClick={onPinnedClick}
+          aria-label="Pesan sematan"
+          title="Lihat pesan yang disematkan (pin)"
+          className="h-9 w-9 shrink-0"
+        >
+          <Pin className="h-4.5 w-4.5" />
+        </Button>
+        <Button
+          variant="ghost"
+          size="icon"
+          onClick={onSearchClick}
+          aria-label="Cari pesan"
+          title="Cari pesan di percakapan ini"
+          className="h-9 w-9 shrink-0"
+        >
+          <Search className="h-4.5 w-4.5" />
+        </Button>
 
         <DropdownMenu>
           <DropdownMenuTrigger asChild>

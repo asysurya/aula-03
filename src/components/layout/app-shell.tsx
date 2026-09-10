@@ -10,6 +10,7 @@ import { Sheet, SheetContent } from "@/components/ui/sheet";
 import { useUIStore } from "@/stores/ui-store";
 import { Logo } from "@/components/shared/logo";
 import { ThemeToggle } from "@/components/shared/theme-toggle";
+import { CommandPalette } from "@/components/shared/command-palette";
 import { Menu } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
@@ -56,7 +57,10 @@ export function AppShell() {
             <Menu className="h-5 w-5" />
           </Button>
           <Logo />
-          <ThemeToggle />
+          <div className="flex items-center gap-1.5">
+            <CommandPalette me={me} />
+            <ThemeToggle />
+          </div>
         </header>
 
         <OnlineBar me={me} onlineIds={onlineIds} />

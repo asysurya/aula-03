@@ -31,10 +31,12 @@ import {
   Hash,
   Lock,
   ChevronRight,
+  CalendarDays,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { roleLabel } from "@/lib/constants";
 import { toast } from "sonner";
+import { UpcomingDialog } from "@/components/shared/upcoming-dialog";
 
 export function AppSidebar({
   me,
@@ -60,6 +62,7 @@ export function AppSidebar({
     openAdmin,
   } = useUIStore();
   const [dmPickerOpen, setDmPickerOpen] = useState(false);
+  const [upcomingOpen, setUpcomingOpen] = useState(false);
 
   const isAdmin = user.role === "ADMIN";
 
@@ -68,7 +71,19 @@ export function AppSidebar({
       {/* Header */}
       <div className="flex items-center justify-between px-4 h-14 border-b border-sidebar-border shrink-0">
         <Logo />
-        <ThemeToggle />
+        <div className="flex items-center gap-1">
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-8 w-8"
+            onClick={() => setUpcomingOpen(true)}
+            title="Jadwal tugas (tenggat)"
+            aria-label="Jadwal tugas"
+          >
+            <CalendarDays className="h-4 w-4" />
+          </Button>
+          <ThemeToggle />
+        </div>
       </div>
 
       <ScrollArea className="flex-1 min-h-0">
@@ -272,6 +287,7 @@ export function AppSidebar({
       </div>
 
       <DmPickerDialog open={dmPickerOpen} onOpenChange={setDmPickerOpen} />
+      <UpcomingDialog open={upcomingOpen} onOpenChange={setUpcomingOpen} />
     </div>
   );
 }

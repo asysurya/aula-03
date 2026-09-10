@@ -224,6 +224,7 @@ export async function GET(
           fileId: a.fileId,
           file: a.file,
           score: a.score,
+          feedback: a.feedback,
         })),
       },
       canStart: false,

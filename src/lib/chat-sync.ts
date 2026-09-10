@@ -19,6 +19,20 @@ import { authOptions } from "@/lib/auth";
 
 export type ConversationKind = "classroom" | "group" | "dm";
 
+export interface AssignmentCardDto {
+  id: string;
+  folderId: string;
+  title: string;
+  description: string | null;
+  deadline: string;
+  maxScore: number | null;
+  classroomName: string | null;
+  /** Jumlah soal form (null = tugas tanpa form / upload saja). */
+  questionCount: number | null;
+  /** Sudah lewat tenggat? (dihitung saat response dibuat). */
+  deadlinePassed: boolean;
+}
+
 interface SenderDto {
   id: string;
   name: string;
@@ -33,6 +47,8 @@ interface AttachmentFileDto {
   size: number;
   mimetype: string;
   storageKey: string;
+  /** null = file permanen cloud (bukan file sementara 24 jam). */
+  expiresAt: string | null;
 }
 
 interface ReactionDto {
@@ -57,6 +73,11 @@ export interface ChatMessageDto {
   attachments: Array<{ id: string; file: AttachmentFileDto }>;
   reactions: ReactionDto[];
   replyTo: ReplyToDto | null;
+  /** Id tugas yang dilampirkan (null = tanpa tugas). */
+  assignmentId: string | null;
+  /** Kartu tugas — null bila tugas sudah dihapus (tampilkan makam). */
+  assignment: AssignmentCardDto | null;
+  pinnedAt: string | null;
 }
 
 export interface ChatSyncDelta {
@@ -94,6 +115,7 @@ const attachmentInclude = {
       size: true,
       mimetype: true,
       storageKey: true,
+      expiresAt: true,
     },
   },
 } as const;
@@ -112,7 +134,12 @@ type MessageWithRelations = {
   editedAt: Date | null;
   senderId: string;
   sender: SenderDto;
-  attachments: Array<{ id: string; file: AttachmentFileDto }>;
+  assignmentId: string | null;
+  pinnedAt: Date | null;
+  attachments: Array<{
+    id: string;
+    file: AttachmentFileDto & { expiresAt: Date | null };
+  }>;
   reactions: Array<{
     id: string;
     emoji: string;
@@ -133,10 +160,76 @@ function toDto(m: MessageWithRelations): ChatMessageDto {
     editedAt: m.editedAt ? m.editedAt.toISOString() : null,
     senderId: m.senderId,
     sender: m.sender,
-    attachments: m.attachments,
+    attachments: m.attachments.map((a) => ({
+      id: a.id,
+      file: {
+        ...a.file,
+        expiresAt: a.file.expiresAt
+          ? new Date(a.file.expiresAt).toISOString()
+          : null,
+      },
+    })),
     reactions: m.reactions,
     replyTo: m.replyTo,
+    assignmentId: m.assignmentId ?? null,
+    assignment: null,
+    pinnedAt: m.pinnedAt ? new Date(m.pinnedAt).toISOString() : null,
   };
+}
+
+// ── Hidrasi kartu tugas ───────────────────────────────────────────────
+// assignmentId di Message adalah scalar TANPA relasi Prisma (aman untuk DB
+// lama). Data kartu digabung manual di sini — dipakai semua route pesan.
+export async function hydrateAssignments(
+  dtos: ChatMessageDto[]
+): Promise<ChatMessageDto[]> {
+  const ids = Array.from(
+    new Set(
+      dtos
+        .map((d) => d.assignmentId)
+        .filter((x): x is string => typeof x === "string" && x.length > 0)
+    )
+  );
+  if (ids.length === 0) return dtos;
+
+  const assignments = await db.assignment.findMany({
+    where: { id: { in: ids } },
+    select: {
+      id: true,
+      folderId: true,
+      title: true,
+      description: true,
+      deadline: true,
+      maxScore: true,
+      folder: { select: { name: true, classroom: { select: { name: true } } } },
+      form: {
+        select: {
+          id: true,
+          questions: { select: { id: true } },
+        },
+      },
+    },
+  });
+  const map = new Map<string, AssignmentCardDto>();
+  const now = Date.now();
+  for (const a of assignments) {
+    map.set(a.id, {
+      id: a.id,
+      folderId: a.folderId,
+      title: a.title,
+      description: a.description,
+      deadline: new Date(a.deadline).toISOString(),
+      maxScore: a.maxScore,
+      classroomName:
+        a.folder?.classroom?.name ?? a.folder?.name ?? null,
+      questionCount: a.form ? a.form.questions.length : null,
+      deadlinePassed: new Date(a.deadline).getTime() < now,
+    });
+  }
+  return dtos.map((d) => ({
+    ...d,
+    assignment: d.assignmentId ? map.get(d.assignmentId) ?? null : null,
+  }));
 }
 
 // Emoji korup (sisa bug klien lama) — disaring dari hasil.
@@ -240,9 +333,13 @@ export async function computeChatSyncDelta(
     include: chatMessageInclude,
   })) as unknown as MessageWithRelations[];
 
-  // 2) Pesan yang diedit sejak since (editedAt null tidak match "gt").
+  // 2) Pesan yang diedit / dipin sejak since (editedAt/pinnedAt null tidak
+  //    match "gt"). Pin → realtime; unpin → segar saat reload.
   const editedRaw = await db.message.findMany({
-    where: { ...convWhere, editedAt: { gt: since } },
+    where: {
+      ...convWhere,
+      OR: [{ editedAt: { gt: since } }, { pinnedAt: { gt: since } }],
+    },
     select: { id: true },
     take: 200,
   });
@@ -283,9 +380,16 @@ export async function computeChatSyncDelta(
   const stillSet = new Set(still.map((s) => s.id));
   const deletedIds = loadedIds.filter((mid) => !stillSet.has(mid));
 
+  const hydratedNew = await hydrateAssignments(
+    newRaw.map(sanitizeReactions).map(toDto)
+  );
+  const hydratedChanged = await hydrateAssignments(
+    changedRaw.map(sanitizeReactions).map(toDto)
+  );
+
   return {
-    new: newRaw.map(sanitizeReactions).map(toDto),
-    changed: changedRaw.map(sanitizeReactions).map(toDto),
+    new: hydratedNew,
+    changed: hydratedChanged,
     deletedIds,
     serverTime,
   };

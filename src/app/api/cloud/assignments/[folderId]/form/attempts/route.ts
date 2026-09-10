@@ -118,6 +118,7 @@ export async function GET(
       fileId: ans.fileId,
       file: ans.file,
       score: ans.score,
+      feedback: ans.feedback,
     })),
   }));
 
