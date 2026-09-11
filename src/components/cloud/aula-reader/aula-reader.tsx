@@ -241,7 +241,7 @@ export function AulaReader({
 
   // ── Office / arsip / lainnya → reuse pratinjau konversi bawaan ──
   return (
-    <div className="flex flex-col h-full min-h-0">
+    <div className="flex flex-col flex-1 h-full min-h-0">
       <div className="flex items-center gap-2 px-3 py-1.5 border-b border-border bg-muted/40 text-xs text-muted-foreground">
         <BookOpenText className="size-3.5" />
         Tipe ini dibuka dengan penampil dokumen Aula (konversi otomatis).

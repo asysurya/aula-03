@@ -154,3 +154,37 @@
     background-color: oklch(from var(--muted-foreground) l c h / 0.55);
   }
 }
+
+/* ── Aula Reader: lapisan teks PDF (agar teks bisa diseleksi) ── */
+.pdf-text-layer {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  line-height: 1;
+  text-align: initial;
+  text-rendering: optimizeSpeed;
+  forced-color-adjust: none;
+  z-index: 5;
+}
+.pdf-text-layer span {
+  position: absolute;
+  color: transparent;
+  white-space: pre;
+  cursor: text;
+  transform-origin: 0 0;
+  font-family: sans-serif;
+}
+.pdf-text-layer ::selection {
+  background: oklch(0.72 0.17 152 / 0.4);
+}
+/* Saat alat anotasi aktif → lapisan teks tidak menghalangi gambar */
+.pdf-text-layer.tool-active {
+  pointer-events: none;
+}
+.pdf-text-layer.tool-active span {
+  cursor: inherit;
+}
+/* Mode malam: teks seleksi tetap terlihat jelas */
+.pdf-night .pdf-text-layer ::selection {
+  background: oklch(0.72 0.17 152 / 0.5);
+}

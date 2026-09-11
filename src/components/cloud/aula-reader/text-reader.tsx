@@ -11,14 +11,17 @@ import {
   Highlighter,
   Undo2,
   Trash2,
+  Copy,
   FileText,
   Loader2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
+import { toast } from "sonner";
 import ReactMarkdown from "react-markdown";
 import { ANNO_COLORS } from "./annotations";
 import { newId } from "./annotations";
+import { copyTextToClipboard } from "./selection-actions";
 
 // ─────────────────────────────────────────────────────────────────────────
 // Aula Reader — Teks / Markdown / kode.
@@ -66,6 +69,7 @@ export function TextReader({
   const [selRange, setSelRange] = useState<{ start: number; end: number } | null>(null);
   const [selColor, setSelColor] = useState(ANNO_COLORS[0]);
   const [showHlBar, setShowHlBar] = useState(false);
+  const [selTts, setSelTts] = useState(false);
   const bodyRef = useRef<HTMLDivElement>(null);
   const ttsStop = useRef(false);
 
@@ -153,6 +157,40 @@ export function TextReader({
     }
   }
 
+  // TTS untuk TEKS YANG DISELEKSI (dipakai di bar stabilo).
+  const speakSelection = useCallback(() => {
+    if (!selRange || !text) return;
+    if (selTts) {
+      window.speechSynthesis.cancel();
+      setSelTts(false);
+      return;
+    }
+    if (ttsPlaying) {
+      ttsStop.current = true;
+      window.speechSynthesis.cancel();
+      setTtsPlaying(false);
+    }
+    const potongan = text.slice(selRange.start, selRange.end);
+    const u = new SpeechSynthesisUtterance(potongan);
+    const id = window.speechSynthesis
+      .getVoices()
+      .find((v) => v.lang?.toLowerCase().startsWith("id"));
+    if (id) u.voice = id;
+    u.lang = id?.lang ?? "id-ID";
+    u.onend = () => setSelTts(false);
+    u.onerror = () => setSelTts(false);
+    setSelTts(true);
+    window.speechSynthesis.speak(u);
+  }, [selRange, text, selTts, ttsPlaying]);
+
+  // Salin teks yang diseleksi.
+  const copySelection = useCallback(async () => {
+    if (!selRange || !text) return;
+    const ok = await copyTextToClipboard(text.slice(selRange.start, selRange.end));
+    if (ok) toast.success("Teks tersalin");
+    else toast.error("Gagal menyalin teks");
+  }, [selRange, text]);
+
   // TTS
   const toggleTts = useCallback(() => {
     if (ttsPlaying) {
@@ -234,7 +272,7 @@ export function TextReader({
   }
 
   return (
-    <div className="flex flex-col h-full min-h-0">
+    <div className="flex flex-col flex-1 h-full min-h-0">
       {/* Toolbar */}
       <div className="flex items-center gap-1.5 flex-wrap px-3 py-2 border-b border-border bg-background/95 sticky top-0 z-20">
         <Button
@@ -337,6 +375,26 @@ export function TextReader({
           ))}
           <Button size="sm" className="h-8 ml-2" onClick={applyHighlight}>
             Tandai
+          </Button>
+          <Button
+            size="sm"
+            variant={selTts ? "secondary" : "outline"}
+            className="h-8 ml-1 gap-1.5"
+            onClick={speakSelection}
+            title={selTts ? "Hentikan bacaan" : "Bacakan teks yang diseleksi"}
+          >
+            {selTts ? <Square className="size-3.5" /> : <Volume2 className="size-3.5" />}
+            {selTts ? "Stop" : "Bacakan"}
+          </Button>
+          <Button
+            size="sm"
+            variant="outline"
+            className="h-8 ml-1 gap-1.5"
+            onClick={() => void copySelection()}
+            title="Salin teks yang diseleksi"
+          >
+            <Copy className="size-3.5" />
+            Salin
           </Button>
         </div>
       ) : null}

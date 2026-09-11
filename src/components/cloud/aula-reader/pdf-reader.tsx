@@ -19,9 +19,12 @@ import {
   Square,
   X,
   Loader2,
+  ArrowDownUp,
+  ArrowLeftRight,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { toast } from "sonner";
 import { cn } from "@/lib/utils";
 import type { CloudFileItem } from "@/lib/cloud-format";
 import type { OfficeCacheEntry } from "@/components/cloud/buffer-loader";
@@ -30,8 +33,10 @@ import {
   type AnnoTool,
   type Annotation,
   useAnnotations,
+  newId,
 } from "./annotations";
 import { AnnotationLayer } from "./annotation-layer";
+import { useSelectionMenu, SelectionToolbar } from "./selection-actions";
 import type { PDFDocumentProxy } from "pdfjs-dist";
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -39,6 +44,10 @@ import type { PDFDocumentProxy } from "pdfjs-dist";
 // - Render cepat via pdf.js (worker terpisah): hanya halaman yang terlihat
 //   yang dirender (render-on-visible + cache bitmap) → PDF 100 halaman /
 //   40 MB tetap lancar bahkan di Smart TV / HP kentang.
+// - LAPISAN TEKS transparan di atas kanvas → teks bisa diseleksi,
+//   lalu menu muncul: Bacakan (TTS) · Stabilo · Salin.
+// - Dua mode tampilan: VERTIKAL (gulir ke bawah) & HORIZONTAL (halaman
+//   ke samping + snap/swipe — nyaman di ponsel).
 // - Zoom, navigasi halaman, mode malam, pencarian teks (lompat halaman),
 //   TTS "baca halaman" dengan lanjut otomatis ke halaman berikutnya.
 // - Stabilo & pena: lapisan anotasi per halaman, tersimpan di perangkat.
@@ -61,6 +70,19 @@ interface PageDim {
   h: number;
 }
 
+export type ViewMode = "vertical" | "horizontal";
+const VM_KEY = "aula.reader.viewmode";
+
+function loadViewMode(): ViewMode {
+  try {
+    return localStorage.getItem(VM_KEY) === "horizontal"
+      ? "horizontal"
+      : "vertical";
+  } catch {
+    return "vertical";
+  }
+}
+
 export function PdfReader({
   file,
   entry,
@@ -73,12 +95,13 @@ export function PdfReader({
   const [numPages, setNumPages] = useState(0);
   const [dims, setDims] = useState<Record<number, PageDim>>({});
   const defaultRatio = 1.414; // A4
-  const [zoom, setZoom] = useState(1); // 1 = pas-lebar
+  const [zoom, setZoom] = useState(1); // 1 = pas lebar (vertikal) / pas tinggi (horizontal)
   const [page, setPage] = useState(1);
   const [night, setNight] = useState(false);
   const [tool, setTool] = useState<AnnoTool>("none");
   const [color, setColor] = useState(ANNO_COLORS[0]);
   const [containerW, setContainerW] = useState(0);
+  const [containerH, setContainerH] = useState(0);
   const [visible, setVisible] = useState<Set<number>>(new Set([1]));
   const [searchOpen, setSearchOpen] = useState(false);
   const [query, setQuery] = useState("");
@@ -88,6 +111,7 @@ export function PdfReader({
   const [searching, setSearching] = useState(false);
   const [ttsPlaying, setTtsPlaying] = useState(false);
   const [flashPage, setFlashPage] = useState<number | null>(null);
+  const [viewMode, setViewMode] = useState<ViewMode>(loadViewMode);
 
   const containerRef = useRef<HTMLDivElement>(null);
   const pageRefs = useRef<Map<number, HTMLDivElement>>(new Map());
@@ -114,7 +138,11 @@ export function PdfReader({
         const task = pdfjs.getDocument({ data: new Uint8Array(copy) });
         loaded = await task.promise;
         if (cancelled) {
-          void loaded.destroy();
+          try {
+            (loaded as unknown as { cleanup?: () => void }).cleanup?.();
+          } catch {
+            /* abaikan */
+          }
           return;
         }
         setDoc(loaded);
@@ -128,19 +156,31 @@ export function PdfReader({
       cancelled = true;
       ttsStop.current = true;
       if (typeof window !== "undefined") window.speechSynthesis?.cancel();
-      void loaded?.destroy();
+      // pdfjs-dist 6: PDFDocumentProxy tidak lagi punya destroy() publik —
+      // bebaskan memori via cleanup() bila tersedia, selalu dalam try/catch
+      // supaya error API tidak merusak unmount.
+      const d = loaded as unknown as { cleanup?: () => void; destroy?: () => void };
+      try {
+        d?.cleanup?.();
+      } catch {
+        /* abaikan */
+      }
     };
   }, [entry.buffer, file.storageKey]);
 
-  // ── Lebar container (responsive; TV besar → halaman besar) ──
+  // ── Ukuran container (responsive; TV besar → halaman besar) ──
   useEffect(() => {
     const el = containerRef.current;
     if (!el) return;
     const ro = new ResizeObserver((entries) => {
-      for (const en of entries) setContainerW(en.contentRect.width);
+      for (const en of entries) {
+        setContainerW(en.contentRect.width);
+        setContainerH(en.contentRect.height);
+      }
     });
     ro.observe(el);
     setContainerW(el.clientWidth);
+    setContainerH(el.clientHeight);
     return () => ro.disconnect();
   }, []);
 
@@ -169,7 +209,6 @@ export function PdfReader({
     };
   }, [doc]);
 
-  const pageWidth = Math.max(280, containerW - 32) * zoom;
   const ratioOf = useCallback(
     (i: number) => {
       const d = dims[i];
@@ -178,30 +217,60 @@ export function PdfReader({
     [dims]
   );
 
-  // ── Halaman aktif (saat scroll) ──
+  // ── Lebar halaman per mode ──
+  // Vertikal: pas-lebar (w). Horizontal: pas-TINGGI (h) → lebar = h/rasio.
+  const pageWidthOf = useCallback(
+    (i: number) => {
+      if (viewMode === "horizontal") {
+        const h = containerH > 100 ? (containerH - 32) * zoom : 360;
+        return Math.max(120, h / ratioOf(i));
+      }
+      return Math.max(280, containerW - 32) * zoom;
+    },
+    [viewMode, containerW, containerH, zoom, ratioOf]
+  );
+
+  // ── Halaman aktif (saat scroll — mendukung kedua mode) ──
   const onScroll = useCallback(() => {
     const el = containerRef.current;
     if (!el) return;
-    const mid = el.scrollTop + el.clientHeight * 0.35;
     let cur = 1;
-    for (let i = 1; i <= numPages; i++) {
-      const node = pageRefs.current.get(i);
-      if (!node) continue;
-      if (node.offsetTop <= mid) cur = i;
-      else break;
+    if (viewMode === "horizontal") {
+      const center = el.scrollLeft + el.clientWidth / 2;
+      for (let i = 1; i <= numPages; i++) {
+        const node = pageRefs.current.get(i);
+        if (!node) continue;
+        if (node.offsetLeft <= center) cur = i;
+        else break;
+      }
+    } else {
+      const mid = el.scrollTop + el.clientHeight * 0.35;
+      for (let i = 1; i <= numPages; i++) {
+        const node = pageRefs.current.get(i);
+        if (!node) continue;
+        if (node.offsetTop <= mid) cur = i;
+        else break;
+      }
     }
     setPage(cur);
-  }, [numPages]);
+  }, [numPages, viewMode]);
 
   // ── Jump ke halaman ──
-  const gotoPage = useCallback((n: number) => {
-    const target = Math.min(Math.max(1, n), numPages || 1);
-    const node = pageRefs.current.get(target);
-    if (node) {
-      node.scrollIntoView({ behavior: "smooth", block: "start" });
-    }
-    setPage(target);
-  }, [numPages]);
+  const gotoPage = useCallback(
+    (n: number) => {
+      const target = Math.min(Math.max(1, n), numPages || 1);
+      const node = pageRefs.current.get(target);
+      if (node) {
+        node.scrollIntoView({
+          behavior: "smooth",
+          block: viewMode === "horizontal" ? "nearest" : "start",
+          inline: viewMode === "horizontal" ? "center" : "nearest",
+        });
+      }
+      setPage(target);
+    },
+    [numPages, viewMode]
+  );
 
   // ── Zoom ──
   const changeZoom = useCallback(
@@ -210,6 +279,24 @@ export function PdfReader({
     },
     []
   );
+
+  // ── Mode tampilan (persist) ──
+  const toggleViewMode = useCallback(() => {
+    setViewMode((m) => {
+      const next = m === "vertical" ? "horizontal" : "vertical";
+      try {
+        localStorage.setItem(VM_KEY, next);
+      } catch {
+        /* abaikan */
+      }
+      toast.success(
+        next === "vertical"
+          ? "Mode vertikal — gulir ke bawah antar halaman"
+          : "Mode horizontal — geser ke samping antar halaman"
+      );
+      return next;
+    });
+  }, []);
 
   // ── TTS: baca halaman, lanjut otomatis ──
   const speakPage = useCallback(
@@ -325,9 +412,45 @@ export function PdfReader({
     setTimeout(() => setFlashPage(null), 1400);
   }
 
+  // ── Menu seleksi teks (Bacakan / Stabilo / Salin) ──
+  const sel = useSelectionMenu({
+    containerRef,
+    withinSelector: ".pdf-text-layer",
+    onHighlight: ({ page: p, rects }) => {
+      // Satu anotasi per baris seleksi — presisi mengikuti teks.
+      for (const rect of rects) {
+        anno.add({
+          id: newId(),
+          page: p,
+          tool: "hl",
+          color,
+          rect,
+          created: Date.now(),
+        });
+      }
+      toast.success(`Teks ditandai stabilo ${color === ANNO_COLORS[0] ? "kuning" : ""}`.trim());
+    },
+    activeColor: color,
+  });
+
+  // TTS seleksi & TTS halaman berbagi speechSynthesis → hentikan yang lain.
+  const speakSelection = useCallback(
+    (text: string) => {
+      if (ttsPlaying) {
+        ttsStop.current = true;
+        window.speechSynthesis.cancel();
+        setTtsPlaying(false);
+      }
+      sel.speak(text);
+    },
+    [ttsPlaying, sel]
+  );
+
   // ── Keyboard (remote TV / keyboard) ──
+  // Shift+panah dibiarkan untuk seleksi teks via keyboard.
   const onKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
+      if (e.shiftKey) return;
       if (e.key === "PageDown" || e.key === "ArrowRight") {
         e.preventDefault();
         gotoPage(page + 1);
@@ -342,9 +465,11 @@ export function PdfReader({
         setZoom(1);
       } else if (e.key.toLowerCase() === "n") {
         setNight((v) => !v);
+      } else if (e.key.toLowerCase() === "h") {
+        toggleViewMode();
       }
     },
-    [page, gotoPage, changeZoom]
+    [page, gotoPage, changeZoom, toggleViewMode]
   );
 
   const pageList = useMemo(() => {
@@ -376,7 +501,7 @@ export function PdfReader({
   }
 
   return (
-    <div className="flex flex-col h-full min-h-0">
+    <div className="flex flex-col flex-1 h-full min-h-0">
       {/* ── Toolbar ── */}
       <div className="flex items-center gap-1.5 flex-wrap px-3 py-2 border-b border-border bg-background/95 sticky top-0 z-20">
         <div className="flex items-center gap-1">
@@ -444,9 +569,27 @@ export function PdfReader({
             size="icon"
             className="h-9 w-9"
             onClick={() => setZoom(1)}
-            title="Pas lebar layar"
+            title="Pas layar"
           >
             <Maximize className="size-4" />
+          </Button>
+          {/* Mode tampilan: vertikal ⇅ / horizontal ⇄ */}
+          <Button
+            variant={viewMode === "horizontal" ? "secondary" : "outline"}
+            size="icon"
+            className="h-9 w-9"
+            onClick={toggleViewMode}
+            title={
+              viewMode === "vertical"
+                ? "Mode horizontal — halaman bergeser ke samping (tekan H)"
+                : "Mode vertikal — halaman bergulir ke bawah (tekan H)"
+            }
+          >
+            {viewMode === "vertical" ? (
+              <ArrowDownUp className="size-4" />
+            ) : (
+              <ArrowLeftRight className="size-4" />
+            )}
           </Button>
         </div>
 
@@ -487,7 +630,7 @@ export function PdfReader({
             size="icon"
             className="h-9 w-9"
             onClick={() => setTool(tool === "hl" ? "none" : "hl")}
-            title="Stabilo — seret di halaman untuk menandai"
+            title="Stabilo — seret di halaman, atau blok teks lalu pilih Stabilo"
           >
             <Highlighter className="size-4" />
           </Button>
@@ -616,17 +759,24 @@ export function PdfReader({
         onKeyDown={onKeyDown}
         onScroll={onScroll}
         className={cn(
-          "flex-1 min-h-0 overflow-auto outline-none",
-          night ? "bg-neutral-900" : "bg-neutral-200 dark:bg-neutral-900/60"
+          "relative flex-1 min-h-0 overflow-auto outline-none",
+          viewMode === "horizontal" && "snap-x snap-mandatory",
+          night ? "bg-neutral-900 pdf-night" : "bg-neutral-200 dark:bg-neutral-900/60"
         )}
       >
-        <div className="flex flex-col items-center gap-4 py-4 px-3">
+        <div
+          className={cn(
+            viewMode === "vertical"
+              ? "flex flex-col items-center gap-4 py-4 px-3"
+              : "flex flex-row items-stretch h-full w-max gap-4 px-3 py-4"
+          )}
+        >
           {pageList.map((i) => (
             <PageView
               key={i}
               doc={doc}
               pageNo={i}
-              width={pageWidth}
+              width={pageWidthOf(i)}
               ratio={ratioOf(i)}
               visible={visible.has(i)}
               onVisible={(v) =>
@@ -648,15 +798,32 @@ export function PdfReader({
               onErase={anno.remove}
               night={night}
               flash={flashPage === i}
+              horizontal={viewMode === "horizontal"}
             />
           ))}
           {numPages > 0 ? (
-            <p className="text-xs text-muted-foreground pb-2">
+            <p className="text-xs text-muted-foreground pb-2 px-4">
               {numPages} halaman · {anno.count > 0 ? `${anno.count} anotasi tersimpan di perangkat ini · ` : ""}
-              Gunakan tombol ⯇ ⯈ atau PageUp/PageDown untuk berpindah halaman
+              Blok teks lalu pilih Bacakan / Stabilo / Salin · gunakan ⯇ ⯈ atau geser
             </p>
           ) : null}
         </div>
+
+        {/* Menu aksi teks terpilih */}
+        {sel.menu ? (
+          <SelectionToolbar
+            menu={sel.menu}
+            playing={sel.playing}
+            onSpeak={speakSelection}
+            onStopSpeak={sel.stopSpeak}
+            onHighlight={sel.highlight}
+            onCopy={(ok) =>
+              ok ? toast.success("Teks tersalin") : toast.error("Gagal menyalin")
+            }
+            onClose={sel.closeMenu}
+            activeColor={color}
+          />
+        ) : null}
       </div>
     </div>
   );
@@ -679,6 +846,7 @@ function PageView({
   onErase,
   night,
   flash,
+  horizontal,
 }: {
   doc: PDFDocumentProxy;
   pageNo: number;
@@ -694,10 +862,13 @@ function PageView({
   onErase: (id: string) => void;
   night: boolean;
   flash: boolean;
+  horizontal: boolean;
 }) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const textLayerRef = useRef<HTMLDivElement>(null);
   const [renderedFor, setRenderedFor] = useState<number | null>(null);
+  const [textFor, setTextFor] = useState<number | null>(null);
   const renderTaskRef = useRef<{ cancel: () => void } | null>(null);
   const [renderError, setRenderError] = useState(false);
 
@@ -752,6 +923,77 @@ function PageView({
     };
   }, [visible, renderedFor, width, doc, pageNo]);
 
+  // ── Lapisan teks (agar bisa diseleksi / dibacakan / distabilo) ──
+  // Span transparan diposisikan persis di atas tiap item teks pdf.js;
+  // lebar disesuaikan dengan transform scaleX (teknik viewer resmi pdf.js).
+  useEffect(() => {
+    if (!visible || textFor === width) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const pdfjs = await getPdfjs();
+        const p = await doc.getPage(pageNo);
+        if (cancelled) return;
+        const base = p.getViewport({ scale: 1 });
+        // Skala CSS-pixel (tanpa dpr) — kanvas tampil selebar `width`.
+        const viewport = p.getViewport({ scale: width / base.width });
+        const tc = await p.getTextContent();
+        const el = textLayerRef.current;
+        if (!el || cancelled) return;
+        el.replaceChildren();
+        const frag = document.createDocumentFragment();
+        const spans: [HTMLSpanElement, { left: number; top: number; fontHeight: number; angle: number; targetW: number }][] = [];
+        for (const item of tc.items as unknown as Array<{
+          str?: string;
+          transform?: number[];
+          width?: number;
+        }>) {
+          if (!item.str || !item.str.trim() || !item.transform) continue;
+          const tx = pdfjs.Util.transform(
+            viewport.transform,
+            item.transform
+          );
+          const fontHeight = Math.hypot(tx[2], tx[3]);
+          const left = tx[4];
+          const top = tx[5] - fontHeight; // pdf.js: top = baseline - tinggi font
+          const angle = Math.atan2(tx[1], tx[0]);
+          const span = document.createElement("span");
+          span.textContent = item.str;
+          frag.appendChild(span);
+          spans.push([
+            span,
+            {
+              left,
+              top,
+              fontHeight,
+              angle,
+              targetW: (item.width ?? 0) * viewport.scale,
+            },
+          ]);
+        }
+        el.appendChild(frag);
+        // Setelah di DOM → ukur lebar asli → sesuaikan dengan scaleX.
+        for (const [span, m] of spans) {
+          span.style.left = `${m.left}px`;
+          span.style.top = `${m.top}px`;
+          span.style.fontSize = `${m.fontHeight}px`;
+          const naturalW = span.getBoundingClientRect().width || 1;
+          const sx = m.targetW > 0 ? m.targetW / naturalW : 1;
+          const t: string[] = [];
+          if (Math.abs(m.angle) > 0.001) t.push(`rotate(${m.angle}rad)`);
+          if (Math.abs(sx - 1) > 0.01) t.push(`scaleX(${sx})`);
+          if (t.length) span.style.transform = t.join(" ");
+        }
+        if (!cancelled) setTextFor(width);
+      } catch {
+        /* teks tak tersedia — halaman tetap terlihat, hanya tak bisa diseleksi */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [visible, textFor, width, doc, pageNo]);
+
   return (
     <div
       ref={(el) => {
@@ -759,7 +1001,10 @@ function PageView({
         registerRef(el);
       }}
       data-page={pageNo}
-      className="relative shadow-lg"
+      className={cn(
+        "relative shadow-lg",
+        horizontal && "snap-center shrink-0 my-auto"
+      )}
       style={{
         width: `${width}px`,
         height: renderedFor ? undefined : `${height}px`,
@@ -779,6 +1024,14 @@ function PageView({
         ref={canvasRef}
         className="block w-full"
         style={{ display: renderedFor === null ? "none" : "block" }}
+      />
+      {/* Lapisan teks: seleksi diaktifkan saat tak ada alat anotasi aktif */}
+      <div
+        ref={textLayerRef}
+        className={cn(
+          "pdf-text-layer",
+          tool !== "none" && "tool-active"
+        )}
       />
       <AnnotationLayer
         page={pageNo}

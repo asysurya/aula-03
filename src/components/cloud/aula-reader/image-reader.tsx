@@ -95,7 +95,7 @@ export function ImageReader({
   }, [url]);
 
   return (
-    <div className="flex flex-col h-full min-h-0">
+    <div className="flex flex-col flex-1 h-full min-h-0">
       {/* Toolbar */}
       <div className="flex items-center gap-1.5 flex-wrap px-3 py-2 border-b border-border bg-background/95 sticky top-0 z-20">
         <Button

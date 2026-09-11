@@ -148,7 +148,7 @@ export function FilePreview({
             />
             <div
               ref={bodyRef}
-              className={`flex-1 min-h-0 overflow-hidden bg-secondary/30 ${
+              className={`flex flex-col flex-1 min-h-0 overflow-hidden bg-secondary/30 ${
                 isFullscreen ? "bg-black flex items-center justify-center" : ""
               }`}
             >

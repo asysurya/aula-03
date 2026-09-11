@@ -12,6 +12,8 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
+import { toast } from "sonner";
+import { useSelectionMenu, SelectionToolbar } from "./selection-actions";
 import type { OfficeCacheEntry } from "@/components/cloud/buffer-loader";
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -41,6 +43,8 @@ export function EpubReader({
   const [fontSize, setFontSize] = useState(17);
   const [error, setError] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
+  // Menu aksi teks terpilih (Bacakan / Salin) di isi bab.
+  const sel = useSelectionMenu({ containerRef: scrollRef });
 
   // Parse EPUB.
   useEffect(() => {
@@ -198,7 +202,7 @@ export function EpubReader({
   }
 
   return (
-    <div className="flex flex-col h-full min-h-0">
+    <div className="flex flex-col flex-1 h-full min-h-0">
       {/* Toolbar */}
       <div className="flex items-center gap-1.5 flex-wrap px-3 py-2 border-b border-border bg-background/95 sticky top-0 z-20">
         <Button
@@ -280,17 +284,29 @@ export function EpubReader({
           </div>
         ) : null}
 
-        {/* Isi bab */}
-        <div ref={scrollRef} className="flex-1 min-h-0 overflow-auto bg-[#f7f2e7]">
+        {/* Isi bab — teks bisa diseleksi lalu dibacakan / disalin */}
+        <div ref={scrollRef} className="relative flex-1 min-h-0 overflow-auto bg-[#f7f2e7]">
           <div
-            className="mx-auto max-w-2xl px-6 py-8 text-neutral-800 prose-sm"
+            className="mx-auto max-w-2xl px-6 py-8 text-neutral-800 prose-sm select-text"
             style={{ fontSize: `${fontSize}px`, lineHeight: 1.8 }}
           >
             <div
-              className="epub-body [&_h1]:text-2xl [&_h1]:font-bold [&_h1]:mt-6 [&_h1]:mb-3 [&_h2]:text-xl [&_h2]:font-semibold [&_h2]:mt-5 [&_h2]:mb-2 [&_h3]:text-lg [&_h3]:font-semibold [&_h3]:mt-4 [&_p]:my-3 [&_img]:max-w-full [&_img]:rounded-md [&_a]:text-blue-600 [&_a]:underline [&_ul]:list-disc [&_ul]:pl-6 [&_ol]:list-decimal [&_ol]:pl-6 [&_blockquote]:border-l-4 [&_blockquote]:border-neutral-300 [&_blockquote]:pl-4 [&_blockquote]:italic [&_table]:w-full [&_table]:text-sm [&_td]:border [&_td]:p-1.5 [&_th]:border [&_th]:p-1.5 [&_th]:bg-neutral-200"
+              className="epub-body [&_h1]:text-2xl [&_h1]:font-bold [&_h1]:mt-6 [&_h1]:mb-3 [&_h2]:text-xl [&_h2]:font-semibold [&_h2]:mt-5 [&_h2]:mb-2 [&_h3]:text-lg [&_h3]:font-semibold [&_h3]:mt-4 [&_h3]:mb-2 [&_p]:my-3 [&_img]:max-w-full [&_img]:rounded-md [&_a]:text-blue-600 [&_a]:underline [&_ul]:list-disc [&_ul]:pl-6 [&_ol]:list-decimal [&_ol]:pl-6 [&_blockquote]:border-l-4 [&_blockquote]:border-neutral-300 [&_blockquote]:pl-4 [&_blockquote]:italic [&_table]:w-full [&_table]:text-sm [&_td]:border [&_td]:p-1.5 [&_th]:border [&_th]:p-1.5 [&_th]:bg-neutral-200"
               dangerouslySetInnerHTML={{ __html: html }}
             />
           </div>
+          {sel.menu ? (
+            <SelectionToolbar
+              menu={sel.menu}
+              playing={sel.playing}
+              onSpeak={sel.speak}
+              onStopSpeak={sel.stopSpeak}
+              onCopy={(ok) =>
+                ok ? toast.success("Teks tersalin") : toast.error("Gagal menyalin")
+              }
+              onClose={sel.closeMenu}
+            />
+          ) : null}
         </div>
       </div>
     </div>
