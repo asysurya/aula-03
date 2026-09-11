@@ -41,6 +41,7 @@ import { PinnedMessages } from "./pinned-messages";
 import { groupMessages, type ChatMessage, type ChatSender, type GroupInfo } from "./types";
 import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
+import { notifyEvent, markConvSeen } from "@/lib/notify";
 
 function conversationName(c: Conversation): string {
   if (c.kind === "dm") return c.peerName;
@@ -134,6 +135,12 @@ export function ChatView({
     notifEnabledRef.current = readNotifPref();
     baseTitleRef.current = document.title;
   }, []);
+
+  // Percakapan ini sedang dibuka → bersihkan badge tidak-dibaca di
+  // sidebar + reset patokan poller notifikasi global.
+  useEffect(() => {
+    markConvSeen(`${conversation.kind}:${conversation.id}`);
+  }, [conversation.kind, conversation.id]);
 
   function toggleNotif() {
     const next = !notifEnabled;
@@ -300,35 +307,54 @@ export function ChatView({
       serverTime?: string;
     }) => {
       if (data.new?.length) {
-        // Notifikasi ringan: pesan dari ORANG LAIN saat tab tersembunyi.
+        // Notifikasi terpusat (notify.ts): pesan dari ORANG LAIN saat tab
+        // tersembunyi → bunyi + web notification + masuk daftar lonceng.
         const fromOthers = data.new.filter((m) => m.senderId !== myId);
         if (
           fromOthers.length > 0 &&
           typeof document !== "undefined" &&
-          document.hidden
+          document.hidden &&
+          notifEnabledRef.current
         ) {
-          if (notifEnabledRef.current) {
-            playBlip();
-            const last = fromOthers[fromOthers.length - 1];
-            if (
-              typeof Notification !== "undefined" &&
-              Notification.permission === "granted"
-            ) {
-              const snippet = (last.content || "mengirim lampiran").slice(0, 90);
-              try {
-                const n = new Notification(
-                  `${last.sender.name} · ${conversationName(conversation)}`,
-                  { body: snippet, tag: "aula-chat" }
-                );
-                n.onclick = () => {
-                  window.focus();
-                  n.close();
-                };
-              } catch {
-                /* abaikan */
-              }
-            }
+          const last = fromOthers[fromOthers.length - 1];
+          const convRef = {
+            kind: conversation.kind,
+            id: conversation.id,
+            name: conversationName(conversation),
+          };
+          const myUsername = me.user?.username ?? "";
+          const myName = me.user?.name ?? "";
+          const mentionRe = new RegExp(
+            `@(?:${[myUsername, myName]
+              .filter(Boolean)
+              .map((s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+              .join("|")})\\b`,
+            "i"
+          );
+          if (last.assignment) {
+            notifyEvent({
+              kind: "assignment",
+              title: `Tugas baru di ${convRef.name}`,
+              body: `"${last.assignment.title}" dikirim oleh ${last.sender.name}`,
+              conv: convRef,
+            });
+          } else if (mentionRe.test(last.content || "")) {
+            notifyEvent({
+              kind: "mention",
+              title: `${last.sender.name} menyebutmu`,
+              body: (last.content || "").slice(0, 120),
+              conv: convRef,
+            });
+          } else {
+            notifyEvent({
+              kind: "chat",
+              title: `${last.sender.name} · ${convRef.name}`,
+              body: (last.content || "mengirim lampiran").slice(0, 90),
+              conv: convRef,
+            });
           }
+        }
+        if (fromOthers.length > 0 && document.hidden) {
           unseenCountRef.current += fromOthers.length;
           document.title = `(${unseenCountRef.current}) ${
             baseTitleRef.current || "Aula"

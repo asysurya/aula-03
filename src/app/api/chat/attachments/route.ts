@@ -1,7 +1,7 @@
 import { NextRequest } from "next/server";
 import { db } from "@/lib/db";
 import { requireUser } from "@/lib/session";
-import { ALLOWED_MIMES, MAX_FILE_SIZE, saveFile } from "@/lib/storage";
+import { MAX_FILE_SIZE, saveFile } from "@/lib/storage";
 import { resolveMime } from "@/lib/file-constants";
 
 // Upload lampiran chat bisa menyentuh MEGA (login + upload) — beri waktu
@@ -83,13 +83,8 @@ export async function POST(req: NextRequest) {
 
   // Mimetype final: pakai mimetype OS kalau valid, kalau tidak → infer dari
   // ekstensi (file Android/OS lama sering kosong atau salah).
+  // SEMUA tipe file diterima (pratinjau ditangani Aula Reader).
   const mimetype = resolveMime(file.name, file.type);
-  if (!ALLOWED_MIMES.has(mimetype)) {
-    return Response.json(
-      { error: "MIME_NOT_ALLOWED", mimetype },
-      { status: 415 }
-    );
-  }
 
   // Verify the user is a member of the conversation.
   const ok = await assertMembership(kind, id, user.id);

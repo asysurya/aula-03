@@ -2,7 +2,8 @@ import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { db } from "@/lib/db";
 import { requireUser } from "@/lib/session";
-import { ALLOWED_MIMES, MAX_FILE_SIZE } from "@/lib/storage";
+import { MAX_FILE_SIZE } from "@/lib/storage";
+import { resolveMime } from "@/lib/file-constants";
 
 // POST /api/upload/init — mulai sesi upload berchunk untuk file besar.
 //
@@ -79,12 +80,10 @@ export async function POST(req: NextRequest) {
       { status: 413 }
     );
   }
-  if (!ALLOWED_MIMES.has(mimetype)) {
-    return NextResponse.json(
-      { error: "MIME_NOT_ALLOWED", mimetype },
-      { status: 415 }
-    );
-  }
+
+  // Semua tipe file diterima — mimetype hanya dinormalisasi (OS mime →
+  // ekstensi → octet-stream); tipe asli dikoreksi lagi saat serving.
+  const finalMime = resolveMime(name, mimetype);
 
   await cleanupExpired();
 
@@ -92,7 +91,7 @@ export async function POST(req: NextRequest) {
   const session = await db.uploadSession.create({
     data: {
       name,
-      mimetype,
+      mimetype: finalMime,
       size,
       chunkSize: CHUNK_SIZE,
       chunkCount,

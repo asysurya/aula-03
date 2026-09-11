@@ -11,7 +11,7 @@ import {
   type ClassroomRole,
   type UserRole,
 } from "@/lib/cloud-perms";
-import { ALLOWED_MIMES, MAX_FILE_SIZE, saveFile, deleteFile } from "@/lib/storage";
+import { MAX_FILE_SIZE, saveFile, deleteFile } from "@/lib/storage";
 import { resolveMime } from "@/lib/file-constants";
 import { megaUploadTo, describeMegaError, type MegaAccountLike } from "@/lib/mega-storage";
 import { canWriteMount } from "@/lib/mount-access";
@@ -56,16 +56,14 @@ function fail(
   return { status, body: { error, ...extra } };
 }
 
-// Validasi file standar: tidak kosong, ≤ MAX_FILE_SIZE, mimetype diizinkan.
-// Mimetype dinormalisasi dulu: OS bisa mengirim mimetype kosong/salah —
-// infer dari ekstensi (resolveMime) sebelum dicek.
+// Validasi file standar: tidak kosong, ≤ MAX_FILE_SIZE. SEMUA tipe file
+// diterima — mimetype OS bisa kosong/salah, jadi dinormalisasi dulu
+// (resolveMime: OS mime → ekstensi → octet-stream).
 function validateStandard(file: UploadBytes): ActionResult | null {
   file.mimetype = resolveMime(file.name, file.mimetype);
   if (file.size === 0) return fail("FILE_EMPTY", 400);
   if (file.size > MAX_FILE_SIZE)
     return fail("FILE_TOO_LARGE", 413, { maxBytes: MAX_FILE_SIZE });
-  if (!ALLOWED_MIMES.has(file.mimetype))
-    return fail("MIME_NOT_ALLOWED", 415, { mimetype: file.mimetype });
   return null;
 }
 
@@ -465,7 +463,8 @@ export async function uploadFormImageAction(
 ): Promise<ActionResult> {
   if (file.size === 0) return fail("FILE_EMPTY", 400);
   if (file.size > MAX_FILE_SIZE) return fail("FILE_TOO_LARGE", 413);
-  if (!ALLOWED_MIMES.has(file.mimetype) || !file.mimetype.startsWith("image/")) {
+  file.mimetype = resolveMime(file.name, file.mimetype);
+  if (!file.mimetype.startsWith("image/")) {
     return fail("IMAGE_REQUIRED", 415);
   }
 

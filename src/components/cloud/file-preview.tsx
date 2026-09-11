@@ -13,6 +13,8 @@ import {
   Maximize2,
   Minimize2,
   ExternalLink,
+  BookOpenText,
+  Monitor,
 } from "lucide-react";
 import {
   Dialog,
@@ -20,6 +22,14 @@ import {
   DialogTitle,
   DialogDescription,
 } from "@/components/ui/dialog";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
@@ -29,302 +39,29 @@ import ReactMarkdown from "react-markdown";
 import { filePublicUrl } from "@/lib/file-constants";
 import { formatBytes, type CloudFileItem } from "@/lib/cloud-format";
 import { useTransferStore } from "@/lib/transfer-store";
-
-// ───────────────────────── Klasifikasi tipe preview ─────────────────────────
-// Diputuskan dari mimetype DAN ekstensi (mimetype DB bisa keliru — mis.
-// PDF yang di-rename .docx). File office dicek ulang lewat magic bytes
-// setelah diunduh (lihat useOfficeBuffer).
-
-type PreviewKind =
-  | "image"
-  | "pdf"
-  | "video"
-  | "audio"
-  | "text"
-  | "markdown"
-  | "docx"
-  | "xlsx"
-  | "pptx"
-  | "archive"
-  | "binary-office"
-  | "other";
-
-const EXT_KIND: Record<string, PreviewKind> = {
-  // gambar
-  pdf: "pdf",
-  png: "image",
-  jpg: "image",
-  jpeg: "image",
-  jpe: "image",
-  gif: "image",
-  webp: "image",
-  svg: "image",
-  bmp: "image",
-  ico: "image",
-  tif: "image",
-  tiff: "image",
-  avif: "image",
-  // video
-  mp4: "video",
-  m4v: "video",
-  webm: "video",
-  mov: "video",
-  mkv: "video",
-  avi: "video",
-  wmv: "video",
-  flv: "video",
-  // audio
-  mp3: "audio",
-  wav: "audio",
-  ogg: "audio",
-  oga: "audio",
-  m4a: "audio",
-  flac: "audio",
-  aac: "audio",
-  opus: "audio",
-  // teks & kode
-  txt: "text",
-  log: "text",
-  ini: "text",
-  cfg: "text",
-  conf: "text",
-  env: "text",
-  json: "text",
-  jsonl: "text",
-  ndjson: "text",
-  xml: "text",
-  html: "text",
-  htm: "text",
-  css: "text",
-  js: "text",
-  mjs: "text",
-  cjs: "text",
-  ts: "text",
-  tsx: "text",
-  jsx: "text",
-  py: "text",
-  rb: "text",
-  php: "text",
-  java: "text",
-  c: "text",
-  h: "text",
-  cpp: "text",
-  cs: "text",
-  go: "text",
-  rs: "text",
-  sh: "text",
-  bat: "text",
-  sql: "text",
-  yaml: "text",
-  yml: "text",
-  toml: "text",
-  ics: "text",
-  vcf: "text",
-  eml: "text",
-  md: "markdown",
-  markdown: "markdown",
-  // office
-  csv: "xlsx",
-  tsv: "xlsx",
-  xls: "xlsx",
-  xlsx: "xlsx",
-  xlsm: "xlsx",
-  ods: "xlsx",
-  doc: "docx",
-  docx: "docx",
-  docm: "docx",
-  odt: "docx",
-  ppt: "pptx",
-  pptx: "pptx",
-  pptm: "pptx",
-  odp: "pptx",
-  // arsip
-  zip: "archive",
-  rar: "archive",
-  "7z": "archive",
-  tar: "archive",
-  gz: "archive",
-  bz2: "archive",
-  xz: "archive",
-  epub: "archive",
-  rtf: "binary-office",
-};
-
-function ext(name: string): string {
-  const parts = (name || "").split(".");
-  return parts.length > 1 ? (parts.pop() ?? "").toLowerCase() : "";
-}
+import {
+  classify as classifyKind,
+  ext as fileExt,
+  docxHtmlCache,
+  xlsxSheetsCache,
+  useOfficeBuffer,
+  type OfficeCacheEntry,
+  type PreviewKind,
+} from "./buffer-loader";
+import { AulaReader } from "./aula-reader/aula-reader";
+import {
+  ModeChooser,
+  loadPreviewPref,
+  savePreviewPref,
+  type PreviewMode,
+} from "./aula-reader/mode-chooser";
 
 function classify(mime: string, name: string): PreviewKind {
-  const e = ext(name);
-  if (EXT_KIND[e]) return EXT_KIND[e];
-  if (mime.startsWith("image/")) return "image";
-  if (mime === "application/pdf") return "pdf";
-  if (mime.startsWith("video/")) return "video";
-  if (mime.startsWith("audio/")) return "audio";
-  if (mime === "text/markdown") return "markdown";
-  if (
-    mime === "text/plain" ||
-    mime === "application/json" ||
-    mime === "text/x-shellscript" ||
-    mime === "text/javascript" ||
-    mime.startsWith("text/")
-  )
-    return "text";
-  if (
-    mime === "application/vnd.openxmlformats-officedocument.wordprocessingml.document" ||
-    mime === "application/msword" ||
-    mime === "application/vnd.oasis.opendocument.text"
-  )
-    return "docx";
-  if (
-    mime === "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" ||
-    mime === "application/vnd.ms-excel" ||
-    mime === "text/csv" ||
-    mime === "application/vnd.oasis.opendocument.spreadsheet"
-  )
-    return "xlsx";
-  if (
-    mime === "application/vnd.openxmlformats-officedocument.presentationml.presentation" ||
-    mime === "application/vnd.ms-powerpoint" ||
-    mime === "application/vnd.oasis.opendocument.presentation"
-  )
-    return "pptx";
-  if (
-    /zip|rar|7z|tar|gzip|bzip2|xz|epub|compressed/.test(mime)
-  )
-    return "archive";
-  return "other";
+  return classifyKind(mime, name);
 }
 
-// ───────────────────────── Cache client (anti-lag buka ulang) ─────────────────────────
-// ArrayBuffer + hasil konversi office di-cache per storageKey → membuka
-// file yang sama lagi instan (tanpa unduh ulang / konversi ulang).
-
-interface OfficeCacheEntry {
-  buffer: ArrayBuffer;
-  /** "pdf" bila ternyata PDF (mis. di-rename .docx) */
-  actualKind: "pdf" | "office" | "unknown";
-  objectUrl: string;
-}
-
-const officeBufferCache = new Map<string, OfficeCacheEntry>();
-const docxHtmlCache = new Map<string, string>();
-const xlsxSheetsCache = new Map<string, { name: string; html: string }[]>();
-
-function cacheSet(key: string, entry: OfficeCacheEntry) {
-  if (officeBufferCache.size > 8) {
-    // Buang entri tertua.
-    const first = officeBufferCache.keys().next().value as string | undefined;
-    if (first) {
-      const old = officeBufferCache.get(first);
-      if (old) URL.revokeObjectURL(old.objectUrl);
-      officeBufferCache.delete(first);
-    }
-  }
-  officeBufferCache.set(key, entry);
-}
-
-// ───────────────────────── fetch + progress ─────────────────────────
-
-interface FetchProgress {
-  loaded: number;
-  total: number | null;
-}
-
-async function fetchArrayBufferWithProgress(
-  url: string,
-  onProgress?: (p: FetchProgress) => void
-): Promise<ArrayBuffer> {
-  const res = await fetch(url);
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  const totalHeader = res.headers.get("content-length");
-  const total = totalHeader ? parseInt(totalHeader, 10) : null;
-
-  if (!res.body) {
-    onProgress?.({ loaded: 0, total });
-    return res.arrayBuffer();
-  }
-
-  const reader = res.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let loaded = 0;
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    if (value) {
-      chunks.push(value);
-      loaded += value.byteLength;
-      onProgress?.({ loaded, total });
-    }
-  }
-  const merged = new Uint8Array(loaded);
-  let pos = 0;
-  for (const c of chunks) {
-    merged.set(c, pos);
-    pos += c.byteLength;
-  }
-  return merged.buffer;
-}
-
-// ───────────────────────── Hook buffer office ─────────────────────────
-
-function useOfficeBuffer(file: CloudFileItem, url: string) {
-  const key = file.storageKey;
-  const cached = officeBufferCache.get(key);
-  const [entry, setEntry] = useState<OfficeCacheEntry | null>(cached ?? null);
-  const [error, setError] = useState<string | null>(null);
-  const [progress, setProgress] = useState<FetchProgress | null>(
-    cached ? null : { loaded: 0, total: null }
-  );
-
-  const [prevKey, setPrevKey] = useState(key);
-  if (prevKey !== key) {
-    setPrevKey(key);
-    const c = officeBufferCache.get(key);
-    setEntry(c ?? null);
-    setError(null);
-    setProgress(c ? null : { loaded: 0, total: null });
-  }
-
-  useEffect(() => {
-    if (entry || error) return;
-    let cancelled = false;
-    (async () => {
-      try {
-        const buffer = await fetchArrayBufferWithProgress(url, (p) => {
-          if (!cancelled) setProgress(p);
-        });
-        const head = new Uint8Array(buffer, 0, Math.min(8, buffer.byteLength));
-        const isPdf =
-          head.length >= 4 &&
-          head[0] === 0x25 && // %
-          head[1] === 0x50 && // P
-          head[2] === 0x44 && // D
-          head[3] === 0x46; // F
-        const e: OfficeCacheEntry = {
-          buffer,
-          actualKind: isPdf ? "pdf" : "office",
-          objectUrl: URL.createObjectURL(new Blob([buffer])),
-        };
-        cacheSet(key, e);
-        if (!cancelled) {
-          setEntry(e);
-          setProgress(null);
-        }
-      } catch (err) {
-        if (!cancelled) {
-          setError(err instanceof Error ? err.message : "Gagal memuat file");
-          setProgress(null);
-        }
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [key, url, entry, error]);
-
-  return { entry, error, progress };
+function ext(name: string): string {
+  return fileExt(name);
 }
 
 // ───────────────────────── Component utama ─────────────────────────
@@ -339,12 +76,36 @@ export function FilePreview({
   const open = file !== null;
   const bodyRef = useRef<HTMLDivElement>(null);
   const [isFullscreen, setIsFullscreen] = useState(false);
+  // Mode pratinjau: "ask" (pilih tiap kali) | "aula" (Aula Reader) |
+  // "native" (pratinjau bawaan). Preferensi tersimpan per perangkat.
+  const [mode, setMode] = useState<PreviewMode>(() => loadPreviewPref());
+  const [fileKey, setFileKey] = useState<string | null>(
+    file?.storageKey ?? null
+  );
+
+  // File berubah → mode mengikuti preferensi tersimpan.
+  if (file && fileKey !== file.storageKey) {
+    setFileKey(file.storageKey);
+    setMode(loadPreviewPref());
+  }
 
   useEffect(() => {
     const onFsChange = () => setIsFullscreen(!!document.fullscreenElement);
     document.addEventListener("fullscreenchange", onFsChange);
     return () => document.removeEventListener("fullscreenchange", onFsChange);
   }, []);
+
+  function pickMode(m: "aula" | "native", always: boolean) {
+    setMode(m);
+    if (always) {
+      savePreviewPref(m);
+      toast.info(
+        m === "aula"
+          ? "Selanjutnya file otomatis dibuka dengan Aula Reader."
+          : "Selanjutnya file otomatis dibuka dengan pratinjau bawaan."
+      );
+    }
+  }
 
   async function toggleFullscreen() {
     try {
@@ -369,13 +130,19 @@ export function FilePreview({
       }}
     >
       <DialogContent
-        className="sm:max-w-5xl max-h-[92vh] flex flex-col p-0 gap-0 overflow-hidden"
+        className="sm:max-w-6xl max-h-[92vh] w-[96vw] flex flex-col p-0 gap-0 overflow-hidden"
         onOpenAutoFocus={(e) => e.preventDefault()}
       >
         {file ? (
           <div className="flex flex-col min-h-0 flex-1">
             <PreviewHeader
               file={file}
+              mode={mode}
+              onSetMode={pickMode}
+              onResetMode={() => {
+                savePreviewPref("ask");
+                setMode("ask");
+              }}
               isFullscreen={isFullscreen}
               onToggleFullscreen={toggleFullscreen}
             />
@@ -385,11 +152,21 @@ export function FilePreview({
                 isFullscreen ? "bg-black flex items-center justify-center" : ""
               }`}
             >
-              <PreviewBody
-                key={file.storageKey}
-                file={file}
-                fullscreen={isFullscreen}
-              />
+              {mode === "ask" ? (
+                <ModeChooser onPick={pickMode} />
+              ) : mode === "aula" ? (
+                <AulaReader
+                  key={file.storageKey}
+                  file={file}
+                  onOpenNative={() => setMode("native")}
+                />
+              ) : (
+                <PreviewBody
+                  key={file.storageKey}
+                  file={file}
+                  fullscreen={isFullscreen}
+                />
+              )}
             </div>
           </div>
         ) : null}
@@ -400,10 +177,16 @@ export function FilePreview({
 
 function PreviewHeader({
   file,
+  mode,
+  onSetMode,
+  onResetMode,
   isFullscreen,
   onToggleFullscreen,
 }: {
   file: CloudFileItem;
+  mode: PreviewMode;
+  onSetMode: (m: "aula" | "native", always: boolean) => void;
+  onResetMode: () => void;
   isFullscreen: boolean;
   onToggleFullscreen: () => void;
 }) {
@@ -441,6 +224,59 @@ function PreviewHeader({
         </DialogDescription>
       </div>
       <div className="flex items-center gap-1.5 shrink-0">
+        {/* Pemilih mode pratinjau */}
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button
+              size="sm"
+              variant="outline"
+              className="gap-1.5"
+              title="Ganti cara menampilkan pratinjau"
+            >
+              {mode === "aula" ? (
+                <BookOpenText className="size-4 text-primary" />
+              ) : (
+                <Monitor className="size-4" />
+              )}
+              <span className="hidden sm:inline">
+                {mode === "aula"
+                  ? "Aula Reader"
+                  : mode === "native"
+                  ? "Bawaan"
+                  : "Mode"}
+              </span>
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end" className="w-64">
+            <DropdownMenuLabel>Cara menampilkan pratinjau</DropdownMenuLabel>
+            <DropdownMenuItem
+              onClick={() => onSetMode("aula", true)}
+              className={mode === "aula" ? "bg-accent" : ""}
+            >
+              <BookOpenText className="size-4" /> Aula Reader
+              <span className="ml-auto text-[10px] text-muted-foreground">
+                selalu
+              </span>
+            </DropdownMenuItem>
+            <DropdownMenuItem
+              onClick={() => onSetMode("native", true)}
+              className={mode === "native" ? "bg-accent" : ""}
+            >
+              <Monitor className="size-4" /> Pratinjau Bawaan
+              <span className="ml-auto text-[10px] text-muted-foreground">
+                selalu
+              </span>
+            </DropdownMenuItem>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem
+              onClick={() => {
+                onResetMode();
+              }}
+            >
+              Tanya setiap kali file dibuka
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
         <Button
           size="sm"
           variant="outline"
@@ -496,7 +332,7 @@ function PreviewHeader({
 
 // ───────────────────────── Body dispatcher ─────────────────────────
 
-function PreviewBody({
+export function PreviewBody({
   file,
   fullscreen,
 }: {

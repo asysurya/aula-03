@@ -25,7 +25,6 @@ import {
 } from "@/components/ui/popover";
 import { FileIcon } from "@/components/cloud/file-icon";
 import {
-  ALLOWED_MIMES,
   formatBytes,
   isImageMime,
   MAX_ATTACHMENTS_PER_MESSAGE,
@@ -408,12 +407,7 @@ export function MessageInput({
         continue;
       }
       // Mimetype OS bisa kosong/salah (khususnya Android) — infer dari
-      // ekstensi dulu sebelum menolak.
-      const mt = resolveMime(f.name, f.type);
-      if (!ALLOWED_MIMES.has(mt)) {
-        toast.error(`Tipe file "${f.name}" tidak didukung`);
-        continue;
-      }
+      // ekstensi. SEMUA tipe file diterima.
       toAdd.push(f);
     }
     if (toAdd.length === 0) return;

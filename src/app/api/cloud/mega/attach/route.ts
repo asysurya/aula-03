@@ -3,7 +3,7 @@ import { db } from "@/lib/db";
 import { requireUser } from "@/lib/session";
 import { canViewMount } from "@/lib/mount-access";
 import { megaStat, describeMegaError } from "@/lib/mega-storage";
-import { ALLOWED_MIMES, MAX_FILE_SIZE } from "@/lib/storage";
+import { MAX_FILE_SIZE } from "@/lib/storage";
 import { resolveMime } from "@/lib/file-constants";
 
 // POST /api/cloud/mega/attach
@@ -112,12 +112,6 @@ export async function POST(req: NextRequest) {
   }
 
   const mimetype = resolveMime(stat.name, "");
-  if (!ALLOWED_MIMES.has(mimetype)) {
-    return NextResponse.json(
-      { error: `Tipe file "${stat.name}" tidak didukung.`, mimetype },
-      { status: 415 }
-    );
-  }
 
   const storageKey = `mega:${account.id}:${nodeId}`;
 

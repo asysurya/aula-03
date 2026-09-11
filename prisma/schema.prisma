@@ -343,6 +343,21 @@ model DatabaseConnection {
   lastCheckedAt DateTime?
   lastError     String?
   latencyMs     Int?
+
+  // ── Multi-MongoDB: rantai prioritas + pemantauan usage ──
+  // priority: urutan dalam rantai failover (1 = tertinggi). null = belum
+  // ditata (diperlakukan paling bawah, diurut createdAt).
+  priority      Int?
+  // quotaBytes: batas kuota URI ini (default 512 MB = Atlas free tier).
+  quotaBytes    BigInt?
+  // Hasil dbStats terakhir (byte) — di-refresh tombol "Tes Koneksi" /
+  // "Perbarui Usage" dan otomatis saat panel dibuka bila data basi.
+  dataSize      BigInt?
+  storageSize  BigInt?
+  indexSize     BigInt?
+  objects       Int?
+  usageCheckedAt DateTime?
+
   createdAt     DateTime  @default(now())
   updatedAt     DateTime  @updatedAt
 }

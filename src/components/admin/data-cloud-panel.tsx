@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -42,11 +42,15 @@ import {
   Pencil,
   Trash2,
   Loader2,
-  Star,
   Zap,
   AlertCircle,
   Info,
   RefreshCw,
+  ArrowUp,
+  ArrowDown,
+  Copy,
+  HardDrive,
+  TriangleAlert,
 } from "lucide-react";
 import { toast } from "sonner";
 import { formatDistanceToNow, format } from "date-fns";
@@ -73,6 +77,18 @@ interface DatabaseConnection {
   lastCheckedAt: string | null;
   lastError: string | null;
   latencyMs: number | null;
+  priority: number | null;
+  chainIndex: number;
+  isLive: boolean;
+  quotaBytes: number | null;
+  dataSize: number | null;
+  storageSize: number | null;
+  indexSize: number | null;
+  objects: number | null;
+  usageCheckedAt: string | null;
+  usageTotal: number | null;
+  usagePercent: number | null;
+  usageLevel: "ok" | "warn" | "full" | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -156,8 +172,12 @@ function InfoBanner() {
           <b>S3-compatible</b> (Cloudflare R2 / Backblaze B2 / Spaces).
         </p>
         <p className="text-emerald-700 dark:text-emerald-300/80">
-          Koneksi <b>MongoDB</b> di sini hanya untuk monitoring/status — DB
-          aplikasi (Aula) sendiri diatur lewat env <code className="font-mono">DATABASE_URL</code>.
+          <b>Database MongoDB</b> mendukung multi-URI: susun rantai
+          prioritas (naik/turun), pantau <b>usage</b> tiap URI (data/index/kuota),
+          dan bila database aktif mendekati penuh — panel ini memberi
+          peringatan + panduan pindah ke URI berikutnya. URI yang sedang
+          dipakai aplikasi ditandai <b>LIVE</b> (dicocokkan dengan env
+          <code className="font-mono"> DATABASE_URL</code>).
         </p>
       </div>
     </div>
@@ -166,14 +186,69 @@ function InfoBanner() {
 
 // ─────────────────────── Database Connections ───────────────────────
 
+/** Bar pemakaian + rincian usage satu koneksi MongoDB. */
+function UsageBar({ c }: { c: DatabaseConnection }) {
+  if (c.type !== "mongodb") return null;
+  if (!c.usageCheckedAt || c.usageTotal == null) {
+    return (
+      <p className="text-xs text-muted-foreground">
+        Usage belum dipantau — klik “Tes Koneksi” atau “Perbarui Usage”.
+      </p>
+    );
+  }
+  const pct = c.usagePercent;
+  const barColor =
+    c.usageLevel === "full"
+      ? "[&>div]:bg-red-500"
+      : c.usageLevel === "warn"
+        ? "[&>div]:bg-amber-500"
+        : "[&>div]:bg-emerald-500";
+  return (
+    <div className="space-y-1.5">
+      <div className="flex items-center justify-between gap-2 flex-wrap">
+        <span className="inline-flex items-center gap-1.5 text-xs text-muted-foreground">
+          <HardDrive className="h-3.5 w-3.5" />
+          {c.quotaBytes
+            ? `Terpakai ${formatBytes(c.usageTotal)} / ${formatBytes(c.quotaBytes)}${
+                pct != null ? ` · ${pct}%` : ""
+              }`
+            : `Total ${formatBytes(c.usageTotal)}`}
+        </span>
+        {c.usageLevel === "full" ? (
+          <Badge className="bg-red-100 text-red-700 dark:bg-red-950/50 dark:text-red-400 border-red-200 dark:border-red-900 text-[10px]">
+            PENUH
+          </Badge>
+        ) : c.usageLevel === "warn" ? (
+          <Badge className="bg-amber-100 text-amber-700 dark:bg-amber-950/50 dark:text-amber-400 border-amber-200 dark:border-amber-900 text-[10px]">
+            HAMPIR PENUH
+          </Badge>
+        ) : null}
+      </div>
+      <Progress value={pct ?? 0} className={cn("h-1.5", barColor)} />
+      <div className="flex flex-wrap gap-x-3 gap-y-0.5 text-[11px] text-muted-foreground">
+        <span>Data: {c.dataSize != null ? formatBytes(c.dataSize) : "—"}</span>
+        <span>Index: {c.indexSize != null ? formatBytes(c.indexSize) : "—"}</span>
+        <span>Objek: {c.objects != null ? c.objects.toLocaleString("id-ID") : "—"}</span>
+        <span>Dicek: {relativeTime(c.usageCheckedAt)}</span>
+      </div>
+    </div>
+  );
+}
+
 function DatabaseConnectionsSection() {
   const qc = useQueryClient();
   const [createOpen, setCreateOpen] = useState(false);
   const [editC, setEditC] = useState<DatabaseConnection | null>(null);
   const [deleteC, setDeleteC] = useState<DatabaseConnection | null>(null);
   const [testingId, setTestingId] = useState<string | null>(null);
+  const [syncing, setSyncing] = useState(false);
+  const [guideOpen, setGuideOpen] = useState(false);
+  const autoSyncedRef = useRef(false);
 
-  const { data, isLoading } = useQuery<{ connections: DatabaseConnection[] }>({
+  const { data, isLoading } = useQuery<{
+    connections: DatabaseConnection[];
+    liveMatched?: boolean;
+  }>({
     queryKey: ["admin-db-connections"],
     queryFn: async () => {
       const res = await fetch("/api/admin/database-connections", { cache: "no-store" });
@@ -183,6 +258,73 @@ function DatabaseConnectionsSection() {
   });
 
   const connections = data?.connections ?? [];
+  const liveConn = connections.find((c) => c.isLive) ?? null;
+  const liveNeedsAttention =
+    liveConn != null && (liveConn.usageLevel === "warn" || liveConn.usageLevel === "full");
+  // Cadangan berikutnya: koneksi aktif teratas yang bukan database live.
+  const nextConn =
+    connections.find((c) => c.active && !c.isLive && c.type === "mongodb") ?? null;
+
+  // Auto-refresh usage saat panel dibuka bila data basi (>10 menit / belum ada).
+  useEffect(() => {
+    if (autoSyncedRef.current || isLoading || connections.length === 0) return;
+    const candidates = connections.filter(
+      (c) => c.active && c.type === "mongodb"
+    );
+    if (candidates.length === 0) return;
+    const stale = candidates.some(
+      (c) =>
+        !c.usageCheckedAt ||
+        Date.now() - new Date(c.usageCheckedAt).getTime() > 10 * 60_000
+    );
+    if (!stale) return;
+    autoSyncedRef.current = true;
+    (async () => {
+      try {
+        const res = await fetch("/api/admin/database-connections/sync-usage", {
+          method: "POST",
+        });
+        if (res.ok) {
+          qc.invalidateQueries({ queryKey: ["admin-db-connections"] });
+        }
+      } catch {
+        /* diam — bisa diperbarui manual */
+      }
+    })();
+  }, [isLoading, connections, qc]);
+
+  const copyUri = async (c: DatabaseConnection) => {
+    try {
+      const res = await fetch(`/api/admin/database-connections/${c.id}/reveal`, {
+        method: "POST",
+      });
+      if (!res.ok) throw new Error();
+      const d = (await res.json()) as { uri: string };
+      await navigator.clipboard.writeText(d.uri);
+      toast.success(`URI "${c.name}" disalin ke clipboard`);
+    } catch {
+      toast.error("Gagal menyalin URI");
+    }
+  };
+
+  const syncAll = async () => {
+    setSyncing(true);
+    try {
+      const res = await fetch("/api/admin/database-connections/sync-usage", {
+        method: "POST",
+      });
+      if (!res.ok) throw new Error();
+      const d = (await res.json()) as { ok: number; checked: number };
+      qc.invalidateQueries({ queryKey: ["admin-db-connections"] });
+      toast.success(
+        d.checked > 0 ? `Usage diperbarui · ${d.ok}/${d.checked} terhubung` : "Tidak ada koneksi aktif"
+      );
+    } catch {
+      toast.error("Gagal memperbarui usage");
+    } finally {
+      setSyncing(false);
+    }
+  };
 
   const toggleActive = useMutation({
     mutationFn: async (c: DatabaseConnection) => {
@@ -197,6 +339,19 @@ function DatabaseConnectionsSection() {
     onError: () => toast.error("Gagal mengubah status"),
   });
 
+  const moveMut = useMutation({
+    mutationFn: async ({ id, move }: { id: string; move: "up" | "down" }) => {
+      const res = await fetch(`/api/admin/database-connections/${id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ move }),
+      });
+      if (!res.ok) throw new Error();
+    },
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["admin-db-connections"] }),
+    onError: () => toast.error("Gagal memindahkan prioritas"),
+  });
+
   const testMut = useMutation({
     mutationFn: async (id: string) => {
       setTestingId(id);
@@ -209,7 +364,7 @@ function DatabaseConnectionsSection() {
     onSuccess: (data: { status: string; latencyMs?: number; error?: string }) => {
       qc.invalidateQueries({ queryKey: ["admin-db-connections"] });
       if (data.status === "connected") {
-        toast.success(`Terhubung · ${data.latencyMs ?? 0} ms`);
+        toast.success(`Terhubung · ${data.latencyMs ?? 0} ms — usage diperbarui`);
       } else if (data.status === "error") {
         toast.error(data.error || "Koneksi gagal");
       } else {
@@ -244,16 +399,94 @@ function DatabaseConnectionsSection() {
         <div className="flex items-center gap-2">
           <Database className="h-4 w-4 text-primary" />
           <div>
-            <h3 className="font-semibold leading-tight">Database Connections</h3>
+            <h3 className="font-semibold leading-tight">Database MongoDB — Multi-URI</h3>
             <p className="text-xs text-muted-foreground">
-              {connections.length} koneksi · monitoring status
+              {connections.length} URI · rantai prioritas failover
             </p>
           </div>
         </div>
-        <Button size="sm" onClick={() => setCreateOpen(true)} className="gap-1.5">
-          <Plus className="h-4 w-4" /> Tambah
-        </Button>
+        <div className="flex items-center gap-1.5">
+          <Button
+            size="sm"
+            variant="outline"
+            className="gap-1.5"
+            onClick={syncAll}
+            disabled={syncing}
+          >
+            <RefreshCw className={cn("h-4 w-4", syncing && "animate-spin")} />
+            Perbarui Usage
+          </Button>
+          <Button size="sm" onClick={() => setCreateOpen(true)} className="gap-1.5">
+            <Plus className="h-4 w-4" /> Tambah
+          </Button>
+        </div>
       </div>
+
+      {data && !data.liveMatched ? (
+        <div className="rounded-lg border border-blue-200 dark:border-blue-900/50 bg-blue-50 dark:bg-blue-950/30 px-3 py-2 text-xs text-blue-900 dark:text-blue-200 flex gap-2">
+          <Info className="h-3.5 w-3.5 shrink-0 mt-0.5" />
+          <span>
+            Belum ada koneksi yang cocok dengan <code className="font-mono">DATABASE_URL</code> yang
+            sedang dipakai aplikasi. Tambahkan koneksi dengan URI yang sama untuk memantau usage
+            database live (akan ditandai <b>LIVE</b>).
+          </span>
+        </div>
+      ) : null}
+
+      {liveNeedsAttention && liveConn ? (
+        <div
+          className={cn(
+            "rounded-lg border px-4 py-3 text-sm flex gap-2.5",
+            liveConn.usageLevel === "full"
+              ? "border-red-200 dark:border-red-900/50 bg-red-50 dark:bg-red-950/30"
+              : "border-amber-200 dark:border-amber-900/50 bg-amber-50 dark:bg-amber-950/30"
+          )}
+        >
+          <TriangleAlert
+            className={cn(
+              "h-4 w-4 shrink-0 mt-0.5",
+              liveConn.usageLevel === "full"
+                ? "text-red-600 dark:text-red-400"
+                : "text-amber-600 dark:text-amber-400"
+            )}
+          />
+          <div className="space-y-1.5 min-w-0">
+            <p
+              className={cn(
+                liveConn.usageLevel === "full"
+                  ? "text-red-900 dark:text-red-100"
+                  : "text-amber-900 dark:text-amber-100"
+              )}
+            >
+              <b>{liveConn.name}</b> — database yang sedang dipakai aplikasi — sudah{" "}
+              <b>{liveConn.usagePercent ?? "?"}%</b> terpakai
+              {liveConn.quotaBytes && liveConn.usageTotal != null
+                ? ` (${formatBytes(liveConn.usageTotal)} / ${formatBytes(liveConn.quotaBytes)})`
+                : ""}
+              .
+            </p>
+            <p className="text-xs text-muted-foreground">
+              Saat kuota habis, penulisan data baru akan gagal. Siapkan pindah ke URI cadangan
+              berikutnya sekarang.
+            </p>
+            <div className="flex flex-wrap gap-2 pt-1">
+              {nextConn ? (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="gap-1.5"
+                  onClick={() => copyUri(nextConn)}
+                >
+                  <Copy className="h-3.5 w-3.5" /> Salin URI “{nextConn.name}”
+                </Button>
+              ) : null}
+              <Button size="sm" onClick={() => setGuideOpen(true)}>
+                Panduan Pindah Database
+              </Button>
+            </div>
+          </div>
+        </div>
+      ) : null}
 
       {isLoading ? (
         <div className="text-center text-muted-foreground py-8 text-sm">
@@ -268,23 +501,27 @@ function DatabaseConnectionsSection() {
         </Card>
       ) : (
         <div className="space-y-2">
-          {connections.map((c) => (
+          {connections.map((c, i) => (
             <Card key={c.id}>
               <CardHeader className="pb-2">
                 <div className="flex items-start justify-between gap-2">
-                  <div className="flex items-center gap-2 min-w-0">
-                    <CardTitle className="text-base flex items-center gap-1.5 truncate">
-                      {c.name}
-                      {c.isPrimary ? (
-                        <Star className="h-3.5 w-3.5 fill-amber-500 text-amber-500" />
-                      ) : null}
-                    </CardTitle>
+                  <div className="flex items-center gap-2 min-w-0 flex-wrap">
+                    <Badge className="bg-primary/10 text-primary font-mono text-[10px] shrink-0">
+                      #{i + 1}
+                    </Badge>
+                    <CardTitle className="text-base truncate">{c.name}</CardTitle>
                     <Badge
                       variant="secondary"
-                      className="bg-primary/10 text-primary font-mono text-[10px]"
+                      className="font-mono text-[10px]"
                     >
                       {c.type}
                     </Badge>
+                    {c.isLive ? (
+                      <Badge className="bg-emerald-100 text-emerald-700 dark:bg-emerald-950/50 dark:text-emerald-400 border-emerald-200 dark:border-emerald-900 gap-1 text-[10px] shrink-0">
+                        <span className="h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                        LIVE
+                      </Badge>
+                    ) : null}
                   </div>
                   <StatusBadge status={c.lastStatus} />
                 </div>
@@ -293,6 +530,7 @@ function DatabaseConnectionsSection() {
                 <div className="text-xs font-mono text-muted-foreground break-all">
                   {c.uriMasked}
                 </div>
+                <UsageBar c={c} />
                 <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
                   <span>
                     Latensi:{" "}
@@ -325,6 +563,26 @@ function DatabaseConnectionsSection() {
                   </div>
                   <div className="flex items-center gap-1">
                     <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-7 w-7"
+                      onClick={() => moveMut.mutate({ id: c.id, move: "up" })}
+                      disabled={i === 0 || moveMut.isPending}
+                      title="Naikkan prioritas"
+                    >
+                      <ArrowUp className="h-3.5 w-3.5" />
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-7 w-7"
+                      onClick={() => moveMut.mutate({ id: c.id, move: "down" })}
+                      disabled={i === connections.length - 1 || moveMut.isPending}
+                      title="Turunkan prioritas"
+                    >
+                      <ArrowDown className="h-3.5 w-3.5" />
+                    </Button>
+                    <Button
                       size="sm"
                       variant="outline"
                       className="h-7 gap-1.5"
@@ -336,7 +594,16 @@ function DatabaseConnectionsSection() {
                       ) : (
                         <Zap className="h-3.5 w-3.5" />
                       )}
-                      Tes Koneksi
+                      Tes
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-7 w-7"
+                      onClick={() => copyUri(c)}
+                      title="Salin URI lengkap"
+                    >
+                      <Copy className="h-3.5 w-3.5" />
                     </Button>
                     <Button
                       variant="ghost"
@@ -372,6 +639,12 @@ function DatabaseConnectionsSection() {
           onOpenChange={(o) => !o && setEditC(null)}
         />
       ) : null}
+      <MigrationGuideDialog
+        open={guideOpen}
+        onOpenChange={setGuideOpen}
+        next={nextConn}
+        onCopyNext={nextConn ? () => copyUri(nextConn) : undefined}
+      />
       <AlertDialog
         open={!!deleteC}
         onOpenChange={(o) => !o && setDeleteC(null)}
@@ -398,6 +671,106 @@ function DatabaseConnectionsSection() {
   );
 }
 
+/** Dialog panduan pindah database (saat database live hampir penuh). */
+function MigrationGuideDialog({
+  open,
+  onOpenChange,
+  next,
+  onCopyNext,
+}: {
+  open: boolean;
+  onOpenChange: (o: boolean) => void;
+  next: DatabaseConnection | null;
+  onCopyNext?: () => void;
+}) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Panduan Pindah Database</DialogTitle>
+          <DialogDescription>
+            Aplikasi memakai satu <code className="font-mono">DATABASE_URL</code> untuk seluruh
+            datanya — pindah database dilakukan lewat environment + redeploy (aman, tanpa
+            kehilangan data lama bila data dimigrasi).
+          </DialogDescription>
+        </DialogHeader>
+        <ol className="space-y-2.5 text-sm list-decimal pl-4">
+          <li>
+            <b>Salin URI cadangan</b>
+            {next ? (
+              <>
+                {" "}
+                — koneksi <b>{next.name}</b> ada di urutan berikutnya.{" "}
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  className="gap-1.5 align-middle"
+                  onClick={() => {
+                    onCopyNext?.();
+                    setCopied(true);
+                    setTimeout(() => setCopied(false), 1500);
+                  }}
+                >
+                  <Copy className="h-3.5 w-3.5" />
+                  {copied ? "Tersalin!" : "Salin URI"}
+                </Button>
+              </>
+            ) : (
+              " — tambahkan dulu koneksi MongoDB baru di panel ini, lalu salin URI-nya."
+            )}
+          </li>
+          <li>
+            Pastikan database baru siap (cluster MongoDB Atlas / server sendiri) dan kosong atau
+            sudah berisi data hasil migrasi.
+          </li>
+          <li>
+            Buka <b>Vercel → proyek Aula → Settings → Environment Variables</b>, ubah nilai{" "}
+            <code className="font-mono">DATABASE_URL</code> menjadi URI baru, lalu simpan.
+          </li>
+          <li>
+            <b>Redeploy</b> proyek di Vercel (Deployments → ⋯ → Redeploy) agar aplikasi memakai
+            database baru.
+          </li>
+          <li>
+            Jalankan sekali dari komputer lokal dengan URI baru:{" "}
+            <code className="font-mono text-xs bg-muted px-1.5 py-0.5 rounded">
+              DATABASE_URL=&quot;&lt;uri baru&gt;&quot; bunx prisma db push
+            </code>{" "}
+            — membuat koleksi & index di database baru.
+          </li>
+          <li>
+            <b>Opsional — pindahkan data lama:</b>{" "}
+            <code className="font-mono text-xs bg-muted px-1.5 py-0.5 rounded">
+              mongodump --uri &quot;&lt;uri lama&gt;&quot;
+            </code>{" "}
+            lalu{" "}
+            <code className="font-mono text-xs bg-muted px-1.5 py-0.5 rounded">
+              mongorestore --uri &quot;&lt;uri baru&gt;&quot;
+            </code>
+            .
+          </li>
+        </ol>
+        <p className="text-xs text-muted-foreground">
+          Catatan: rantai prioritas &amp; usage di panel ini membantu memantau dan menyiapkan
+          pindah SEBELUM kuota habis — penulisan data akan gagal bila database live penuh.
+        </p>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+const QUOTA_PRESETS: { label: string; mb: number }[] = [
+  { label: "512 MB (Atlas Free)", mb: 512 },
+  { label: "1 GB", mb: 1024 },
+  { label: "2 GB", mb: 2048 },
+  { label: "5 GB", mb: 5120 },
+  { label: "10 GB", mb: 10240 },
+  { label: "Tanpa kuota", mb: 0 },
+  { label: "Custom (MB)", mb: -1 },
+];
+
 function CreateConnectionDialog({
   open,
   onOpenChange,
@@ -409,14 +782,19 @@ function CreateConnectionDialog({
   const [name, setName] = useState("");
   const [type, setType] = useState("mongodb");
   const [uri, setUri] = useState("");
-  const [isPrimary, setIsPrimary] = useState(false);
+  const [quotaPreset, setQuotaPreset] = useState("512");
+  const [quotaCustom, setQuotaCustom] = useState("2048");
 
   const mut = useMutation({
     mutationFn: async () => {
+      const mb =
+        quotaPreset === "-1"
+          ? parseInt(quotaCustom, 10) || 0
+          : parseInt(quotaPreset, 10);
       const res = await fetch("/api/admin/database-connections", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name, type, uri, isPrimary }),
+        body: JSON.stringify({ name, type, uri, quotaBytes: mb * 1024 * 1024 }),
       });
       if (!res.ok) {
         const e = await res.json().catch(() => ({}));
@@ -427,7 +805,7 @@ function CreateConnectionDialog({
     onSuccess: () => {
       toast.success("Koneksi dibuat");
       qc.invalidateQueries({ queryKey: ["admin-db-connections"] });
-      setName(""); setType("mongodb"); setUri(""); setIsPrimary(false);
+      setName(""); setType("mongodb"); setUri(""); setQuotaPreset("512");
       onOpenChange(false);
     },
     onError: (e: Error) => toast.error(e.message),
@@ -439,7 +817,9 @@ function CreateConnectionDialog({
         <DialogHeader>
           <DialogTitle>Tambah Koneksi Database</DialogTitle>
           <DialogDescription>
-            Koneksi disimpan untuk monitoring status. Aplikasi tetap pakai DATABASE_URL untuk datanya sendiri.
+            Tambahkan URI MongoDB ke rantai prioritas. Usage tiap URI dipantau
+            otomatis; URI yang sama dengan <code className="font-mono">DATABASE_URL</code> akan
+            ditandai LIVE.
           </DialogDescription>
         </DialogHeader>
         <form
@@ -478,10 +858,31 @@ function CreateConnectionDialog({
               URI disimpan sensitif. Hanya 8 karakter terakhir yang ditampilkan.
             </p>
           </div>
-          <label className="flex items-center gap-2 text-sm cursor-pointer">
-            <Switch checked={isPrimary} onCheckedChange={setIsPrimary} />
-            <span>jadikan koneksi utama</span>
-          </label>
+          <div className="space-y-1.5">
+            <Label>Kuota penyimpanan URI ini</Label>
+            <Select value={quotaPreset} onValueChange={setQuotaPreset}>
+              <SelectTrigger><SelectValue /></SelectTrigger>
+              <SelectContent>
+                {QUOTA_PRESETS.map((p) => (
+                  <SelectItem key={p.mb} value={String(p.mb)}>
+                    {p.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            {quotaPreset === "-1" ? (
+              <Input
+                type="number"
+                min={1}
+                value={quotaCustom}
+                onChange={(e) => setQuotaCustom(e.target.value)}
+                placeholder="Ukuran dalam MB"
+              />
+            ) : null}
+            <p className="text-xs text-muted-foreground">
+              Dipakai untuk bar pemakaian &amp; peringatan “hampir penuh”.
+            </p>
+          </div>
           <DialogFooter>
             <Button type="button" variant="ghost" onClick={() => onOpenChange(false)}>
               Batal
@@ -508,11 +909,29 @@ function EditConnectionDialog({
   const qc = useQueryClient();
   const [name, setName] = useState(conn.name);
   const [uri, setUri] = useState("");
-  const [isPrimary, setIsPrimary] = useState(conn.isPrimary);
+  const [quotaPreset, setQuotaPreset] = useState(() => {
+    const mb = conn.quotaBytes != null ? Math.round(conn.quotaBytes / 1024 / 1024) : 512;
+    const match = QUOTA_PRESETS.find((p) => p.mb === mb);
+    return match ? String(match.mb) : "-1";
+  });
+  const [quotaCustom, setQuotaCustom] = useState(() =>
+    String(
+      conn.quotaBytes != null
+        ? Math.max(1, Math.round(conn.quotaBytes / 1024 / 1024))
+        : 2048
+    )
+  );
 
   const mut = useMutation({
     mutationFn: async () => {
-      const body: Record<string, unknown> = { name, isPrimary };
+      const mb =
+        quotaPreset === "-1"
+          ? parseInt(quotaCustom, 10) || 0
+          : parseInt(quotaPreset, 10);
+      const body: Record<string, unknown> = {
+        name,
+        quotaBytes: mb * 1024 * 1024,
+      };
       if (uri.length > 0) body.uri = uri;
       const res = await fetch(`/api/admin/database-connections/${conn.id}`, {
         method: "PATCH",
@@ -538,7 +957,10 @@ function EditConnectionDialog({
       <DialogContent>
         <DialogHeader>
           <DialogTitle>Edit Koneksi</DialogTitle>
-          <DialogDescription>@{conn.uriMasked}</DialogDescription>
+          <DialogDescription>
+            @{conn.uriMasked}
+            {conn.isLive ? " — sedang dipakai aplikasi (LIVE)" : ""}
+          </DialogDescription>
         </DialogHeader>
         <form
           onSubmit={(e) => {
@@ -565,10 +987,28 @@ function EditConnectionDialog({
               Kosongkan jika tidak ingin mengubah.
             </p>
           </div>
-          <label className="flex items-center gap-2 text-sm cursor-pointer">
-            <Switch checked={isPrimary} onCheckedChange={setIsPrimary} />
-            <span>jadikan koneksi utama</span>
-          </label>
+          <div className="space-y-1.5">
+            <Label>Kuota penyimpanan URI ini</Label>
+            <Select value={quotaPreset} onValueChange={setQuotaPreset}>
+              <SelectTrigger><SelectValue /></SelectTrigger>
+              <SelectContent>
+                {QUOTA_PRESETS.map((p) => (
+                  <SelectItem key={p.mb} value={String(p.mb)}>
+                    {p.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            {quotaPreset === "-1" ? (
+              <Input
+                type="number"
+                min={1}
+                value={quotaCustom}
+                onChange={(e) => setQuotaCustom(e.target.value)}
+                placeholder="Ukuran dalam MB"
+              />
+            ) : null}
+          </div>
           <DialogFooter>
             <Button type="button" variant="ghost" onClick={() => onOpenChange(false)}>
               Batal

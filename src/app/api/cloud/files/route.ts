@@ -13,7 +13,8 @@ import {
   type ClassroomRole,
   type UserRole,
 } from "@/lib/cloud-perms";
-import { ALLOWED_MIMES, MAX_FILE_SIZE, saveFile } from "@/lib/storage";
+import { MAX_FILE_SIZE, saveFile } from "@/lib/storage";
+import { resolveMime } from "@/lib/file-constants";
 
 // POST /api/cloud/files — multipart/form-data with `file` (File) + optional
 // `folderId` + optional `visibility` ("ALL"|"TEACHERS"|"PRIVATE").
@@ -38,9 +39,9 @@ export async function POST(req: NextRequest) {
   if (file.size > MAX_FILE_SIZE)
     return errorResponse("FILE_TOO_LARGE", 413, { maxBytes: MAX_FILE_SIZE });
 
-  const mimetype = file.type || "application/octet-stream";
-  if (!ALLOWED_MIMES.has(mimetype))
-    return errorResponse("MIME_NOT_ALLOWED", 415, { mimetype });
+  // SEMUA tipe file diterima — mimetype dinormalisasi (OS → ekstensi →
+  // octet-stream); tipe asli dikoreksi saat serving via magic bytes.
+  const mimetype = resolveMime(file.name, file.type);
 
   // Validate folder access if folderId provided; otherwise require classroomId
   // (root-level upload) and check classroom membership.

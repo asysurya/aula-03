@@ -6,7 +6,8 @@ import {
   folderClassroomId,
   getClassroomRole,
 } from "@/lib/cloud-utils";
-import { ALLOWED_MIMES, MAX_FILE_SIZE, saveFile, deleteFile } from "@/lib/storage";
+import { MAX_FILE_SIZE, saveFile, deleteFile } from "@/lib/storage";
+import { resolveMime } from "@/lib/file-constants";
 
 // POST /api/cloud/submissions — multipart/form-data
 // Fields: assignmentId (string), note? (string), file? (File).
@@ -52,9 +53,7 @@ export async function POST(req: NextRequest) {
     if (file.size === 0) return errorResponse("FILE_EMPTY", 400);
     if (file.size > MAX_FILE_SIZE)
       return errorResponse("FILE_TOO_LARGE", 413, { maxBytes: MAX_FILE_SIZE });
-    const mimetype = file.type || "application/octet-stream";
-    if (!ALLOWED_MIMES.has(mimetype))
-      return errorResponse("MIME_NOT_ALLOWED", 415, { mimetype });
+    const mimetype = resolveMime(file.name, file.type);
     const bytes = Buffer.from(await file.arrayBuffer());
     let stored: { storageKey: string; size: number; cloudAccountId: string | null };
     try {

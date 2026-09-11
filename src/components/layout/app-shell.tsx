@@ -1,5 +1,6 @@
 "use client";
 
+import { useEffect } from "react";
 import { useMe } from "@/hooks/use-me";
 import { usePresence } from "@/hooks/use-presence";
 import { LoginForm } from "@/components/auth/login-form";
@@ -11,6 +12,8 @@ import { useUIStore } from "@/stores/ui-store";
 import { Logo } from "@/components/shared/logo";
 import { ThemeToggle } from "@/components/shared/theme-toggle";
 import { CommandPalette } from "@/components/shared/command-palette";
+import { NotificationBell } from "@/components/shared/notification-bell";
+import { startOverviewPoller } from "@/lib/notify";
 import { Menu } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
@@ -18,6 +21,24 @@ export function AppShell() {
   const { data: me, isLoading } = useMe();
   const { onlineIds } = usePresence(!!me?.user);
   const { sidebarOpen, setSidebarOpen } = useUIStore();
+
+  // Poller notifikasi global: pantau pesan baru di percakapan yang tidak
+  // sedang dibuka (kelas/grup/DM) → lonceng, badge sidebar, web notif.
+  useEffect(() => {
+    if (!me?.user) return;
+    startOverviewPoller({
+      myId: me.user.id,
+      myUsername: me.user.username,
+      myName: me.user.name,
+      isConversationActive: (c) => {
+        const cur = useUIStore.getState();
+        if (cur.section !== "chat" || !cur.conversation) return false;
+        return (
+          cur.conversation.kind === c.kind && cur.conversation.id === c.id
+        );
+      },
+    });
+  }, [me?.user]);
 
   if (isLoading) {
     return (
@@ -58,6 +79,7 @@ export function AppShell() {
           </Button>
           <Logo />
           <div className="flex items-center gap-1.5">
+            <NotificationBell />
             <CommandPalette me={me} />
             <ThemeToggle />
           </div>

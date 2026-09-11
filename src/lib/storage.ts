@@ -37,71 +37,15 @@ const UPLOAD_DIR = path.join(process.cwd(), "uploads");
 const MAX_SIZE = 100 * 1024 * 1024; // 100 MB
 
 export const MAX_FILE_SIZE = MAX_SIZE;
-export const ALLOWED_MIMES = new Set<string>([
-  // docs
-  "application/pdf",
-  "application/msword",
-  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-  "application/vnd.ms-excel",
-  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-  "application/vnd.ms-powerpoint",
-  "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-  "application/rtf",
-  "application/vnd.oasis.opendocument.text",
-  "application/vnd.oasis.opendocument.spreadsheet",
-  "application/vnd.oasis.opendocument.presentation",
-  "application/epub+zip",
-  "text/plain",
-  "text/markdown",
-  "application/json",
-  "application/xml",
-  "text/csv",
-  "text/yaml",
-  "text/x-shellscript",
-  "text/javascript",
-  "text/css",
-  "text/html",
-  "text/calendar",
-  "text/vcard",
-  "message/rfc822",
-  // images
-  "image/png",
-  "image/jpeg",
-  "image/gif",
-  "image/webp",
-  "image/svg+xml",
-  "image/bmp",
-  "image/x-icon",
-  "image/tiff",
-  "image/heic",
-  "image/avif",
-  // archives
-  "application/zip",
-  "application/x-zip-compressed",
-  "application/vnd.rar",
-  "application/x-7z-compressed",
-  "application/x-tar",
-  "application/gzip",
-  "application/x-bzip2",
-  "application/x-xz",
-  // audio/video
-  "audio/mpeg",
-  "audio/mp4",
-  "audio/wav",
-  "audio/ogg",
-  "audio/flac",
-  "audio/aac",
-  "audio/webm",
-  "audio/webm;codecs=opus",
-  "video/mp4",
-  "video/webm",
-  "video/quicktime",
-  "video/x-matroska",
-  "video/x-msvideo",
-  // fallback umum dari OS untuk tipe tak dikenal — tetap lolos,
-  // deteksi tipe asli dilakukan server saat serving (magic bytes).
-  "application/octet-stream",
-]);
+
+// KEBIJAKAN UPLOAD: SEMUA tipe file diterima (tidak ada whitelist mimetype).
+// Alasan aman:
+// - Serving /api/storage/[key] melakukan magic-byte sniffing + selalu
+//   X-Content-Type-Options: nosniff + CSP sandbox untuk html/svg — file
+//   tak dikenal tidak pernah dieksekusi browser, hanya diunduh.
+// - Mimetype dinormalisasi via resolveMime (OS mime → ekstensi → octet-stream).
+// Pratinjau tipe khusus (CorelDraw, RAW kamera, gdoc, …) ditangani
+// Aula Reader di sisi client.
 
 function isImage(mime: string) {
   return mime.startsWith("image/");

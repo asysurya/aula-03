@@ -38,6 +38,8 @@ import { cn } from "@/lib/utils";
 import { roleLabel } from "@/lib/constants";
 import { toast } from "sonner";
 import { UpcomingDialog } from "@/components/shared/upcoming-dialog";
+import { NotificationBell } from "@/components/shared/notification-bell";
+import { useNotifyStore } from "@/lib/notify";
 
 export function AppSidebar({
   me,
@@ -65,6 +67,7 @@ export function AppSidebar({
   } = useUIStore();
   const [dmPickerOpen, setDmPickerOpen] = useState(false);
   const [upcomingOpen, setUpcomingOpen] = useState(false);
+  const unreadByConv = useNotifyStore((s) => s.unreadByConv);
 
   const isAdmin = user.role === "ADMIN";
 
@@ -74,6 +77,7 @@ export function AppSidebar({
       <div className="flex items-center justify-between px-4 h-14 border-b border-sidebar-border shrink-0">
         <Logo />
         <div className="flex items-center gap-1">
+          <NotificationBell compact />
           <Button
             variant="ghost"
             size="icon"
@@ -162,6 +166,7 @@ export function AppSidebar({
                     }
                     icon={<Hash className="h-4 w-4 shrink-0" />}
                     label={c.name}
+                    unread={unreadByConv[`classroom:${c.id}`] ?? 0}
                   />
                 );
               })
@@ -189,6 +194,7 @@ export function AppSidebar({
                     }
                     icon={<Lock className="h-4 w-4 shrink-0" />}
                     label={g.name}
+                    unread={unreadByConv[`group:${g.id}`] ?? 0}
                   />
                 );
               })
@@ -364,11 +370,13 @@ function ChannelItem({
   onClick,
   icon,
   label,
+  unread = 0,
 }: {
   active: boolean;
   onClick: () => void;
   icon: React.ReactNode;
   label: string;
+  unread?: number;
 }) {
   return (
     <button
@@ -382,6 +390,11 @@ function ChannelItem({
     >
       {icon}
       <span className="truncate flex-1 text-left">{label}</span>
+      {unread > 0 ? (
+        <span className="min-w-4 h-4 px-1 rounded-full bg-primary text-primary-foreground text-[10px] font-semibold leading-none flex items-center justify-center">
+          {unread > 99 ? "99+" : unread}
+        </span>
+      ) : null}
     </button>
   );
 }
