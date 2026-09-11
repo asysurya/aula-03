@@ -14,6 +14,7 @@ import { ThemeToggle } from "@/components/shared/theme-toggle";
 import { CommandPalette } from "@/components/shared/command-palette";
 import { NotificationBell } from "@/components/shared/notification-bell";
 import { startOverviewPoller } from "@/lib/notify";
+import { sweepReaderCache } from "@/lib/reader-file-cache";
 import { Menu } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
@@ -21,6 +22,18 @@ export function AppShell() {
   const { data: me, isLoading } = useMe();
   const { onlineIds } = usePresence(!!me?.user);
   const { sidebarOpen, setSidebarOpen } = useUIStore();
+
+  // ── Cache sementara Aula Reader / pratinjau ──
+  // Tab sebelumnya bisa meninggalkan file di Cache Storage saat ditutup
+  // paksa / crash → bersihkan sisa saat aplikasi dibuka (entri yang
+  // pratinjaunya masih terbuka di tab ini tetap dipertahankan), plus
+  // best-effort saat halaman benar-benar ditutup (pagehide).
+  useEffect(() => {
+    void sweepReaderCache();
+    const onPageHide = () => void sweepReaderCache();
+    window.addEventListener("pagehide", onPageHide);
+    return () => window.removeEventListener("pagehide", onPageHide);
+  }, []);
 
   // Poller notifikasi global: pantau pesan baru di percakapan yang tidak
   // sedang dibuka (kelas/grup/DM) → lonceng, badge sidebar, web notif.

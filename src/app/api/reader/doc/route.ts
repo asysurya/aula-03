@@ -1,0 +1,91 @@
+import { NextRequest, NextResponse } from "next/server";
+import { z } from "zod";
+import { requireUser } from "@/lib/session";
+import { db } from "@/lib/db";
+
+// ─────────────────────────────────────────────────────────────────────────
+// Aula Reader — dokumen per user per file: anotasi (stabilo, pena/draw)
+// + posisi baca terakhir. Tersimpan di MongoDB → ikut user di semua
+// perangkat. File PDF/EPUB sendiri TIDAK disimpan di sini (hanya cache
+// sementara browser yang otomatis terhapus).
+//
+//   GET  /api/reader/doc?storageKey=…   → { annotations, page }
+//   PUT  /api/reader/doc { storageKey, annotations, page }  → replace
+// ─────────────────────────────────────────────────────────────────────────
+
+export const runtime = "nodejs";
+
+const MAX_ANNOTATIONS = 2000;
+
+const annoSchema = z.object({
+  id: z.string().min(1).max(64),
+  page: z.number().int().min(1).max(100000),
+  tool: z.enum(["hl", "pen"]),
+  color: z.string().min(1).max(32),
+  w: z.number().min(0).max(4).optional(),
+  pts: z
+    .array(z.tuple([z.number().min(-1).max(2), z.number().min(-1).max(2)]))
+    .max(6000)
+    .optional(),
+  rect: z
+    .array(z.number().min(-1).max(2))
+    .length(4)
+    .optional(),
+  created: z.number(),
+});
+
+const putSchema = z.object({
+  storageKey: z.string().trim().min(1).max(300),
+  annotations: z.array(annoSchema).max(MAX_ANNOTATIONS),
+  page: z.number().int().min(1).max(100000),
+});
+
+export async function GET(req: NextRequest) {
+  const user = await requireUser().catch(() => null);
+  if (!user) return NextResponse.json({ error: "UNAUTHORIZED" }, { status: 401 });
+
+  const storageKey = req.nextUrl.searchParams.get("storageKey")?.trim();
+  if (!storageKey || storageKey.length > 300) {
+    return NextResponse.json({ error: "storageKey tidak valid" }, { status: 400 });
+  }
+
+  const doc = await db.readerDoc.findUnique({
+    where: { userId_storageKey: { userId: user.id, storageKey } },
+    select: { annotations: true, page: true },
+  });
+
+  const annotations = Array.isArray(doc?.annotations)
+    ? (doc!.annotations as unknown[])
+    : [];
+  return NextResponse.json({
+    storageKey,
+    annotations,
+    page: doc?.page ?? 1,
+  });
+}
+
+export async function PUT(req: NextRequest) {
+  const user = await requireUser().catch(() => null);
+  if (!user) return NextResponse.json({ error: "UNAUTHORIZED" }, { status: 401 });
+
+  let body: unknown;
+  try {
+    body = await req.json();
+  } catch {
+    return NextResponse.json({ error: "Data tidak valid" }, { status: 400 });
+  }
+  const parsed = putSchema.safeParse(body);
+  if (!parsed.success) {
+    const first = parsed.error.issues[0]?.message ?? "Data tidak valid";
+    return NextResponse.json({ error: first }, { status: 400 });
+  }
+  const { storageKey, annotations, page } = parsed.data;
+
+  await db.readerDoc.upsert({
+    where: { userId_storageKey: { userId: user.id, storageKey } },
+    update: { annotations, page },
+    create: { userId: user.id, storageKey, annotations, page },
+  });
+
+  return NextResponse.json({ ok: true, count: annotations.length });
+}

@@ -76,9 +76,9 @@ export function TransferManagerButton() {
             <ArrowUpDown className="size-4" /> Manajer Transfer
           </DialogTitle>
           <DialogDescription>
-            Upload dan download berjalan di latar belakang — progress bar
-            diperbarui setiap 1 detik. Atur antrean: jeda, lanjutkan, batalkan,
-            atau ubah urutan.
+            Upload dan download berjalan di latar belakang — progress dan
+            kecepatan diperbarui real-time. Atur antrean: jeda, lanjutkan,
+            batalkan, atau ubah urutan.
           </DialogDescription>
         </DialogHeader>
         <TransferList />

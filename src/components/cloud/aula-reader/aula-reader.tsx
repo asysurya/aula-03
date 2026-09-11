@@ -5,6 +5,7 @@ import { Loader2, BookOpenText, TriangleAlert } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
 import { filePublicUrl, formatBytes } from "@/lib/file-constants";
+import { formatSpeed } from "@/lib/fast-fetch";
 import type { CloudFileItem } from "@/lib/cloud-format";
 import {
   classify,
@@ -98,7 +99,7 @@ function CenterLoading({ label }: { label: string }) {
   );
 }
 
-function BufferLoading({ progress }: { progress: { loaded: number; total: number | null } | null }) {
+function BufferLoading({ progress }: { progress: { loaded: number; total: number | null; speed?: number } | null }) {
   const pct =
     progress && progress.total
       ? Math.min(100, Math.round((progress.loaded / progress.total) * 100))
@@ -111,7 +112,7 @@ function BufferLoading({ progress }: { progress: { loaded: number; total: number
         {progress
           ? ` · ${formatBytes(progress.loaded)}${
               progress.total ? ` / ${formatBytes(progress.total)}` : ""
-            }`
+            }${progress.speed ? ` · ${formatSpeed(progress.speed)}` : ""}`
           : ""}
       </p>
       {pct !== null ? (
@@ -162,10 +163,7 @@ export function AulaReader({
     EMBEDDED_IMAGE_EXTS.has(e) ||
     e === "epub";
 
-  const { entry, error, progress } = useOfficeBuffer(
-    file,
-    url
-  );
+  const { entry, error, progress } = useOfficeBuffer(file);
 
   // ── EPUB (ekstensi) ──
   if (e === "epub") {

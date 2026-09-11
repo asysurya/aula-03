@@ -2,6 +2,16 @@
 
 import { useEffect, useState } from "react";
 import type { CloudFileItem } from "@/lib/cloud-format";
+import {
+  fastFetchBuffer,
+  formatSpeed,
+  type FetchProgress as FastProgress,
+} from "@/lib/fast-fetch";
+import {
+  peekReaderBuffer,
+  putReaderBuffer,
+  markReaderActive,
+} from "@/lib/reader-file-cache";
 
 // ─────────────────────────────────────────────────────────────────────────
 // Buffer loader bersama — dipakai oleh FilePreview (pratinjau bawaan) DAN
@@ -371,9 +381,12 @@ export function classify(mime: string, name: string): PreviewKind {
   return "other";
 }
 
-// ───────────────────────── Cache client (anti-lag buka ulang) ─────────────────────────
-// ArrayBuffer + hasil konversi office di-cache per storageKey → membuka
-// file yang sama lagi instan (tanpa unduh ulang / konversi ulang).
+// ───────────────────────── Cache client ─────────────────────────
+// Buffer file di-cache per storageKey SELAMA pratinjau terbuka (memori
+// sesi + Cache Storage — lihat reader-file-cache.ts). Saat pratinjau
+// ditutup / tab ditutup, buffer otomatis dihapus; anotasi tersimpan
+// terpisah di MongoDB (useRemoteAnnotations). Hasil konversi office
+// (HTML docx / sheet xlsx) tetap di-cache ringan per sesi.
 
 export interface OfficeCacheEntry {
   buffer: ArrayBuffer;
@@ -382,89 +395,35 @@ export interface OfficeCacheEntry {
   objectUrl: string;
 }
 
-const officeBufferCache = new Map<string, OfficeCacheEntry>();
 const docxHtmlCache = new Map<string, string>();
 const xlsxSheetsCache = new Map<string, { name: string; html: string }[]>();
 
-export function officeCacheGet(key: string): OfficeCacheEntry | undefined {
-  return officeBufferCache.get(key);
-}
-
-function cacheSet(key: string, entry: OfficeCacheEntry) {
-  if (officeBufferCache.size > 8) {
-    // Buang entri tertua.
-    const first = officeBufferCache.keys().next().value as string | undefined;
-    if (first) {
-      const old = officeBufferCache.get(first);
-      if (old) URL.revokeObjectURL(old.objectUrl);
-      officeBufferCache.delete(first);
-    }
-  }
-  officeBufferCache.set(key, entry);
-}
-
 export { docxHtmlCache, xlsxSheetsCache };
 
-// ───────────────────────── fetch + progress ─────────────────────────
+// ───────────────────────── progress ─────────────────────────
 
 export interface FetchProgress {
   loaded: number;
   total: number | null;
+  /** Kecepatan berjalan (byte/detik) — bila tersedia. */
+  speed?: number;
 }
 
-export async function fetchArrayBufferWithProgress(
-  url: string,
-  onProgress?: (p: FetchProgress) => void
-): Promise<ArrayBuffer> {
-  const res = await fetch(url);
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  const totalHeader = res.headers.get("content-length");
-  const total = totalHeader ? parseInt(totalHeader, 10) : null;
-
-  if (!res.body) {
-    onProgress?.({ loaded: 0, total });
-    return res.arrayBuffer();
-  }
-
-  const reader = res.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let loaded = 0;
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    if (value) {
-      chunks.push(value);
-      loaded += value.byteLength;
-      onProgress?.({ loaded, total });
-    }
-  }
-  const merged = new Uint8Array(loaded);
-  let pos = 0;
-  for (const c of chunks) {
-    merged.set(c, pos);
-    pos += c.byteLength;
-  }
-  return merged.buffer;
-}
+export { formatSpeed };
 
 // ───────────────────────── Hook buffer office ─────────────────────────
-
-export function useOfficeBuffer(file: CloudFileItem, url: string) {
+export function useOfficeBuffer(file: CloudFileItem) {
   const key = file.storageKey;
-  const cached = officeBufferCache.get(key);
-  const [entry, setEntry] = useState<OfficeCacheEntry | null>(cached ?? null);
+  const [entry, setEntry] = useState<OfficeCacheEntry | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [progress, setProgress] = useState<FetchProgress | null>(
-    cached ? null : { loaded: 0, total: null }
-  );
+  const [progress, setProgress] = useState<FetchProgress | null>(null);
 
   const [prevKey, setPrevKey] = useState(key);
   if (prevKey !== key) {
     setPrevKey(key);
-    const c = officeBufferCache.get(key);
-    setEntry(c ?? null);
+    setEntry(null);
     setError(null);
-    setProgress(c ? null : { loaded: 0, total: null });
+    setProgress({ loaded: 0, total: null });
   }
 
   useEffect(() => {
@@ -472,26 +431,38 @@ export function useOfficeBuffer(file: CloudFileItem, url: string) {
     let cancelled = false;
     (async () => {
       try {
-        const buffer = await fetchArrayBufferWithProgress(url, (p) => {
-          if (!cancelled) setProgress(p);
-        });
-        const head = new Uint8Array(buffer, 0, Math.min(8, buffer.byteLength));
-        const isPdf =
-          head.length >= 4 &&
-          head[0] === 0x25 && // %
-          head[1] === 0x50 && // P
-          head[2] === 0x44 && // D
-          head[3] === 0x46; // F
-        const e: OfficeCacheEntry = {
-          buffer,
-          actualKind: isPdf ? "pdf" : "office",
-          objectUrl: URL.createObjectURL(new Blob([buffer])),
-        };
-        cacheSet(key, e);
-        if (!cancelled) {
-          setEntry(e);
+        // 1) Sudah di cache (memori sesi / Cache Storage) → instan.
+        const cached = await peekReaderBuffer(key);
+        if (cancelled) return;
+        if (cached) {
+          markReaderActive(key);
+          setEntry({
+            buffer: cached.buffer,
+            actualKind: sniffKind(cached.buffer),
+            objectUrl: cached.objectUrl,
+          });
           setProgress(null);
+          return;
         }
+
+        // 2) Unduh via jalur tercepat: URL presigned S3 multi-segmen
+        //    paralel, atau streaming proxy — progress real-time per chunk.
+        setProgress({ loaded: 0, total: null });
+        const buffer = await fastFetchBuffer(key, {
+          onProgress: (p: FastProgress) => {
+            if (!cancelled) setProgress(p);
+          },
+        });
+        if (cancelled) return;
+
+        const stored = await putReaderBuffer(key, buffer);
+        if (cancelled) return;
+        setEntry({
+          buffer: stored.buffer,
+          actualKind: sniffKind(stored.buffer),
+          objectUrl: stored.objectUrl,
+        });
+        setProgress(null);
       } catch (err) {
         if (!cancelled) {
           setError(err instanceof Error ? err.message : "Gagal memuat file");
@@ -502,7 +473,19 @@ export function useOfficeBuffer(file: CloudFileItem, url: string) {
     return () => {
       cancelled = true;
     };
-  }, [key, url, entry, error]);
+  }, [key, entry, error]);
 
   return { entry, error, progress };
+}
+
+/** Deteksi kasus PDF yang di-rename (magic bytes %PDF). */
+function sniffKind(buffer: ArrayBuffer): "pdf" | "office" | "unknown" {
+  const head = new Uint8Array(buffer, 0, Math.min(8, buffer.byteLength));
+  const isPdf =
+    head.length >= 4 &&
+    head[0] === 0x25 && // %
+    head[1] === 0x50 && // P
+    head[2] === 0x44 && // D
+    head[3] === 0x46; // F
+  return isPdf ? "pdf" : "office";
 }

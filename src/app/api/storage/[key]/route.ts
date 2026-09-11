@@ -4,12 +4,11 @@ import { db } from "@/lib/db";
 import { deleteFile, getFile } from "@/lib/storage";
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
-import { folderClassroomId, getClassroomRole } from "@/lib/cloud-utils";
-import { canViewFile, type UserRole, type ClassroomRole } from "@/lib/cloud-perms";
-import { parseMegaKey } from "@/lib/mega-storage";
-import { canViewMount } from "@/lib/mount-access";
+import { parseMegaKey, megaDownloadStream } from "@/lib/mega-storage";
 import { mimetypeFromName } from "@/lib/cloud-format";
 import { fileCacheGetOrLoad } from "@/lib/file-cache";
+import { s3Stream } from "@/lib/s3-storage";
+import { s3AccountOf, checkStorageAccess } from "@/lib/storage-access";
 
 // Serve uploaded files (preview-friendly & anti-lag):
 // 1. Effective mimetype = magic bytes (deteksi isi asli) > mimetype DB > ekstensi.
@@ -249,103 +248,164 @@ export async function GET(
     return new NextResponse("Unauthorized", { status: 401 });
   }
   const { key } = await params;
+  const user = session.user as { id?: string; role?: string };
 
-  // Resolve metadata from any cloud file using this storage key
-  const file = await db.cloudFile.findFirst({
-    where: { storageKey: key },
-    select: {
-      id: true,
-      name: true,
-      mimetype: true,
-      visibility: true,
-      uploadedBy: true,
-      folderId: true,
-      storageKey: true,
-      expiresAt: true,
-      grants: { select: { userId: true } },
-    },
-  });
-  if (!file) {
-    // ── Mode "mount MEGA": node MEGA mentah tanpa baris CloudFile ──
-    // Hak akses mengikuti pengaturan mount akun tsb. (Admin Panel):
-    // admin saja / guru+admin / semua user.
-    const mega = parseMegaKey(key);
-    const rawRole = (session.user as any).role as string;
-    if (!mega) {
-      return new NextResponse("Not found", { status: 404 });
+  // ── Pemeriksaan akses (logika bersama dgn /api/storage/[key]/link) ──
+  const access = await checkStorageAccess(
+    user?.id && user?.role ? { id: user.id, role: user.role } : null,
+    key
+  );
+  if (!access.ok) {
+    // File sementara kedaluwarsa → bersihkan malas (sama seperti dulu).
+    if (access.status === 410) {
+      try {
+        await deleteFile(key);
+      } catch {
+        /* ignore blob delete errors */
+      }
+      try {
+        await db.cloudFile.deleteMany({ where: { storageKey: key } });
+      } catch {
+        /* may already be deleted */
+      }
     }
-    const mountAccount = await db.cloudAccount.findUnique({
-      where: { id: mega.accountId },
-      select: { id: true, mountVisibleTo: true, mountMode: true },
+    return new NextResponse(access.body, { status: access.status });
+  }
+
+  // Metadata dasar utk header.
+  const name =
+    access.kind === "cloud"
+      ? access.file.name
+      : req.nextUrl.searchParams.get("name") ?? "file";
+  const mime =
+    access.kind === "cloud"
+      ? access.file.mimetype || mimetypeFromName(name)
+      : mimetypeFromName(name);
+  const size = access.kind === "cloud" ? access.file.size : 0;
+  const forceDownload = req.nextUrl.searchParams.get("download") === "1";
+  const etag = etagFor(key, size);
+
+  const baseHeaders: Record<string, string> = {
+    "Content-Type": mime,
+    "Content-Disposition": dispositionValue(name, forceDownload),
+    ETag: etag,
+    "Cache-Control": "private, max-age=86400, immutable",
+    "Accept-Ranges": "bytes",
+    "X-Content-Type-Options": "nosniff",
+  };
+  if (mime === "image/svg+xml" || mime === "text/html") {
+    baseHeaders["Content-Security-Policy"] = "sandbox";
+  }
+
+  // 304 Not Modified — tidak perlu menyentuh storage sama sekali.
+  const inm = req.headers.get("if-none-match");
+  if (inm && size > 0 && inm.split(",").map((s) => s.trim()).includes(etag)) {
+    return new NextResponse(null, {
+      status: 304,
+      headers: {
+        ETag: etag,
+        "Cache-Control": "private, max-age=86400, immutable",
+      },
     });
-    if (!mountAccount || !canViewMount(mountAccount, rawRole)) {
-      return new NextResponse("Not found", { status: 404 });
-    }
-    const rawName = req.nextUrl.searchParams.get("name") ?? "file";
-    const rawData = await loadBytes(key);
-    if (!rawData) return new NextResponse("Not found", { status: 404 });
-    const rawMime = effectiveMimetype(rawData, mimetypeFromName(rawName), rawName);
-    return serveFile(req, { bytes: rawData, mime: rawMime, name: rawName, key });
   }
 
-  // Temp chat file expiry handling: if expiresAt is set and in the past,
-  // treat the file as gone and clean it up lazily.
-  if (file.expiresAt && file.expiresAt.getTime() < Date.now()) {
-    try {
-      await deleteFile(file.storageKey);
-    } catch {
-      /* ignore blob delete errors */
-    }
-    try {
-      await db.cloudFile.delete({ where: { id: file.id } });
-    } catch {
-      /* may already be deleted by the cleanup cron */
-    }
-    return new NextResponse("Gone", { status: 410 });
-  }
+  const rangeHeader = req.headers.get("range");
 
-  // Permission check. If the file belongs to a cloud folder (classroom-owned),
-  // resolve the classroom + classroom role and enforce visibility.
-  const userRole = (session.user as any).role as UserRole;
-  const userId = (session.user as any).id as string;
-
-  let classroomRole: ClassroomRole | null = null;
-  if (file.folderId) {
-    const cid = await folderClassroomId(file.folderId);
-    if (cid) {
-      classroomRole =
-        userRole === "ADMIN"
-          ? "TEACHER"
-          : await getClassroomRole(cid, userId);
-    }
-  }
-
-  const allowed =
-    // No classroom context (e.g. chat attachment) → any authenticated user.
-    !file.folderId
-      ? true
-      : canViewFile(
-          {
-            id: file.id,
-            visibility: file.visibility,
-            uploadedBy: file.uploadedBy,
-            folderId: file.folderId,
-            grants: file.grants,
+  // ── JALUR CEPAT 1: S3 → stream langsung (Range = slice asli) ──
+  // File kecil tanpa Range tetap lewat jalur buffer agar magic-byte
+  // sniffing tetap jalan (ukuran < 4 MB murah dibuffer).
+  const s3 = await s3AccountOf(key);
+  if (s3) {
+    const range = parseRangeHeader(rangeHeader, size);
+    const wantStream =
+      range !== null || // Range apa pun → slice murah dari S3
+      (size === 0 || size >= 4 * 1024 * 1024); // besar → stream
+    if (wantStream && !forceDownload) {
+      const r = await s3Stream(s3.account, s3.objectKey, range ?? undefined);
+      if (r) {
+        if (range) {
+          return new NextResponse(r.stream, {
+            status: 206,
+            headers: {
+              ...baseHeaders,
+              "Content-Range":
+                r.contentRange ??
+                `bytes ${range.start}-${range.end}/${size || r.length}`,
+              "Content-Length": String(r.length),
+            },
+          });
+        }
+        return new NextResponse(r.stream, {
+          status: 200,
+          headers: {
+            ...baseHeaders,
+            ...(r.length ? { "Content-Length": String(r.length) } : {}),
           },
-          userId,
-          userRole,
-          classroomRole
-        );
-
-  if (!allowed) {
-    return new NextResponse("Forbidden", { status: 403 });
+        });
+      }
+      // Stream gagal → jatuh ke jalur buffer di bawah.
+    }
   }
 
+  // ── JALUR CEPAT 2: MEGA tanpa Range & file besar → stream megajs ──
+  // (Range MEGA tetap lewat buffer — unduhan paralel per-range dari MEGA
+  // hanya membuang bandwidth; buffer + LRU menghandle seek video.)
+  const mega = parseMegaKey(key);
+  if (mega && !rangeHeader && !forceDownload && (size === 0 || size >= 4 * 1024 * 1024)) {
+    const account = await db.cloudAccount.findUnique({
+      where: { id: mega.accountId },
+      select: { id: true, email: true, password: true, sessionData: true },
+    });
+    if (account) {
+      const r = await megaDownloadStream(account, mega.nodeId);
+      if (r) {
+        return new NextResponse(r.stream, {
+          status: 200,
+          headers: {
+            ...baseHeaders,
+            ...(r.size ? { "Content-Length": String(r.size) } : {}),
+          },
+        });
+      }
+      // Stream gagal → jalur buffer (unduhan penuh + sniff) di bawah.
+    }
+  }
+
+  // ── JALUR BUFFER (semua kasus lain; dengan LRU + magic-byte sniff) ──
   const bytes = await loadBytes(key);
   if (!bytes) return new NextResponse("Not found", { status: 404 });
 
-  const mime = effectiveMimetype(bytes, file.mimetype, file.name);
-  return serveFile(req, { bytes, mime, name: file.name, key });
+  const effMime = effectiveMimetype(bytes, mime, name);
+  return serveFile(req, {
+    bytes,
+    mime: effMime,
+    name,
+    key,
+  });
+}
+
+/** Parse header Range → { start, end } (null bila absen/tak valid). */
+function parseRangeHeader(
+  rangeHeader: string | null,
+  size: number
+): { start: number; end: number } | null {
+  if (!rangeHeader) return null;
+  const match = /^bytes=(\d*)-(\d*)$/.exec(rangeHeader.trim());
+  if (!match) return null;
+  let start = match[1] ? parseInt(match[1], 10) : 0;
+  let end = match[2] ? parseInt(match[2], 10) : Number.MAX_SAFE_INTEGER;
+  if (Number.isNaN(start) || Number.isNaN(end)) return null;
+  if (size > 0) {
+    if (end >= size) end = size - 1;
+  }
+  if (start < 0 || start > end) return null;
+  return { start, end };
+}
+
+function dispositionValue(name: string, forceDownload: boolean): string {
+  const disposition = forceDownload ? "attachment" : "inline";
+  const ascii = asciiFilename(name);
+  return `${disposition}; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(name)}`;
 }
 
 // HEAD — headers saja (tanpa body); dipakai client untuk cek tipe sebelum

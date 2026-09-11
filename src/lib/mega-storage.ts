@@ -580,6 +580,40 @@ export async function megaDownload(
 }
 
 /**
+ * Download MEGA sebagai STREAM (megajs mengunduh bertahap dan mengalirkan
+ * byte begitu tiba) — response bisa langsung dikirim ke client tanpa
+ * menunggu seluruh file masuk memori proses (TTFB jauh lebih cepat).
+ * Mengembalikan ukuran file utk header Content-Length.
+ */
+export async function megaDownloadStream(
+  account: MegaAccountLike,
+  nodeId: string
+): Promise<{ stream: ReadableStream<Uint8Array>; size: number } | null> {
+  try {
+    return await withSession(account, async (storage) => {
+      const file = await resolveNode(storage, nodeId);
+      if (!file || file.directory) return null;
+      const size = file.size ?? 0;
+      const node = file as MutableFile & {
+        download: (opts: Record<string, unknown>) => NodeJS.ReadableStream;
+      };
+      // maxConnections: 4 → megajs mengunduh chunk MEGA secara paralel
+      // (4 koneksi) sehingga throughput proxy naik signifikan.
+      const readable = node.download({ maxConnections: 4 });
+      const { Readable } = await import("stream");
+      return {
+        stream: Readable.toWeb(
+          readable as unknown as import("stream").Readable
+        ) as unknown as ReadableStream<Uint8Array>,
+        size,
+      };
+    });
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Delete node (file ATAU folder — rekursif) dari MEGA. PERMANEN
  * (bukan pindah ke trash).
  */

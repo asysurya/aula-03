@@ -431,10 +431,16 @@ export function ChatView({
   // Saat tab disembunyikan: tutup koneksi (hemat resource), buka lagi saat
   // kembali visible — polling fallback menutup celah di sela-selanya.
   const sseAliveRef = useRef<number>(0);
+  /** Fungsi polling sekali — dipicu langsung saat kembali visible &
+   * sesaat setelah kirim pesan (reconcile cepat, tanpa nunggu interval). */
+  const pollNowRef = useRef<() => void>(() => {});
   useEffect(() => {
     const key = `${conversation.kind}:${conversation.id}`;
     let es: EventSource | null = null;
     let stopped = false;
+    // Ganti percakapan → patokan "SSE sehat" lama tidak boleh menutup
+    // celah polling percakapan baru.
+    sseAliveRef.current = 0;
 
     function connect() {
       if (stopped || typeof window === "undefined") return;
@@ -470,6 +476,9 @@ export function ChatView({
         es?.close();
         es = null;
       } else {
+        // Kembali terlihat: sambungkan SSE lagi DAN segera sinkron sekali
+        // (menutup celah pesan yang masuk selama tab disembunyikan).
+        pollNowRef.current?.();
         connect();
       }
     }
@@ -484,15 +493,23 @@ export function ChatView({
     };
   }, [conversation.id, conversation.kind, applySyncData]);
 
-  // Polling fallback (2,5 dtk) — hanya aktif kalau SSE tidak sehat
-  // (>10 dtk tanpa event), mis. proxy memblok streaming atau koneksi putus.
+  // Polling cadangan (2,5 dtk) — SELALU jalan saat tab terlihat.
+  // Dulu polling berhenti total selama SSE "sehat" (>10 dtk tanpa event);
+  // masalahnya SSE bisa tampak hidup (hello/keepalive terkirim) padahal
+  // delta-nya tidak pernah sampai (proxy buffering) → pesan telat tak
+  // berujung. Sekarang: SSE sehat hanya menunda polling SATU interval
+  // (2,5 dtk) — maksimal telat 2,5 dtk apa pun yang terjadi, sementara
+  // SSE tetap memberi update instan di jalur utamanya.
   useEffect(() => {
     const key = `${conversation.kind}:${conversation.id}`;
-    const interval = setInterval(async () => {
+
+    const pollOnce = async () => {
       if (pollInFlightRef.current) return;
       if (typeof document !== "undefined" && document.hidden) return;
       if (conversationKeyRef.current !== key) return;
-      if (Date.now() - sseAliveRef.current < 10_000) return; // SSE sehat
+      // SSE baru saja mengirim event → tik ini dilewati (hemat request
+      // ganda di detik yang sama; interval berikutnya tetap jalan).
+      if (Date.now() - sseAliveRef.current < 2_500) return;
       pollInFlightRef.current = true;
       try {
         const loadedIds = Array.from(seenIdsRef.current).filter(
@@ -522,8 +539,15 @@ export function ChatView({
       } finally {
         pollInFlightRef.current = false;
       }
-    }, MESSAGE_POLL_INTERVAL);
-    return () => clearInterval(interval);
+    };
+
+    pollNowRef.current = () => void pollOnce();
+
+    const interval = setInterval(() => void pollOnce(), MESSAGE_POLL_INTERVAL);
+    return () => {
+      clearInterval(interval);
+      pollNowRef.current = () => {};
+    };
   }, [conversation.id, conversation.kind, applySyncData]);
 
   // Poor-man's cleanup cron: fire cleanup on mount + every 10 min.
@@ -690,6 +714,10 @@ export function ChatView({
         ) {
           lastCreatedAtRef.current = real.createdAt;
         }
+        // Reconcile cepat: sinkron sekali segera setelah kirim sukses —
+        // menangkap reaksi/pesan balasan yang masuk di detik yang sama
+        // tanpa menunggu interval polling berikutnya.
+        pollNowRef.current?.();
         return real.id;
       } catch (e) {
         // Revert optimistic

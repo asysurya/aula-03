@@ -86,6 +86,13 @@ interface JobRuntime {
   parts?: Blob[];
   /** ukuran total yang diketahui saat mengunduh (dari header) */
   liveSizeHint?: number;
+  /** URL presigned S3 (unduh langsung dari penyimpanan — melewati server).
+   *  Di-refresh otomatis bila mendekati kedaluwarsa (10 menit). */
+  fastUrl?: string;
+  fastUrlAt?: number;
+  /** true = jangan percah segmen / jangan probe Range (file MEGA: multi-
+   *  koneksi hanya memicu unduhan penuh berulang di server). */
+  noSegment?: boolean;
   execPromise?: Promise<void>;
   /** true selama runner (runUpload/runDownload) mengeksekusi — mencegah
    *  pump menjalankan job dua kali (mis. resume dari pause yang tertahan
@@ -110,14 +117,14 @@ interface DownloadSeg {
 
 const runtimes = new Map<string, JobRuntime>();
 const MAX_ACTIVE = 2;
-const FLUSH_MS = 1000;
+/** Progress di-flush ke UI tiap 250 ms — terasa real-time (dulu 1 dtk). */
+const FLUSH_MS = 250;
 /** Jumlah chunk upload yang dikirim bersamaan — saat server memproses satu
  *  chunk (parse formData + upsert MongoDB) byte chunk lain tetap mengalir
  *  sehingga duty-cycle mendekati 100%. */
 const UPLOAD_PARALLEL = 3;
-/** Unduhan besar dipecah jadi segmen Range paralel. */
-const DOWNLOAD_SEGMENTS = 4;
-/** Ambang ukuran minimal agar unduhan dipecah segmen paralel. */
+/** Unduhan besar dipecah jadi segmen Range paralel (jumlah adaptif —
+ *  lihat downloadSegmentCount). */
 const SEGMENT_MIN_BYTES = 8 * 1024 * 1024;
 
 function newId(): string {
@@ -876,6 +883,11 @@ type SegmentOutcome = "done" | "paused" | "cancelled" | "no-range";
 async function runDownload(rt: JobRuntime) {
   if (!rt.url) throw new Error("URL unduhan tidak valid");
 
+  // ── Jalur cepat: minta URL presigned (file S3 → unduh LANGSUNG dari
+  //    penyimpanan; bandwidth server 0). File MEGA → tandai noSegment
+  //    (streaming satu koneksi). Gagal resolve → proxy biasa. ──
+  await resolveFastUrl(rt);
+
   // ── Resume unduhan bersegmen dari pause sebelumnya ──
   if (rt.segTotal && rt.segs && rt.segs.length > 0) {
     const outcome = await runSegments(rt);
@@ -896,6 +908,10 @@ async function runDownload(rt: JobRuntime) {
   // Partial single-stream dari pause lama → langsung resume di jalur itu.
   if (rt.parts && rt.parts.length > 0) return runSingleStream(rt);
 
+  // File MEGA / non-range → satu koneksi streaming (TANPA probe — probe
+  // Range pada MEGA memicu unduhan penuh di server).
+  if (rt.noSegment) return runSingleStream(rt);
+
   // ── Mulai segar: probe dukungan Range (minta 1 byte) ──
   const probe = await probeRangeSupport(rt);
   if (probe.supportsRange && probe.total >= SEGMENT_MIN_BYTES) {
@@ -903,7 +919,7 @@ async function runDownload(rt: JobRuntime) {
     rt.liveSizeHint = probe.total;
     syncSizeHint(rt);
     rt.segTotal = probe.total;
-    rt.segs = buildSegments(probe.total, DOWNLOAD_SEGMENTS);
+    rt.segs = buildSegments(probe.total, downloadSegmentCount(probe.total));
     const outcome = await runSegments(rt);
     if (outcome === "done") return finishDownloadBlob(rt);
     if (outcome === "paused") {
@@ -918,6 +934,62 @@ async function runDownload(rt: JobRuntime) {
   return runSingleStream(rt);
 }
 
+/** Jumlah segmen adaptif: file besar → lebih banyak koneksi paralel
+ *  (target jenuh bandwidth 10–20 MB/s+). */
+function downloadSegmentCount(total: number): number {
+  if (total <= 16 * 1024 * 1024) return 4;
+  if (total <= 64 * 1024 * 1024) return 6;
+  return 8;
+}
+
+/** URL yang dipakai fetch saat ini (presigned bila ada & belum basi). */
+function currentFetchUrl(rt: JobRuntime): string {
+  if (
+    rt.fastUrl &&
+    rt.fastUrlAt &&
+    Date.now() - rt.fastUrlAt < 8 * 60 * 1000 // refresh sebelum 10 menit
+  ) {
+    return rt.fastUrl;
+  }
+  return rt.url!;
+}
+
+/** Minta strategi unduhan cepat utk URL /api/storage/<key>... */
+async function resolveFastUrl(rt: JobRuntime): Promise<void> {
+  if (!rt.url) return;
+  const m = /^\/api\/storage\/([^/?#]+)/.exec(rt.url);
+  if (!m) return; // URL eksternal (mis. lampiran luar) → proxy biasa
+  const storageKey = decodeURIComponent(m[1]);
+  try {
+    const res = await fetch(
+      `/api/storage/${encodeURIComponent(storageKey)}/link`,
+      { cache: "no-store" }
+    );
+    if (!res.ok) return;
+    const link = (await res.json()) as {
+      ok?: boolean;
+      url?: string | null;
+      size?: number;
+      segments?: "auto" | number;
+      stream?: boolean;
+    };
+    if (!link?.ok) return;
+    if (typeof link.size === "number" && link.size > 0) {
+      rt.liveSizeHint = link.size;
+      syncSizeHint(rt);
+    }
+    if (link.url) {
+      rt.fastUrl = link.url;
+      rt.fastUrlAt = Date.now();
+    } else if (link.segments === 1 || link.stream) {
+      // MEGA / lokal: satu koneksi streaming — probe & segmen dihindari.
+      rt.noSegment = true;
+    }
+  } catch {
+    /* offline / route error → proxy biasa */
+  }
+}
+
 /** Probe 1-byte: apakah server mendukung Range (206) & berapa total byte. */
 async function probeRangeSupport(
   rt: JobRuntime
@@ -928,7 +1000,7 @@ async function probeRangeSupport(
     const ctrl = new AbortController();
     rt.abortCurrent = () => ctrl.abort();
     try {
-      const res = await fetch(rt.url!, {
+      const res = await fetch(currentFetchUrl(rt), {
         headers: { Range: "bytes=0-0" },
         signal: ctrl.signal,
       });
@@ -1032,17 +1104,22 @@ async function downloadSegment(
   sumReceived: () => number
 ): Promise<void> {
   const segLen = seg.end - seg.start + 1;
-  const url = rt.url!;
   for (let attempt = 1; attempt <= 3; attempt++) {
     if (rt.cancelled) throw new Error("__CANCELLED__");
     if (rt.pauseRequested) throw new Error("__PAUSED__");
+    // Presigned URL bisa kedaluwarsa (10 dtk) saat unduhan panjang /
+    // di-retry — segarkan bila sudah mendekati batas umur.
+    if (rt.fastUrl && attempt > 1) {
+      const age = Date.now() - (rt.fastUrlAt ?? 0);
+      if (age > 7 * 60 * 1000) await resolveFastUrl(rt);
+    }
     const ctrl = new AbortController();
     const abortFn = () => ctrl.abort();
     aborts.add(abortFn);
     let controlAbort = false;
     try {
       const from = seg.start + seg.received;
-      const res = await fetch(url, {
+      const res = await fetch(currentFetchUrl(rt), {
         headers: { Range: `bytes=${from}-${seg.end}` },
         signal: ctrl.signal,
       });
@@ -1148,7 +1225,11 @@ async function runSingleStream(rt: JobRuntime): Promise<void> {
     try {
       const headers: Record<string, string> = {};
       if (received > 0) headers["Range"] = `bytes=${received}-`;
-      const res = await fetch(rt.url, { headers, signal: ctrl.signal });
+      // Presigned basi (unduhan panjang) → segarkan sekali sebelum fetch.
+      if (rt.fastUrl && Date.now() - (rt.fastUrlAt ?? 0) > 7 * 60 * 1000) {
+        await resolveFastUrl(rt);
+      }
+      const res = await fetch(currentFetchUrl(rt), { headers, signal: ctrl.signal });
       if (!res.ok && res.status !== 206) {
         throw new Error(`HTTP ${res.status}`);
       }

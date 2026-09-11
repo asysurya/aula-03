@@ -76,6 +76,11 @@ function buildClient(account: S3AccountLike): InstanceType<S3Module["S3Client"]>
       accessKeyId: account.accessKeyId ?? "",
       secretAccessKey: account.secretAccessKey ?? "",
     },
+    // Kompatibilitas MinIO / Cloudflare R2 / sebagian provider S3 lama:
+    // SDK v3.729+ secara default mengirim header checksum CRC32 yang ditolak
+    // mereka ("header implies functionality not implemented").
+    requestChecksumCalculation: "WHEN_REQUIRED",
+    responseChecksumValidation: "WHEN_REQUIRED",
   });
 }
 
@@ -241,5 +246,106 @@ export async function s3Delete(
     );
   } catch {
     /* swallow — caller already deletes the DB row */
+  }
+}
+
+// ───────────────── Streaming & presign (unduhan cepat) ─────────────────
+
+export interface S3StreamResult {
+  stream: ReadableStream<Uint8Array>;
+  /** Panjang isi (atau panjang slice utk range). */
+  length: number;
+  /** Hanya utk permintaan range: nilai header Content-Range. */
+  contentRange?: string;
+}
+
+/**
+ * Ambil object sebagai STREAM (tanpa buffering penuh di memori proses).
+ * `range` opsional → hanya byte start..end yang diambil (S3 asli mendukung
+ * Range sehingga seek video & unduhan multi-segmen jadi murah).
+ */
+export async function s3Stream(
+  account: S3AccountLike,
+  objectKey: string,
+  range?: { start: number; end: number }
+): Promise<S3StreamResult | null> {
+  try {
+    requireConfig(account);
+    const { GetObjectCommand } = await sdk();
+    const client = getS3Client(account);
+    const res = await withTimeout(
+      client.send(
+        new GetObjectCommand({
+          Bucket: account.bucket!,
+          Key: objectKey,
+          ...(range ? { Range: `bytes=${range.start}-${range.end}` } : {}),
+        })
+      ),
+      OP_TIMEOUT_MS
+    );
+    if (!res.Body) return null;
+    // SDK Node mengembalikan Readable (node stream) — konversi ke web stream
+    // yang bisa langsung dipakai sebagai body Response.
+    const { Readable } = await import("stream");
+    const body = res.Body as unknown as NodeJS.ReadableStream & {
+      getReader?: unknown;
+    };
+    const webStream =
+      typeof body.getReader === "function"
+        ? (res.Body as unknown as ReadableStream<Uint8Array>)
+        : (Readable.toWeb(
+            body as unknown as import("stream").Readable
+          ) as unknown as ReadableStream<Uint8Array>);
+    const length = res.ContentLength ?? (range ? range.end - range.start + 1 : 0);
+    return {
+      stream: webStream,
+      length,
+      contentRange: res.ContentRange ?? undefined,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Buat URL presigned GET (SigV4 query) — client mengunduh LANGSUNG dari S3,
+ * melewati server Next.js (bandwidth Vercel tidak terpakai → jauh lebih
+ * cepat, dan bisa multi-connection Range paralel).
+ * TTL pendek (default 10 menit) karena URL hanya dipakai sesaat.
+ */
+export async function s3PresignedGet(
+  account: S3AccountLike,
+  objectKey: string,
+  opts?: {
+    expiresInSec?: number;
+    downloadName?: string;
+  }
+): Promise<string | null> {
+  try {
+    requireConfig(account);
+    const { GetObjectCommand } = await sdk();
+    const { getSignedUrl } = await import("@aws-sdk/s3-request-presigner");
+    const client = getS3Client(account);
+    const url = await withTimeout(
+      getSignedUrl(
+        client,
+        new GetObjectCommand({
+          Bucket: account.bucket!,
+          Key: objectKey,
+          ...(opts?.downloadName
+            ? {
+                ResponseContentDisposition: `inline; filename*=UTF-8''${encodeURIComponent(
+                  opts.downloadName
+                )}`,
+              }
+            : {}),
+        }),
+        { expiresIn: opts?.expiresInSec ?? 600 }
+      ),
+      OP_TIMEOUT_MS
+    );
+    return url;
+  } catch {
+    return null;
   }
 }

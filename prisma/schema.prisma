@@ -47,6 +47,7 @@ model User {
   pushSubscriptions    PushSubscription[]
   aiSetting            AiUserSetting?
   aiMessages           AiMessage[]
+  readerDocs           ReaderDoc[]
 }
 
 enum Role {
@@ -685,4 +686,25 @@ model AiMessage {
   user User @relation(fields: [userId], references: [id], onDelete: NoAction, onUpdate: NoAction)
 
   @@index([userId, createdAt])
+}
+
+// ───────────────── Aula Reader: dokumen per user per file ─────────────────
+// Anotasi (stabilo, pena/draw) + posisi baca terakhir untuk file yang dibuka
+// di Aula Reader — tersimpan di MongoDB sehingga ikut user di semua perangkat
+// (dulu hanya localStorage per perangkat). File PDF/EPUB sendiri TIDAK
+// disimpan: buffer diunduh ke cache sementara browser dan otomatis dihapus
+// saat preview ditutup / tab ditutup.
+model ReaderDoc {
+  id          String   @id @default(cuid()) @map("_id")
+  userId      String
+  storageKey  String
+  // Annotation[]: { id, page, tool: hl|pen, color, w?, pts?, rect?, created }
+  annotations Json     @default("[]")
+  page        Int      @default(1)
+  updatedAt   DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+
+  @@unique([userId, storageKey])
+  @@index([userId])
 }

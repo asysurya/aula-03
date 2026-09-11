@@ -112,11 +112,17 @@ export function PdfReader({
   const [ttsPlaying, setTtsPlaying] = useState(false);
   const [flashPage, setFlashPage] = useState<number | null>(null);
   const [viewMode, setViewMode] = useState<ViewMode>(loadViewMode);
+  /** Teks input nomor halaman saat sedang diedit (null = ikut page). */
+  const [pageInput, setPageInput] = useState<string | null>(null);
 
   const containerRef = useRef<HTMLDivElement>(null);
   const pageRefs = useRef<Map<number, HTMLDivElement>>(new Map());
   const textCache = useRef<Map<number, string>>(new Map());
   const ttsStop = useRef(false);
+  /** Sudahkah laporan perubahan halaman pertama dilewati (init/restore). */
+  const pageReportInit = useRef(false);
+  /** Sudahkah posisi baca tersimpan di-restore untuk file ini. */
+  const restored = useRef(false);
 
   const anno = useAnnotations(file.storageKey);
 
@@ -129,6 +135,9 @@ export function PdfReader({
     setNumPages(0);
     setDims({});
     setPage(1);
+    setPageInput(null);
+    pageReportInit.current = false;
+    restored.current = false;
     (async () => {
       try {
         const pdfjs = await getPdfjs();
@@ -229,6 +238,35 @@ export function PdfReader({
     },
     [viewMode, containerW, containerH, zoom, ratioOf]
   );
+
+  // ── Laporkan halaman aktif → tersimpan di MongoDB (lanjut baca lain
+  // waktu / perangkat). Laporan PERTAMA (init & restore) dilewati supaya
+  // tidak menimpa posisi tersimpan dengan halaman 1.
+  useEffect(() => {
+    if (!doc || numPages === 0) return;
+    if (!pageReportInit.current) {
+      pageReportInit.current = true;
+      return;
+    }
+    anno.reportPage(page);
+    // reportPage stabil (debounce internal); page memicu effect ini.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [page, doc, numPages]);
+
+  // ── Restore posisi baca terakhir (dari MongoDB) sekali per file ──
+  useEffect(() => {
+    if (!doc || numPages === 0 || restored.current) return;
+    if (anno.savedPage > 1 && anno.savedPage <= numPages) {
+      const el = containerRef.current;
+      const belumScroll =
+        !el || (el.scrollTop === 0 && el.scrollLeft === 0);
+      if (belumScroll) {
+        restored.current = true;
+        gotoPage(anno.savedPage);
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [doc, numPages, anno.savedPage]);
 
   // ── Halaman aktif (saat scroll — mendukung kedua mode) ──
   const onScroll = useCallback(() => {
@@ -541,13 +579,31 @@ export function PdfReader({
           <span className="text-sm tabular-nums px-1 whitespace-nowrap">
             <input
               className="w-12 h-9 text-center rounded-md border border-input bg-transparent focus:outline-none focus:ring-1 focus:ring-ring"
-              value={page}
-              onChange={(e) => {
-                const n = parseInt(e.target.value, 10);
-                if (!Number.isNaN(n)) setPage(Math.min(Math.max(1, n), numPages));
+              value={pageInput ?? String(page)}
+              inputMode="numeric"
+              autoComplete="off"
+              onFocus={(e) => {
+                // Select-all saat diklik/fokus — ditunda satu frame karena
+                // penempatan caret default dari click menimpa seleksi.
+                const el = e.currentTarget;
+                requestAnimationFrame(() => el.select());
               }}
+              onChange={(e) =>
+                setPageInput(e.target.value.replace(/[^\d]/g, "").slice(0, 6))
+              }
               onKeyDown={(e) => {
-                if (e.key === "Enter") gotoPage(page);
+                if (e.key === "Enter") {
+                  e.currentTarget.blur(); // commit di onBlur
+                } else if (e.key === "Escape") {
+                  setPageInput(null);
+                  e.currentTarget.blur();
+                }
+              }}
+              onBlur={() => {
+                if (pageInput === null) return;
+                const n = parseInt(pageInput, 10);
+                setPageInput(null);
+                if (!Number.isNaN(n)) gotoPage(n);
               }}
               aria-label="Nomor halaman"
             />
@@ -708,7 +764,7 @@ export function PdfReader({
             className="h-9 w-9"
             onClick={() => anno.clearAll()}
             disabled={anno.count === 0}
-            title="Hapus semua anotasi file ini"
+            title="Hapus semua anotasi file ini (tersimpan di akunmu)"
           >
             <Trash2 className="size-4" />
           </Button>

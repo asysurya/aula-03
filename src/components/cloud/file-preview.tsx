@@ -46,9 +46,12 @@ import {
   docxHtmlCache,
   xlsxSheetsCache,
   useOfficeBuffer,
+  formatSpeed,
+  type FetchProgress,
   type OfficeCacheEntry,
   type PreviewKind,
 } from "./buffer-loader";
+import { evictReaderFile } from "@/lib/reader-file-cache";
 import { AulaReader } from "./aula-reader/aula-reader";
 import {
   ModeChooser,
@@ -126,6 +129,9 @@ export function FilePreview({
       onOpenChange={(o) => {
         if (!o) {
           if (document.fullscreenElement) void document.exitFullscreen();
+          // Tutup pratinjau → buffer file dihapus dari cache sementara
+          // (anotasi tetap aman di MongoDB).
+          if (file?.storageKey) void evictReaderFile(file.storageKey);
           onClose();
         }
       }}
@@ -433,7 +439,7 @@ function LoadingBlock({
         {progress
           ? ` · ${formatBytes(progress.loaded)}${
               progress.total ? ` / ${formatBytes(progress.total)}` : ""
-            }`
+            }${progress.speed ? ` · ${formatSpeed(progress.speed)}` : ""}`
           : ""}
       </p>
       {pct !== null ? (
@@ -494,7 +500,7 @@ function OfficePreview({
   url: string;
   type: "docx" | "xlsx" | "pptx";
 }) {
-  const { entry, error, progress } = useOfficeBuffer(file, url);
+  const { entry, error, progress } = useOfficeBuffer(file);
   const kindLabel = type === "docx" ? ".docx" : type === "xlsx" ? ".xlsx" : ".pptx";
 
   if (error) {
