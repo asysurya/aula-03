@@ -2035,9 +2035,21 @@ async function deleteFolderCascade(folderId: string): Promise<void> {
   // Server-side cascade: DELETE /api/cloud/folders/[id] walks descendants,
   // clears submission links, deletes folders (cascading files/docs/assignments)
   // and best-effort deletes underlying storage blobs.
-  await fetch(`/api/cloud/folders/${folderId}`, {
+  const res = await fetch(`/api/cloud/folders/${folderId}`, {
     method: "DELETE",
   });
+  // FIX "sukses bohong": toast sukses hanya boleh muncul bila server benar-
+  // benar berhasil. Bila gagal (HTTP 500/timeout), lempar error — pemanggil
+  // (BatchDeleteDialog.submit) sudah menangkapnya via try/catch lalu
+  // menampilkan toast.error, bukan "N item dihapus".
+  if (!res.ok) {
+    const data = (await res.json().catch(() => null)) as {
+      error?: string;
+    } | null;
+    throw new Error(
+      data?.error || `Gagal menghapus folder (HTTP ${res.status})`
+    );
+  }
 }
 
 // ───────────────────────── New folder dialog ─────────────────────────

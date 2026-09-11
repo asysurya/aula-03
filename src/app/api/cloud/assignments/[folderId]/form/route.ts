@@ -142,6 +142,7 @@ export async function GET(
         trackTabSwitch: form.trackTabSwitch,
         timeLimitMin: form.timeLimitMin,
         showResult: form.showResult,
+        showAnswerKey: form.showAnswerKey ?? null,
         allowBack: form.allowBack ?? false,
         maxAttempts: form.maxAttempts ?? 1,
         questions: form.questions.map((q) => toQuestionDTO(q, true)),
@@ -179,7 +180,10 @@ export async function GET(
     const ordered = form.shuffleQuestions
       ? seededShuffle(qs, seed)
       : [...qs].sort((a, b) => a.order - b.order);
-    const showCorrect = form.showResult && attempt.status === "SUBMITTED";
+    // Kunci jawaban dibuka setelah submit bila showAnswerKey aktif; form lama
+    // (null) mengikuti showResult — kompatibilitas behavior sebelumnya.
+    const showCorrect =
+      (form.showAnswerKey ?? form.showResult) && attempt.status === "SUBMITTED";
     // Percobaan terpakai = arsip + attempt aktif ini.
     const archivedCount = await db.formAttemptArchive.count({
       where: { formId: form.id, userId: user.id },
@@ -203,6 +207,7 @@ export async function GET(
         trackTabSwitch: form.trackTabSwitch,
         timeLimitMin: form.timeLimitMin,
         showResult: form.showResult,
+        showAnswerKey: form.showAnswerKey ?? null,
         allowBack: form.allowBack ?? false,
         maxAttempts,
         questions: showCorrect
@@ -249,6 +254,7 @@ export async function GET(
       trackTabSwitch: form.trackTabSwitch,
       timeLimitMin: form.timeLimitMin,
       showResult: form.showResult,
+      showAnswerKey: form.showAnswerKey ?? null,
       allowBack: form.allowBack ?? false,
       maxAttempts: form.maxAttempts ?? 1,
       questions: [...qs].sort((a, b) => a.order - b.order),
@@ -385,6 +391,9 @@ export async function PUT(
     trackTabSwitch: !!settings.trackTabSwitch,
     timeLimitMin: timeLimit == null ? null : Math.round(timeLimit),
     showResult: settings.showResult !== false,
+    // Kunci jawaban ke siswa setelah submit — default ON saat guru menyimpan
+    // form (form lama null → true, switch builder juga default ON).
+    showAnswerKey: settings.showAnswerKey !== false,
     allowBack: !!settings.allowBack,
     maxAttempts,
     createdBy: user.id,

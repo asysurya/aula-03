@@ -7,7 +7,7 @@ export type Conversation =
   | { kind: "group"; id: string; name: string }
   | { kind: "dm"; id: string; peerId: string; peerName: string };
 
-export type Section = "chat" | "cloud" | "members" | "admin" | "profile";
+export type Section = "chat" | "cloud" | "members" | "admin" | "profile" | "study";
 
 interface UIState {
   section: Section;
@@ -28,6 +28,7 @@ interface UIState {
   openMembers: (classroomId?: string | null) => void;
   openProfile: () => void;
   openAdmin: () => void;
+  openStudy: () => void;
   toggleSidebar: () => void;
   setSidebarOpen: (open: boolean) => void;
 }
@@ -81,6 +82,10 @@ export const useUIStore = create<UIState>((set) => ({
 
   openAdmin: () =>
     set(() => ({ section: "admin", cloudDocId: null, sidebarOpen: false })),
+
+  // Buka Pusat Belajar (study hub).
+  openStudy: () =>
+    set(() => ({ section: "study", cloudDocId: null, sidebarOpen: false })),
 
   toggleSidebar: () => set((s) => ({ sidebarOpen: !s.sidebarOpen })),
   setSidebarOpen: (open) => set(() => ({ sidebarOpen: open })),

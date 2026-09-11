@@ -34,6 +34,7 @@ import {
 } from "@/lib/file-constants";
 import { mimeToIcon } from "@/lib/cloud-format";
 import { uploadSmart } from "@/lib/upload-client";
+import { UserAvatar } from "@/components/shared/user-avatar";
 import { MarkdownText } from "./markdown";
 import {
   AttachmentPicker,
@@ -106,6 +107,33 @@ function applySlashCommand(value: string, insert: string): string {
   return `${before}${insert}${rest ? ` ${rest}` : ""}`;
 }
 
+// ── @mention — tag user (autocomplete + highlight) ──────────────────
+
+interface MentionUser {
+  id: string;
+  name: string;
+  username: string;
+  avatarUrl: string | null;
+}
+
+const MENTION_MAX_RESULTS = 8;
+
+/**
+ * Deteksi token @mention tepat sebelum kursor: "@" di awal teks atau
+ * didahului spasi, diikuti 0..N karakter username. Email
+ * ("user@domain") tidak memicu karena "@" tidak di awal/didahului
+ * spasi. Return posisi "@" (start) + query yang sudah diketik.
+ */
+function detectMentionToken(
+  text: string,
+  caret: number
+): { start: number; query: string } | null {
+  const before = text.slice(0, caret);
+  const m = /(?:^|\s)@([a-zA-Z0-9_.]*)$/.exec(before);
+  if (!m) return null;
+  return { start: caret - m[1].length - 1, query: m[1] };
+}
+
 export function MessageInput({
   onSend,
   placeholder = "Tulis pesan…",
@@ -132,6 +160,17 @@ export function MessageInput({
     useState<AssignmentCard | null>(null);
   const [assignmentOpen, setAssignmentOpen] = useState(false);
   const [pollOpen, setPollOpen] = useState(false);
+  // ── @mention (tag user) ── token aktif sebelum kursor + daftar anggota.
+  const [mention, setMention] = useState<{ start: number; query: string } | null>(
+    null
+  );
+  const [mentionIndex, setMentionIndex] = useState(0);
+  const [mentionUsers, setMentionUsers] = useState<MentionUser[] | null>(null);
+  // Ambil daftar anggota SEKALI saat popup pertama dibuka (cache memori
+  // selama komponen hidup; gagal fetch → boleh dicoba lagi nanti).
+  const mentionFetchStarted = useRef(false);
+  // Timer tutup-popup saat blur (beri kesempatan klik item di mobile).
+  const mentionCloseTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Throttle kirim sinyal "sedang menulis".
   const lastTypingSentRef = useRef(0);
   const dragDepth = useRef(0);
@@ -148,6 +187,8 @@ export function MessageInput({
     } catch {
       /* abaikan */
     }
+    // Pindah conversation — tutup popup mention dari teks lama.
+    setMention(null);
   }, [draftKey]);
   useEffect(() => {
     try {
@@ -203,6 +244,114 @@ export function MessageInput({
   useEffect(() => {
     setSlashIndex(0);
   }, [slashMatches.length]);
+
+  // ── @mention: ambil daftar anggota sekali saat popup pertama dibuka ──
+  const fetchMentionUsers = useCallback(() => {
+    if (mentionFetchStarted.current) return;
+    mentionFetchStarted.current = true;
+    fetch("/api/users", { cache: "no-store" })
+      .then((r) => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        return r.json();
+      })
+      .then((d: { users?: MentionUser[] }) => {
+        setMentionUsers(
+          (d.users ?? []).map((u) => ({
+            id: String(u.id),
+            name: String(u.name ?? ""),
+            username: String(u.username ?? ""),
+            avatarUrl: u.avatarUrl ?? null,
+          }))
+        );
+      })
+      .catch(() => {
+        // Gagal ambil — izinkan percobaan ulang saat popup dibuka lagi.
+        mentionFetchStarted.current = false;
+      });
+  }, []);
+
+  // Filter anggota: username/nama dimulai dengan query diprioritaskan,
+  // lalu yang hanya "mengandung" query (case-insensitive). Maks 8 hasil.
+  const mentionItems = useMemo<MentionUser[]>(() => {
+    if (mention === null || mentionUsers === null) return [];
+    const q = mention.query.toLowerCase();
+    if (!q) return mentionUsers.slice(0, MENTION_MAX_RESULTS);
+    const starts: MentionUser[] = [];
+    const contains: MentionUser[] = [];
+    for (const u of mentionUsers) {
+      const name = u.name.toLowerCase();
+      const username = u.username.toLowerCase();
+      if (username.startsWith(q) || name.startsWith(q)) starts.push(u);
+      else if (username.includes(q) || name.includes(q)) contains.push(u);
+    }
+    return [...starts, ...contains].slice(0, MENTION_MAX_RESULTS);
+  }, [mention, mentionUsers]);
+
+  // Indeks aktif di-reset setiap query berubah (atau popup ditutup).
+  useEffect(() => {
+    setMentionIndex(0);
+  }, [mention?.start, mention?.query]);
+
+  // Bersihkan timer blur saat komponen dilepas.
+  useEffect(() => {
+    return () => {
+      if (mentionCloseTimer.current) clearTimeout(mentionCloseTimer.current);
+    };
+  }, []);
+
+  const mentionActive = Math.min(
+    mentionIndex,
+    Math.max(0, mentionItems.length - 1)
+  );
+
+  /** Perbarui/deteksi token @mention dari teks + posisi kursor. */
+  function updateMentionState(text: string, caret: number) {
+    const token = detectMentionToken(text, caret);
+    if (!token) {
+      setMention(null);
+      return;
+    }
+    if (mentionUsers === null) fetchMentionUsers();
+    setMention((prev) =>
+      prev && prev.start === token.start && prev.query === token.query
+        ? prev
+        : token
+    );
+  }
+
+  /** Ganti token "@query" dengan "@username " pada posisi kursor. */
+  function applyMention(user: MentionUser) {
+    cancelMentionClose();
+    const el = ref.current;
+    const token = mention;
+    setMention(null);
+    if (!el || !token) return;
+    const caret = el.selectionStart ?? value.length;
+    const before = value.slice(0, token.start);
+    const after = value.slice(
+      Math.max(caret, token.start + 1 + token.query.length)
+    );
+    const insert = `@${user.username} `;
+    setValue(before + insert + after);
+    requestAnimationFrame(() => {
+      el.focus();
+      const pos = before.length + insert.length;
+      el.setSelectionRange(pos, pos);
+    });
+  }
+
+  /** Tutup popup sedikit tertunda saat blur (agar klik item tetap kena). */
+  function scheduleMentionClose() {
+    cancelMentionClose();
+    mentionCloseTimer.current = setTimeout(() => setMention(null), 150);
+  }
+
+  function cancelMentionClose() {
+    if (mentionCloseTimer.current) {
+      clearTimeout(mentionCloseTimer.current);
+      mentionCloseTimer.current = null;
+    }
+  }
 
   function pickFiles() {
     fileInputRef.current?.click();
@@ -399,6 +548,7 @@ export function MessageInput({
     const attachmentFileIds = pending.map((p) => p.fileId);
     const assignmentId = pendingAssignment?.id ?? null;
     setValue("");
+    setMention(null);
     setSending(true);
     try {
       await onSend(content, attachmentFileIds, assignmentId);
@@ -426,6 +576,32 @@ export function MessageInput({
 
   // Shift+Enter to send; plain Enter = newline (default behavior).
   function onKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
+    // Navigasi popup @mention (↑↓ pilih, Enter/Tab sisipkan, Esc tutup).
+    if (mention !== null && mentionItems.length > 0) {
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        setMentionIndex((i) => (i + 1) % mentionItems.length);
+        return;
+      }
+      if (e.key === "ArrowUp") {
+        e.preventDefault();
+        setMentionIndex(
+          (i) => (i - 1 + mentionItems.length) % mentionItems.length
+        );
+        return;
+      }
+      if (e.key === "Enter" || e.key === "Tab") {
+        e.preventDefault();
+        const chosen = mentionItems[Math.min(mentionIndex, mentionItems.length - 1)];
+        if (chosen) applyMention(chosen);
+        return;
+      }
+      if (e.key === "Escape") {
+        e.preventDefault();
+        setMention(null);
+        return;
+      }
+    }
     // Pilih slash command dengan panah + Enter.
     if (slashMatches.length > 0) {
       if (e.key === "ArrowDown") {
@@ -654,11 +830,82 @@ export function MessageInput({
       />
       {/* Catatan: input sengaja TANPA accept supaya semua file terlihat di
           pemilih file (mimetype OS kosong/aneh masih divalidasi di atas). */}
-      <div className="flex items-end gap-2">
+      <div className="relative flex items-end gap-2">
+        {/* Popup @mention — autocomplete di atas textarea (Discord style) */}
+        {mention !== null ? (
+          mentionUsers === null ? (
+            <div
+              className="absolute bottom-full left-0 z-30 mb-1.5 w-72 max-w-full rounded-lg border border-border bg-popover px-3 py-2 shadow-md"
+              aria-live="polite"
+            >
+              <p className="text-xs text-muted-foreground">
+                Memuat daftar anggota…
+              </p>
+            </div>
+          ) : mentionItems.length > 0 ? (
+            <div
+              role="listbox"
+              aria-label="Sebut anggota"
+              className="absolute bottom-full left-0 z-30 mb-1.5 w-72 max-w-full overflow-hidden rounded-lg border border-border bg-popover shadow-md"
+            >
+              <p className="px-2.5 pb-1 pt-1.5 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+                Menyebut anggota — ↑↓ pilih · Enter/Tab sisipkan · Esc tutup
+              </p>
+              <div className="max-h-56 overflow-y-auto pb-1">
+                {mentionItems.map((u, i) => (
+                  <button
+                    key={u.id}
+                    type="button"
+                    role="option"
+                    aria-selected={i === mentionActive}
+                    tabIndex={-1}
+                    onMouseDown={(e) => {
+                      e.preventDefault();
+                      cancelMentionClose();
+                    }}
+                    onMouseEnter={() => setMentionIndex(i)}
+                    onClick={() => applyMention(u)}
+                    className={cn(
+                      "flex w-full items-center gap-2.5 px-2.5 py-1.5 text-left transition-colors",
+                      i === mentionActive ? "bg-accent" : "hover:bg-accent/50"
+                    )}
+                  >
+                    <UserAvatar
+                      name={u.name}
+                      username={u.username}
+                      avatarUrl={u.avatarUrl}
+                      size="xs"
+                      className="shrink-0"
+                    />
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate text-xs font-medium">
+                        {u.name}
+                      </span>
+                      <span className="block truncate text-[10px] text-muted-foreground">
+                        @{u.username}
+                      </span>
+                    </span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          ) : null
+        ) : null}
         <Textarea
           ref={ref}
           value={value}
-          onChange={(e) => setValue(e.target.value)}
+          onChange={(e) => {
+            const v = e.target.value;
+            setValue(v);
+            // Deteksi @mention pada kata terakhir sebelum kursor.
+            updateMentionState(v, e.target.selectionStart ?? v.length);
+          }}
+          onSelect={(e) => {
+            // Kursor berpindah (klik/panah) — deteksi ulang token @mention.
+            const el = e.currentTarget;
+            updateMentionState(value, el.selectionStart ?? value.length);
+          }}
+          onBlur={scheduleMentionClose}
           onKeyDown={onKeyDown}
           rows={1}
           placeholder={placeholder}
@@ -782,7 +1029,7 @@ export function MessageInput({
         </Button>
       </div>
       <p className="text-[10px] text-muted-foreground mt-1 px-1 hidden sm:block">
-        Shift+Enter kirim · Enter baris baru · ketik / untuk perintah cepat · lampiran tersimpan di cloud
+        Shift+Enter kirim · Enter baris baru · ketik / untuk perintah cepat · ketik @ untuk menyebut anggota · lampiran tersimpan di cloud
       </p>
 
       {/* Cloud picker — pilih file cloud / unggah baru */}

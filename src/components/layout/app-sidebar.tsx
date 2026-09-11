@@ -32,6 +32,7 @@ import {
   Lock,
   ChevronRight,
   CalendarDays,
+  GraduationCap,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { roleLabel } from "@/lib/constants";
@@ -60,6 +61,7 @@ export function AppSidebar({
     openMembers,
     openProfile,
     openAdmin,
+    openStudy,
   } = useUIStore();
   const [dmPickerOpen, setDmPickerOpen] = useState(false);
   const [upcomingOpen, setUpcomingOpen] = useState(false);
@@ -118,6 +120,12 @@ export function AppSidebar({
               label="Anggota"
               active={section === "members"}
               onClick={() => openMembers(classrooms[0]?.id ?? null)}
+            />
+            <SideButton
+              icon={<GraduationCap className="h-4 w-4" />}
+              label="Pusat Belajar"
+              active={section === "study"}
+              onClick={openStudy}
             />
             {isAdmin ? (
               <SideButton

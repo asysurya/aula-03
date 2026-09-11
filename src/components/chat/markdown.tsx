@@ -7,7 +7,8 @@
 //
 // Didukung: **tebal**, *miring*, _miring_, __garis bawah__, ~~coret~~,
 // ||spoiler||, `kode`, blok kode ```, kutipan >, heading #/##/###,
-// daftar -/*, tautan otomatis (http/https), dan [label](url).
+// daftar -/*, tautan otomatis (http/https), [label](url), dan sebutan
+// anggota @username (chip highlight).
 // Klik tautan SELALU minta konfirmasi dulu (anti-phishing).
 // ─────────────────────────────────────────────────────────────────────
 
@@ -34,10 +35,18 @@ type InlineNode =
   | { t: "strike"; c: InlineNode[] }
   | { t: "spoiler"; c: InlineNode[] }
   | { t: "code"; v: string }
+  | { t: "mention"; v: string }
   | { t: "link"; url: string; label: string }
   | { t: "url"; url: string };
 
 const AUTOLINK_RE = /^https?:\/\/[^\s<>"'`]+/;
+
+// Sebutan anggota @username — hanya di luar kode (inline/fenced) dan URL:
+// kedua bentuk itu sudah dikonsumsi atomik oleh cabang `code`/`link`/
+// `url` di bawah sebelum teks biasa diproses, jadi @ di dalamnya tidak
+// pernah sampai ke pemeriksaan ini.
+const MENTION_AFTER_SPACE_RE = /^([\s(])@([a-zA-Z0-9_.]{2,24})/;
+const MENTION_AT_START_RE = /^@([a-zA-Z0-9_.]{2,24})/;
 
 /** Buang tanda baca yang biasa "nempel" di ujung URL hasil copy. */
 function trimTrailingPunct(url: string): string {
@@ -109,6 +118,27 @@ function parseInline(text: string): InlineNode[] {
       out.push({ t: "url", url });
       i += url.length;
       continue;
+    }
+
+    // @username — sebutan anggota (didahului spasi/"(" atau di awal
+    // fragmen). Regex {2,24} sesuai spek; karakter di luar kelas
+    // (mis. koma/titik-akhir) otomatis menghentikan nama.
+    const men = MENTION_AFTER_SPACE_RE.exec(rest);
+    if (men) {
+      flush();
+      out.push({ t: "text", v: men[1] });
+      out.push({ t: "mention", v: men[2] });
+      i += men[0].length;
+      continue;
+    }
+    if (i === 0) {
+      const menStart = MENTION_AT_START_RE.exec(rest);
+      if (menStart) {
+        flush();
+        out.push({ t: "mention", v: menStart[1] });
+        i += menStart[0].length;
+        continue;
+      }
     }
 
     // pasangan delimiter (tebal/garis bawah/coret/spoiler/miring)
@@ -361,6 +391,12 @@ function InlineView({ node }: { node: InlineNode }) {
         <code className="rounded bg-muted px-1 py-0.5 font-mono text-[13px] text-foreground/90 break-all">
           {node.v}
         </code>
+      );
+    case "mention":
+      return (
+        <span className="rounded bg-primary/15 px-1 font-medium text-primary">
+          @{node.v}
+        </span>
       );
     case "link":
       return <LinkWithConfirm url={node.url}>{node.label}</LinkWithConfirm>;

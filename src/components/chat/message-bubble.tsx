@@ -576,6 +576,57 @@ export const MessageBubble = memo(function MessageBubble({
     }
   }
 
+  // ── Salin teks pesan dengan SATU KLIK pada area teks utama ────
+  // Abaikan klik yang mengenai elemen interaktif (tautan, spoiler, tombol
+  // salin kode, gambar, dsb) dan klik yang mengakhiri seleksi teks manual
+  // (selection aktif) — teks tetap bisa diseleksi/drag seperti biasa.
+  function handleContentClick(e: React.MouseEvent) {
+    const target = e.target as HTMLElement;
+    if (
+      target.closest(
+        "a,button,img,video,audio,input,textarea,select,[contenteditable],[data-no-copy]"
+      )
+    ) {
+      return;
+    }
+    const selection = window.getSelection();
+    if (selection && selection.toString().length > 0) return;
+    void copyContentText();
+  }
+
+  async function copyContentText() {
+    const text = message.content;
+    if (!text) return;
+    try {
+      if (navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
+        await navigator.clipboard.writeText(text);
+        toast.success("Teks tersalin");
+        return;
+      }
+      // Konteks tidak aman (mis. HTTP non-localhost) — fallback lama
+      // via textarea tersembunyi + execCommand("copy").
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      ta.setAttribute("readonly", "");
+      ta.style.position = "fixed";
+      ta.style.top = "-9999px";
+      ta.style.opacity = "0";
+      document.body.appendChild(ta);
+      ta.focus();
+      ta.select();
+      let ok = false;
+      try {
+        ok = document.execCommand("copy");
+      } finally {
+        document.body.removeChild(ta);
+      }
+      if (ok) toast.success("Teks tersalin");
+      else toast.error("Gagal menyalin teks");
+    } catch {
+      toast.error("Gagal menyalin teks");
+    }
+  }
+
   // ── Discord-style flat message row ──────────────────────────────
   return (
     <div
@@ -651,7 +702,15 @@ export const MessageBubble = memo(function MessageBubble({
                 ) : null}
               </div>
             ) : null}
-            {hasContent ? <MarkdownText text={message.content} /> : null}
+            {hasContent ? (
+              <div
+                onClick={handleContentClick}
+                title="Klik untuk menyalin"
+                className="cursor-pointer transition-transform duration-100 active:scale-[0.99]"
+              >
+                <MarkdownText text={message.content} />
+              </div>
+            ) : null}
             {message.assignmentId ? (
               <AssignmentCardView
                 assignment={message.assignment ?? null}

@@ -131,6 +131,7 @@ export function FormBuilder({
       trackTabSwitch: true,
       timeLimitMin: null,
       showResult: true,
+      showAnswerKey: true,
       allowBack: false,
       maxAttempts: 1,
     }
@@ -575,6 +576,15 @@ export function FormBuilder({
             checked={settings.showResult}
             disabled={locked}
             onChange={(v) => setSettings((s) => ({ ...s, showResult: v }))}
+          />
+          <SettingSwitch
+            label="Tampilkan kunci jawaban setelah dikumpulkan"
+            hint="Siswa melihat jawaban benar & pembahasan setelah submit"
+            checked={settings.showAnswerKey ?? true}
+            disabled={locked}
+            onChange={(v) =>
+              setSettings((s) => ({ ...s, showAnswerKey: v }))
+            }
           />
         </div>
 

@@ -7,6 +7,7 @@ import { CloudView } from "@/components/cloud/cloud-view";
 import { MembersView } from "@/components/members/members-view";
 import { AdminView } from "@/components/admin/admin-view";
 import { ProfileView } from "@/components/profile/profile-view";
+import { StudyHub } from "@/components/study/study-hub";
 import { EmptyState } from "@/components/shared/empty-state";
 
 export function MainContent({
@@ -40,6 +41,7 @@ export function MainContent({
       <EmptyState title="Akses ditolak" description="Halaman ini khusus admin." />
     );
   if (section === "profile") return me.user ? <ProfileView me={me} /> : null;
+  if (section === "study") return <StudyHub me={me} />;
 
   return null;
 }

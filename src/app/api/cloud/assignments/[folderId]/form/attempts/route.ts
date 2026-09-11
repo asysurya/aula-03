@@ -77,6 +77,14 @@ export async function GET(
   });
   if (!form) return errorResponse("FORM_NOT_FOUND", 404);
 
+  // Arsip percobaan lama (hasil retry) — riwayat per siswa.
+  // FormAttemptArchive tidak punya relasi Prisma ke Form, jadi di-query
+  // terpisah lalu dipetakan lewat userId di sisi UI.
+  const archiveRows = await db.formAttemptArchive.findMany({
+    where: { formId: form.id },
+    orderBy: [{ startedAt: "asc" }, { archivedAt: "asc" }],
+  });
+
   // Roster: all classroom students (so teacher sees who hasn't started).
   const members = await db.classroomMember.findMany({
     where: { classroomId },
@@ -123,6 +131,34 @@ export async function GET(
   }));
 
   const attemptByUser = new Map(attempts.map((a) => [a.user.id, a]));
+
+  // Detail arsip per percobaan lama: skor, durasi (startedAt→submittedAt),
+  // pelanggaran, dan snapshot jawaban (bila tersedia — arsip lama = null).
+  const archives = archiveRows.map((ar) => ({
+    id: ar.id,
+    attemptId: ar.attemptId,
+    userId: ar.userId,
+    score: ar.score,
+    maxScore: ar.maxScore,
+    violations: parseJsonArray<{ type: string; at: string; detail?: string }>(
+      ar.violations
+    ),
+    startedAt: ar.startedAt,
+    submittedAt: ar.submittedAt,
+    archivedAt: ar.archivedAt,
+    answers: parseJsonArray<{
+      questionId: string;
+      text: string | null;
+      optionIds: string[];
+      fileId: string | null;
+      fileName: string | null;
+      score: number | null;
+    }>(ar.answers),
+    // false = arsip dibuat sebelum fitur snapshot jawaban (answers null) —
+    // UI menampilkan "detail jawaban tidak tersimpan (arsip lama)".
+    hasAnswerDetail: ar.answers != null,
+  }));
+
   const roster = members.map((m) => ({
     user: m.user,
     role: m.role,
@@ -138,6 +174,7 @@ export async function GET(
     },
     questions,
     attempts,
+    archives,
     roster,
   });
 }

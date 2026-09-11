@@ -143,6 +143,15 @@ export function FormPlayer({
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [warning, setWarning] = useState<string | null>(null);
   const [result, setResult] = useState<FormSubmitResult | null>(null);
+  // startedAt percobaan yang SEDANG dikerjakan. Prop `attempt` adalah data
+  // LAMA dari react-query — saat siswa klik "Ulangi pengerjaan", startedAt
+  // di prop masih milik percobaan pertama sehingga elapsed terhitung besar
+  // → countdown langsung 0 → "Waktu habis" + auto-submit instan (bug
+  // percobaan ke-2+). State ini menyimpan startedAt attempt BARU dari
+  // response start/retry (lihat applyAttemptResponse).
+  const [activeStartedAt, setActiveStartedAt] = useState<string | null>(
+    attempt?.startedAt ?? null
+  );
   const [remainingSec, setRemainingSec] = useState<number | null>(null);
   // Countdown menuju tenggat tugas (selalu dihitung saat bermain).
   const [deadlineSec, setDeadlineSec] = useState<number | null>(null);
@@ -191,9 +200,22 @@ export function FormPlayer({
   function applyAttemptResponse(json: {
     questions: FormQuestionDTO[];
     settings: FormSettings;
+    attempt?: { startedAt?: string | Date | null } | null;
   }) {
     setQuestions(json.questions);
     setSettings(json.settings);
+    // FIX countdown percobaan ke-2+: simpan startedAt attempt BARU dari
+    // response (start & retry sama-sama mengirim json.attempt.startedAt).
+    // Tanpa ini timer masih memakai startedAt percobaan lama → langsung
+    // "waktu habis" + auto-submit instan di percobaan kedua dst.
+    setActiveStartedAt(
+      json.attempt?.startedAt
+        ? new Date(json.attempt.startedAt).toISOString()
+        : new Date().toISOString()
+    );
+    // Bersihkan sisa waktu percobaan lama agar `timeUp` tidak menyala
+    // sesaat sebelum tick pertama timer percobaan baru.
+    setRemainingSec(null);
     setAnswers({});
     setCurrentIdx(0);
     setSubmitError(null);
@@ -301,7 +323,9 @@ export function FormPlayer({
   // ── Timer countdown ───────────────────────────────────────────────
   // Dihitung dari startedAt SERVER → tahan refresh: siswa menutup tab,
   // menyalakan ulang HP, atau pindah perangkat, waktu tetap berjalan.
-  const startedAt = attempt?.startedAt;
+  // Prioritas activeStartedAt (percobaan baru hasil start/retry di sesi ini);
+  // prop `attempt` (data react-query) dipakai setelah refresh/remount.
+  const startedAt = activeStartedAt ?? attempt?.startedAt;
   const timeLimitMin = settings?.timeLimitMin ?? form?.timeLimitMin ?? null;
 
   useEffect(() => {
@@ -347,7 +371,7 @@ export function FormPlayer({
     tick();
     const t = setInterval(tick, 1000);
     return () => clearInterval(t);
-  }, [phase, timeLimitMin, startedAt, deadlineISO]);
+  }, [phase, timeLimitMin, startedAt, activeStartedAt, deadlineISO]);
 
   // ── Anti-cheat: tab switch / blur detection ───────────────────────
   useEffect(() => {
@@ -767,6 +791,9 @@ export function FormPlayer({
           {form?.timeLimitMin ? (
             <Rule text={`Timer ${form.timeLimitMin} menit — jawaban terkirim otomatis saat habis.`} />
           ) : null}
+          {!(form?.showAnswerKey ?? form?.showResult ?? true) ? (
+            <Rule text="Kunci jawaban & pembahasan tidak ditampilkan setelah dikumpulkan." />
+          ) : null}
         </div>
 
         {deadlinePassed ? (
@@ -847,6 +874,10 @@ export function FormPlayer({
     const score = result?.score ?? myAttempt?.score ?? null;
     const maxScore = result?.maxScore ?? myAttempt?.maxScore ?? 0;
     const showResult = result?.showResult ?? form?.showResult ?? false;
+    // Kunci jawaban & pembahasan — independen dari nilai (showResult).
+    // Fallback: form lama (showAnswerKey null) mengikuti showResult.
+    const showKey =
+      result?.showAnswerKey ?? (form?.showAnswerKey ?? form?.showResult) ?? true;
     return (
       <Card className="p-5 space-y-4">
         <div className="flex items-start gap-3">
@@ -934,7 +965,7 @@ export function FormPlayer({
         ) : null}
 
         {/* Pembahasan + umpan balik guru (setelah submit, kunci terbuka) */}
-        {showResult && quizQuestions.length >= 1 ? (
+        {showKey && quizQuestions.length >= 1 ? (
           <ReviewWithFeedback
             questions={qs}
             attempt={myAttempt}

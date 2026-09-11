@@ -30,6 +30,25 @@ async function assertMembership(
   return false;
 }
 
+// Tandai pesan bahwa reaksinya tersentuh (tambah ATAU hapus) supaya
+// sync realtime (computeChatSyncDelta → SSE/polling) mengirim pesan ini
+// sebagai `changed` ke client lain. Deteksi lama hanya memakai
+// messageReaction.createdAt — saat reaksi dihapus barisnya hilang tanpa
+// meninggalkan penanda apa pun, sehingga penghapusan tidak pernah terlihat
+// client lain sampai reload; penanda ini menutup celah itu untuk KEDUA
+// arah toggle.
+async function touchMessageReaction(messageId: string) {
+  try {
+    await db.message.update({
+      where: { id: messageId },
+      data: { reactionTouchedAt: new Date() },
+    });
+  } catch {
+    // Gagal menandai (mis. pesan terhapus bersamaan) — jangan gagalkan
+    // response toggle yang sudah sukses.
+  }
+}
+
 // POST /api/chat/messages/[id]/reactions  body: { emoji: string }
 // Toggles reaction (messageId, userId, emoji).
 export async function POST(
@@ -113,11 +132,13 @@ export async function POST(
   });
   if (existing) {
     await db.messageReaction.delete({ where: { id: existing.id } });
+    await touchMessageReaction(messageId);
     return NextResponse.json({ reacted: false, emoji });
   }
 
   await db.messageReaction.create({
     data: { messageId, userId, emoji },
   });
+  await touchMessageReaction(messageId);
   return NextResponse.json({ reacted: true, emoji });
 }

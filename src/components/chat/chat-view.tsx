@@ -13,6 +13,7 @@ import {
   Pin,
   BellRing,
   BellOff,
+  ChevronDown,
 } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
@@ -119,6 +120,10 @@ export function ChatView({
   const [pinnedOpen, setPinnedOpen] = useState(false);
   const [typingUsers, setTypingUsers] = useState<string[]>([]);
   const [notifEnabled, setNotifEnabled] = useState(false);
+  // Tombol lompat ke bawah: tampil saat user menjauh dari bawah; badge
+  // merah menghitung pesan baru yang masuk di bawah layar (belum dilihat).
+  const [showJump, setShowJump] = useState(false);
+  const [jumpCount, setJumpCount] = useState(0);
   const unseenCountRef = useRef(0);
   const baseTitleRef = useRef("");
   const notifEnabledRef = useRef(false);
@@ -250,6 +255,8 @@ export function ChatView({
     lastCreatedAtRef.current = null;
     lastPollRef.current = null;
     nearBottomRef.current = true;
+    setShowJump(false);
+    setJumpCount(0);
 
     (async () => {
       try {
@@ -328,7 +335,18 @@ export function ChatView({
           }`;
         }
       }
-      if (data.new?.length) mergeMessages(data.new);
+      if (data.new?.length) {
+        // Pesan baru: bila user sedang di dekat bawah, efek [messages]
+        // (scrollToBottomIfNeeded) otomatis menempelkan tampilan ke bawah.
+        // Bila user sedang membaca ke atas → JANGAN paksa scroll; akumulasi
+        // jumlah pesan baru ke badge tombol lompat (reset saat kembali ke
+        // bawah). Filter seenIds mencegah hitung ganda pada delivery ulang.
+        const fresh = data.new.filter((m) => !seenIdsRef.current.has(m.id));
+        if (fresh.length > 0 && !nearBottomRef.current) {
+          setJumpCount((c) => c + fresh.length);
+        }
+        mergeMessages(data.new);
+      }
       if (data.changed?.length) {
         const changedMap = new Map(data.changed.map((c) => [c.id, c]));
         setMessages((prev) => prev.map((m) => changedMap.get(m.id) ?? m));
@@ -528,12 +546,41 @@ export function ChatView({
     scrollToBottomIfNeeded();
   }, [messages, scrollToBottomIfNeeded]);
 
-  // Scroll handler to track "near bottom".
+  // ── Nempel di bawah saat konten memanjang ──
+  // Gambar/lampiran menambah tinggi konten SETELAH render (pemuatan async).
+  // ResizeObserver pada anak kontainer scroll mendeteksi pertumbuhan itu;
+  // bila user sedang near-bottom, tampilan tetap nempel di bawah. Bila user
+  // sedang di atas, tidak ada yang dipaksa — hanya onScroll yang mengatur.
+  const messagesEmpty = messages.length === 0;
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(() => {
+      scrollToBottomIfNeeded();
+    });
+    // Anak langsung kontainer scroll = pembungkus konten aktif (skeleton /
+    // error / empty-state / daftar pesan). Transisi antar state mengganti
+    // node — dep di bawah memicu pemasangan ulang observer.
+    for (const child of Array.from(el.children)) ro.observe(child);
+    return () => ro.disconnect();
+  }, [scrollToBottomIfNeeded, loadingInit, errorInit, messagesEmpty]);
+
+  // Scroll handler: lacak "near bottom" + tampil/sembunyikan tombol lompat.
   const onScroll = useCallback(() => {
     const el = scrollRef.current;
     if (!el) return;
     const dist = el.scrollHeight - el.scrollTop - el.clientHeight;
     nearBottomRef.current = dist < 80;
+    setShowJump(dist > 250);
+    // Kembali ke dekat bawah → reset hitungan pesan terlewat.
+    if (dist < 80) setJumpCount(0);
+  }, []);
+
+  // Lompat halus ke pesan terbaru (tombol floating).
+  const handleJumpToBottom = useCallback(() => {
+    nearBottomRef.current = true;
+    setJumpCount(0);
+    sentinelRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
   }, []);
 
   const handleSend = useCallback(
@@ -571,9 +618,12 @@ export function ChatView({
           : null,
       };
       seenIdsRef.current.add(tempId);
+      // Pesan sendiri: nempel ke bawah bila sedang near-bottom (auto-scroll
+      // existing via efek [messages]). Bila user sedang membaca ke atas,
+      // cukup tandai badge tombol lompat — jangan paksa scroll.
+      if (!nearBottomRef.current) setJumpCount((c) => c + 1);
       setMessages((prev) => [...prev, optimistic]);
       lastCreatedAtRef.current = optimistic.createdAt;
-      nearBottomRef.current = true;
 
       try {
         const res = await fetch("/api/chat/messages", {
@@ -934,97 +984,123 @@ export function ChatView({
         onToggleNotif={toggleNotif}
       />
 
-      {/* Messages */}
-      <div
-        ref={scrollRef}
-        onScroll={onScroll}
-        className="flex-1 min-h-0 overflow-y-auto px-3 sm:px-6 py-4"
-      >
-        {loadingInit && messages.length === 0 ? (
-          <div className="space-y-4 max-w-3xl mx-auto">
-            {/* Skeleton message cards */}
-            {[0, 1, 2, 3].map((i) => (
-              <div key={i} className="flex items-end gap-2">
-                <Skeleton className="h-8 w-8 rounded-full shrink-0" />
-                <div className="space-y-1.5 flex-1 max-w-[70%]">
-                  <div className="flex items-center gap-2">
-                    <Skeleton className="h-3 w-24" />
-                    <Skeleton className="h-2 w-12" />
+      {/* Messages + tombol lompat ke bawah */}
+      <div className="relative flex-1 min-h-0">
+        <div
+          ref={scrollRef}
+          onScroll={onScroll}
+          className="h-full overflow-y-auto px-3 sm:px-6 py-4"
+        >
+          {loadingInit && messages.length === 0 ? (
+            <div className="space-y-4 max-w-3xl mx-auto">
+              {/* Skeleton message cards */}
+              {[0, 1, 2, 3].map((i) => (
+                <div key={i} className="flex items-end gap-2">
+                  <Skeleton className="h-8 w-8 rounded-full shrink-0" />
+                  <div className="space-y-1.5 flex-1 max-w-[70%]">
+                    <div className="flex items-center gap-2">
+                      <Skeleton className="h-3 w-24" />
+                      <Skeleton className="h-2 w-12" />
+                    </div>
+                    <Skeleton className="h-8 w-3/4 rounded-xl" />
+                    <Skeleton className="h-4 w-20" />
                   </div>
-                  <Skeleton className="h-8 w-3/4 rounded-xl" />
-                  <Skeleton className="h-4 w-20" />
                 </div>
-              </div>
-            ))}
-          </div>
-        ) : errorInit ? (
-          <div className="h-full flex items-center justify-center">
-            <div className="text-center max-w-sm">
-              <p className="text-sm font-medium text-foreground">
-                Gagal memuat pesan
-              </p>
-              <p className="text-xs text-muted-foreground mt-1">{errorInit}</p>
-              <Button
-                variant="outline"
-                size="sm"
-                className="mt-3"
-                onClick={() => {
-                  // Force remount effect by toggling key via stateless reload.
-                  setErrorInit(null);
-                  setLoadingInit(true);
-                  seenIdsRef.current = new Set();
-                  lastCreatedAtRef.current = null;
-                  lastPollRef.current = null;
-                  fetchMessages(null, new AbortController().signal)
-                    .then((all) => {
-                      mergeMessages(all.messages);
-                      lastPollRef.current = all.serverTime;
-                    })
-                    .catch((e) =>
-                      setErrorInit(
-                        e instanceof Error ? e.message : "Gagal memuat"
-                      )
-                    )
-                    .finally(() => setLoadingInit(false));
-                }}
-              >
-                Coba lagi
-              </Button>
+              ))}
             </div>
-          </div>
-        ) : grouped.length === 0 ? (
-          <EmptyState
-            title="Mulai percakapan"
-            description="Belum ada pesan di sini. Sapa anggota lain di bawah ini."
-          />
-        ) : (
-          <div className="max-w-3xl mx-auto">
-            {grouped.map(({ message, showHeader }) => (
-              <MessageBubble
-                key={message.id}
-                message={message}
-                showHeader={showHeader}
-                isOwn={message.senderId === myId}
-                onlineIds={onlineIds}
-                currentUserId={myId}
-                canDelete={canDeleteAny || message.senderId === myId}
-                canPin={
-                  message.senderId === myId ||
-                  canDeleteAny ||
-                  (conversation.kind === "classroom" && isTeacherHere)
-                }
-                onAvatarClick={handleAvatarClick}
-                onReply={(msg) => setReplyTo(msg)}
-                onEdit={handleEdit}
-                onDelete={handleDelete}
-                onReact={handleReact}
-                onPin={handlePin}
-                onScrollToMessage={handleScrollToMessage}
-              />
-            ))}
-            <div ref={sentinelRef} className="h-1" />
-          </div>
-        )}
+          ) : errorInit ? (
+            <div className="h-full flex items-center justify-center">
+              <div className="text-center max-w-sm">
+                <p className="text-sm font-medium text-foreground">
+                  Gagal memuat pesan
+                </p>
+                <p className="text-xs text-muted-foreground mt-1">
+                  {errorInit}
+                </p>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="mt-3"
+                  onClick={() => {
+                    // Force remount effect by toggling key via stateless reload.
+                    setErrorInit(null);
+                    setLoadingInit(true);
+                    seenIdsRef.current = new Set();
+                    lastCreatedAtRef.current = null;
+                    lastPollRef.current = null;
+                    fetchMessages(null, new AbortController().signal)
+                      .then((all) => {
+                        mergeMessages(all.messages);
+                        lastPollRef.current = all.serverTime;
+                      })
+                      .catch((e) =>
+                        setErrorInit(
+                          e instanceof Error ? e.message : "Gagal memuat"
+                        )
+                      )
+                      .finally(() => setLoadingInit(false));
+                  }}
+                >
+                  Coba lagi
+                </Button>
+              </div>
+            </div>
+          ) : grouped.length === 0 ? (
+            <EmptyState
+              title="Mulai percakapan"
+              description="Belum ada pesan di sini. Sapa anggota lain di bawah ini."
+            />
+          ) : (
+            <div className="max-w-3xl mx-auto">
+              {grouped.map(({ message, showHeader }) => (
+                <MessageBubble
+                  key={message.id}
+                  message={message}
+                  showHeader={showHeader}
+                  isOwn={message.senderId === myId}
+                  onlineIds={onlineIds}
+                  currentUserId={myId}
+                  canDelete={canDeleteAny || message.senderId === myId}
+                  canPin={
+                    message.senderId === myId ||
+                    canDeleteAny ||
+                    (conversation.kind === "classroom" && isTeacherHere)
+                  }
+                  onAvatarClick={handleAvatarClick}
+                  onReply={(msg) => setReplyTo(msg)}
+                  onEdit={handleEdit}
+                  onDelete={handleDelete}
+                  onReact={handleReact}
+                  onPin={handlePin}
+                  onScrollToMessage={handleScrollToMessage}
+                />
+              ))}
+              <div ref={sentinelRef} className="h-1" />
+            </div>
+          )}
+        </div>
+
+        {/* Tombol lompat ke pesan terbaru — muncul saat pesan terbaru tidak
+            lagi terlihat; badge merah = jumlah pesan baru yang terlewat. */}
+        {showJump ? (
+          <button
+            type="button"
+            onClick={handleJumpToBottom}
+            aria-label="Lompat ke pesan terbaru"
+            title="Lompat ke pesan terbaru"
+            className="absolute bottom-4 right-4 sm:right-6 z-10 size-10 rounded-full shadow-lg bg-primary text-primary-foreground flex items-center justify-center transition-colors hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+          >
+            <ChevronDown className="size-5" />
+            {jumpCount > 0 ? (
+              <span
+                aria-hidden="true"
+                className="absolute -top-1.5 -right-1.5 min-w-4 h-4 px-1 rounded-full bg-destructive text-destructive-foreground text-[10px] font-semibold leading-none flex items-center justify-center tabular-nums border border-background"
+              >
+                {jumpCount > 99 ? "99+" : jumpCount}
+              </span>
+            ) : null}
+          </button>
+        ) : null}
       </div>
 
       {/* Indikator "sedang menulis…" */}

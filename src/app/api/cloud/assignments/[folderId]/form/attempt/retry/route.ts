@@ -21,9 +21,10 @@ function parseJsonArray<T>(raw: string | null | undefined): T[] {
 
 // POST /api/cloud/assignments/[folderId]/form/attempt/retry
 // Siswa mengulang pengerjaan (guru mengizinkan via Form.maxAttempts > 1).
-// Attempt lama (sudah SUBMITTED) diarsipkan ke FormAttemptArchive, lalu
-// attempt baru dibuat dengan orderSeed baru. Nilai yang dipakai = percobaan
-// TERAKHIR; riwayat percobaan sebelumnya tetap tersimpan di arsip.
+// Attempt lama (sudah SUBMITTED) diarsipkan ke FormAttemptArchive — lengkap
+// dengan snapshot jawaban per soal (JSON) — lalu attempt baru dibuat dengan
+// orderSeed baru. Nilai yang dipakai = percobaan TERAKHIR; riwayat percobaan
+// sebelumnya (skor, durasi, pelanggaran, detail jawaban) tetap tersimpan di arsip.
 export async function POST(
   _req: NextRequest,
   { params }: { params: Promise<{ folderId: string }> }
@@ -70,8 +71,15 @@ export async function POST(
   const maxAttempts = form.maxAttempts ?? 1;
   if (maxAttempts <= 1) return errorResponse("RETRY_NOT_ALLOWED", 403);
 
+  // Include answers + nama file supaya detail jawaban percobaan lama ikut
+  // terarsip (FormAnswer akan ter-cascade saat attempt dihapus).
   const existing = await db.formAttempt.findUnique({
     where: { formId_userId: { formId: form.id, userId: user.id } },
+    include: {
+      answers: {
+        include: { file: { select: { id: true, name: true } } },
+      },
+    },
   });
   if (!existing) return errorResponse("ATTEMPT_NOT_FOUND", 404);
   if (existing.status !== "SUBMITTED")
@@ -84,7 +92,46 @@ export async function POST(
   if (attemptsUsed >= maxAttempts)
     return errorResponse("RETRY_LIMIT_REACHED", 403);
 
-  // ── Arsipkan percobaan lama (skor + pelanggaran tetap tersimpan) ──
+  // ── Snapshot jawaban per soal (disimpan sebagai JSON string) ──
+  // Bentuk tiap item: { questionId, text, optionIds, fileId, fileName, score }.
+  // Diurutkan mengikuti urutan soal form; jawaban yang soalnya sudah
+  // dihapus dari form tetap disimpan di belakang (tidak ada yang hilang).
+  const snapshotOne = (a: {
+    questionId: string;
+    text: string | null;
+    optionIds: string | null;
+    fileId: string | null;
+    file: { name: string } | null;
+    score: number | null;
+  }): {
+    questionId: string;
+    text: string | null;
+    optionIds: string[];
+    fileId: string | null;
+    fileName: string | null;
+    score: number | null;
+  } => ({
+    questionId: a.questionId,
+    text: a.text,
+    optionIds: parseJsonArray<string>(a.optionIds),
+    fileId: a.fileId,
+    fileName: a.file?.name ?? null,
+    score: a.score,
+  });
+  const knownQuestionIds = new Set(form.questions.map((q) => q.id));
+  const answersSnapshot = [
+    ...form.questions
+      .filter((q) => existing.answers.some((a) => a.questionId === q.id))
+      .map(
+        (q) =>
+          snapshotOne(existing.answers.find((a) => a.questionId === q.id)!)
+      ),
+    ...existing.answers
+      .filter((a) => !knownQuestionIds.has(a.questionId))
+      .map(snapshotOne),
+  ];
+
+  // ── Arsipkan percobaan lama (skor + pelanggaran + detail jawaban) ──
   await db.formAttemptArchive.create({
     data: {
       formId: form.id,
@@ -95,6 +142,7 @@ export async function POST(
       violations: existing.violations,
       startedAt: existing.startedAt,
       submittedAt: existing.submittedAt ?? new Date(),
+      answers: JSON.stringify(answersSnapshot),
     },
   });
 

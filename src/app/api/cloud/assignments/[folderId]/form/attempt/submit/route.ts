@@ -155,6 +155,11 @@ export async function POST(
       maxScore: updated.maxScore,
     },
     showResult: form.showResult,
-    results: form.showResult ? results : null,
+    // Kunci jawaban: null (form lama) = mengikuti showResult.
+    showAnswerKey: form.showAnswerKey ?? form.showResult,
+    // Array results dipakai untuk ringkasan skor ("N benar dari M") DAN
+    // kunci jawaban — kirim bila nilai ATAU kunci salah satunya aktif
+    // (showAnswerKey null = form lama → default aktif, konsisten builder).
+    results: form.showResult || (form.showAnswerKey ?? true) ? results : null,
   });
 }

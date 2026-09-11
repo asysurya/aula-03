@@ -9,7 +9,8 @@ import { authOptions } from "@/lib/auth";
 //
 // Delta = { new, changed, deletedIds, serverTime }:
 //  - new       → pesan dengan createdAt > since
-//  - changed   → pesan dengan editedAt > since (edit) ATAU reaksinya bertambah
+//  - changed   → pesan dengan editedAt/pinnedAt/reactionTouchedAt > since
+//               (edit / pin / reaksi bertambah ATAU dihapus)
 //  - deletedIds→ loadedIds yang sudah tidak ada di DB (hard delete)
 //
 // serverTime di-sample SEBELUM query (konservatif) — event yang terjadi saat
@@ -333,18 +334,27 @@ export async function computeChatSyncDelta(
     include: chatMessageInclude,
   })) as unknown as MessageWithRelations[];
 
-  // 2) Pesan yang diedit / dipin sejak since (editedAt/pinnedAt null tidak
-  //    match "gt"). Pin → realtime; unpin → segar saat reload.
+  // 2) Pesan yang berubah sejak since: diedit, dipin, atau reaksinya
+  //    tersentuh (tambah ATAU hapus — reactionTouchedAt di-set route reaksi
+  //    pada KEDUA cabang toggle). Field null (dokumen lama) tidak match
+  //    "gt" — aman. Query ini conversation-wide (tidak dibatasi loadedIds)
+  //    sehingga reaksi pada pesan di luar window tetap terdeteksi.
+  //    Pin → realtime; unpin → segar saat reload.
   const editedRaw = await db.message.findMany({
     where: {
       ...convWhere,
-      OR: [{ editedAt: { gt: since } }, { pinnedAt: { gt: since } }],
+      OR: [
+        { editedAt: { gt: since } },
+        { pinnedAt: { gt: since } },
+        { reactionTouchedAt: { gt: since } },
+      ],
     },
     select: { id: true },
     take: 200,
   });
 
-  // 3) Pesan yang reaksinya bertambah sejak since.
+  // 3) Reaksi BARU pada pesan loaded — melengkapi reactionTouchedAt untuk
+  //    baris reaksi yang dibuat sebelum penanda itu diperkenalkan.
   const reactionTouched = loadedIds.length
     ? await db.messageReaction.findMany({
         where: { messageId: { in: loadedIds }, createdAt: { gt: since } },

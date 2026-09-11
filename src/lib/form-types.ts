@@ -111,6 +111,10 @@ export interface FormSettings {
   trackTabSwitch: boolean;
   timeLimitMin: number | null;
   showResult: boolean;
+  /** Tampilkan KUNCI JAWABAN + pembahasan ke siswa setelah submit
+   *  (independen dari showResult). Null (form lama) = mengikuti showResult
+   *  — kompatibilitas penuh dengan behavior sebelum field ini ada. */
+  showAnswerKey?: boolean | null;
   /** Izinkan siswa kembali ke soal sebelumnya (mode satu-soal-per-layar). */
   allowBack?: boolean;
   /** Jumlah percobaan pengerjaan yang diizinkan (1–10; null/undefined = 1). */
@@ -167,6 +171,9 @@ export interface FormSubmitResult {
   score: number | null;
   maxScore: number;
   showResult: boolean;
+  /** Apakah kunci jawaban + pembahasan boleh ditampilkan ke siswa
+   *  setelah submit (null di DB = ikut showResult). */
+  showAnswerKey?: boolean;
   results:
     | {
         questionId: string;

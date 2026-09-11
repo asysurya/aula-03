@@ -147,6 +147,9 @@ model Message {
   assignmentId String?
   // Pesan disematkan (pin) — nullable, sama seperti assignmentId.
   pinnedAt    DateTime?
+  // Penanda perubahan reaksi (tambah/hapus) — untuk sync realtime reaksi;
+  // null = tidak ada perubahan sejak awal (aman untuk dokumen lama).
+  reactionTouchedAt DateTime?
   createdAt   DateTime  @default(now())
   editedAt    DateTime?
 
@@ -424,6 +427,9 @@ model Form {
   trackTabSwitch   Boolean  @default(true)
   timeLimitMin     Int?
   showResult       Boolean  @default(true)
+  // Toggle guru: tampilkan KUNCI JAWABAN ke siswa setelah submit.
+  // Nullable: form lama (null) = mengikuti showResult — kompatibel DB lama.
+  showAnswerKey    Boolean?
   // Izinkan siswa kembali ke soal sebelumnya (mode satu-soal-per-layar).
   // Nullable: form lama (null) = false — kompatibel dengan perilaku sebelumnya.
   allowBack        Boolean?
@@ -491,6 +497,9 @@ model FormAttemptArchive {
   violations  String   @default("[]")
   startedAt  DateTime
   submittedAt DateTime
+  // Snapshot jawaban per percobaan (JSON array) — supaya guru tetap bisa
+  // melihat detail jawaban tiap percobaan lama setelah attempt dihapus.
+  answers     String?
   archivedAt DateTime @default(now())
 
   @@index([formId, userId])

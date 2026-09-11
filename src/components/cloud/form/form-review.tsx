@@ -12,10 +12,13 @@ import {
   ChevronRight,
   CheckCircle2,
   ClipboardCheck,
+  Clock,
   Download,
   Eye,
+  History,
   Loader2,
   MessageSquareText,
+  Paperclip,
   Printer,
   Radio,
   RotateCcw,
@@ -81,10 +84,39 @@ interface ReviewQuestion {
   imageFileId: string | null;
 }
 
+// Snapshot jawaban satu percobaan terarsip (bentuk disimpan di
+// FormAttemptArchive.answers sebagai JSON string oleh retry route).
+interface ReviewArchiveAnswer {
+  questionId: string;
+  text: string | null;
+  optionIds: string[];
+  fileId: string | null;
+  fileName: string | null;
+  score: number | null;
+}
+
+// Satu percobaan lama (hasil retry siswa) — dipetakan ke siswa via userId.
+interface ReviewArchive {
+  id: string;
+  attemptId: string;
+  userId: string;
+  score: number | null;
+  maxScore: number;
+  violations: { type: string; at: string; detail?: string }[];
+  startedAt: string;
+  submittedAt: string;
+  archivedAt: string;
+  answers: ReviewArchiveAnswer[];
+  /** false = arsip lama sebelum fitur snapshot jawaban (detail tidak tersimpan). */
+  hasAnswerDetail: boolean;
+}
+
 interface ReviewResponse {
   form: { id: string; timeLimitMin: number | null; showResult: boolean };
   questions: ReviewQuestion[];
   attempts: ReviewAttempt[];
+  /** Riwayat percobaan lama (arsip) — bisa kosong bila belum ada yang mengulang. */
+  archives?: ReviewArchive[];
   roster: {
     user: { id: string; name: string; username: string };
     role: string;
@@ -158,6 +190,14 @@ export function FormReview({ folderId }: { folderId: string }) {
     count: scores.filter((s) => s >= b.lo && s <= b.hi).length,
   }));
   const maxBin = Math.max(1, ...bins.map((b) => b.count));
+
+  // Peta arsip per siswa (userId → daftar percobaan lama).
+  const archivesByUser = new Map<string, ReviewArchive[]>();
+  for (const ar of data.archives ?? []) {
+    const list = archivesByUser.get(ar.userId);
+    if (list) list.push(ar);
+    else archivesByUser.set(ar.userId, [ar]);
+  }
 
   // Export CSV — nama, status, nilai, pelanggaran, waktu.
   function exportCsv() {
@@ -359,6 +399,7 @@ export function FormReview({ folderId }: { folderId: string }) {
             folderId={folderId}
             attempt={a}
             questions={data.questions}
+            archives={archivesByUser.get(a.user.id) ?? []}
             onGraded={() =>
               qc.invalidateQueries({
                 queryKey: ["cloud", "form-review", folderId],
@@ -380,17 +421,20 @@ function AttemptCard({
   folderId,
   attempt,
   questions,
+  archives,
   onGraded,
 }: {
   folderId: string;
   attempt: ReviewAttempt;
   questions: ReviewQuestion[];
+  archives: ReviewArchive[];
   onGraded: () => void;
 }) {
   const [open, setOpen] = useState(false);
   const [previewFile, setPreviewFile] = useState<CloudFileItem | null>(null);
   const [resetOpen, setResetOpen] = useState(false);
   const [resetting, setResetting] = useState(false);
+  const [historyOpen, setHistoryOpen] = useState(false);
   const answerByQ = new Map(attempt.answers.map((a) => [a.questionId, a]));
 
   const submitted = attempt.status === "SUBMITTED";
@@ -468,6 +512,12 @@ function AttemptCard({
                 : " · belum dikumpulkan"}
             </p>
           </div>
+          {archives.length > 0 ? (
+            <Badge variant="outline" className="shrink-0 gap-1">
+              <History className="size-3" />
+              {archives.length + 1} percobaan
+            </Badge>
+          ) : null}
           {attempt.violations.length > 0 ? (
             <Badge className="bg-amber-500/15 text-amber-600 dark:text-amber-400 border border-amber-500/30 gap-1 shrink-0">
               <AlertTriangle className="size-3" />
@@ -490,7 +540,16 @@ function AttemptCard({
             )}
           </Badge>
         </button>
-        <div className="shrink-0 pr-3 pl-1">
+        <div className="shrink-0 pr-3 pl-1 flex items-center gap-1">
+          <Button
+            size="icon"
+            variant="ghost"
+            onClick={() => setHistoryOpen(true)}
+            title="Riwayat percobaan siswa ini (semua percobaan + arsip)"
+            aria-label="Riwayat percobaan siswa"
+          >
+            <History className="size-4 text-muted-foreground" />
+          </Button>
           <Button
             size="icon"
             variant="ghost"
@@ -555,6 +614,16 @@ function AttemptCard({
       {/* Pratinjau file jawaban — tanpa download */}
       <FilePreview file={previewFile} onClose={() => setPreviewFile(null)} />
 
+      {/* Dialog riwayat semua percobaan (arsip + percobaan aktif) */}
+      <AttemptHistoryDialog
+        open={historyOpen}
+        onOpenChange={setHistoryOpen}
+        user={attempt.user}
+        attempt={attempt}
+        archives={archives}
+        questions={questions}
+      />
+
       {/* Dialog konfirmasi reset pengerjaan */}
       <Dialog open={resetOpen} onOpenChange={setResetOpen}>
         <DialogContent className="max-w-md">
@@ -592,6 +661,365 @@ function AttemptCard({
         </DialogContent>
       </Dialog>
     </Card>
+  );
+}
+
+// ── Riwayat percobaan per siswa (arsip + percobaan aktif) ───────────
+
+// Durasi pengerjaan "Xm Ys" (manual — tanpa dependensi tambahan).
+function formatDuration(
+  startedAt: string,
+  submittedAt: string | null
+): string {
+  if (!submittedAt) return "—";
+  const ms =
+    new Date(submittedAt).getTime() - new Date(startedAt).getTime();
+  if (!Number.isFinite(ms) || ms < 0) return "—";
+  const totalSec = Math.floor(ms / 1000);
+  const m = Math.floor(totalSec / 60);
+  const s = totalSec % 60;
+  return `${m}m ${String(s).padStart(2, "0")}s`;
+}
+
+// Satu baris percobaan di dialog riwayat (arsip ATAU percobaan aktif).
+interface HistoryEntry {
+  k: number;
+  isCurrent: boolean;
+  score: number | null;
+  maxScore: number;
+  violations: { type: string; at: string; detail?: string }[];
+  startedAt: string;
+  submittedAt: string | null;
+  answers: ReviewArchiveAnswer[];
+  hasAnswerDetail: boolean;
+}
+
+function AttemptHistoryDialog({
+  open,
+  onOpenChange,
+  user,
+  attempt,
+  archives,
+  questions,
+}: {
+  open: boolean;
+  onOpenChange: (v: boolean) => void;
+  user: ReviewAttempt["user"];
+  attempt: ReviewAttempt;
+  archives: ReviewArchive[];
+  questions: ReviewQuestion[];
+}) {
+  // Detail jawaban percobaan yang dipilih (dialog kedua, read-only).
+  const [detail, setDetail] = useState<HistoryEntry | null>(null);
+
+  // Arsip diurutkan dari yang paling lama → nomor percobaan menaik;
+  // percobaan AKTIF selalu paling akhir dengan nomor terbesar.
+  const sorted = [...archives].sort(
+    (a, b) => new Date(a.startedAt).getTime() - new Date(b.startedAt).getTime()
+  );
+
+  const entries: HistoryEntry[] = [
+    ...sorted.map((ar, i) => ({
+      k: i + 1,
+      isCurrent: false,
+      score: ar.score,
+      maxScore: ar.maxScore,
+      violations: ar.violations,
+      startedAt: ar.startedAt,
+      submittedAt: ar.submittedAt,
+      answers: ar.answers,
+      hasAnswerDetail: ar.hasAnswerDetail,
+    })),
+    {
+      k: sorted.length + 1,
+      isCurrent: true,
+      score: attempt.score,
+      maxScore: attempt.maxScore,
+      violations: attempt.violations,
+      startedAt: attempt.startedAt,
+      submittedAt: attempt.submittedAt,
+      // Attempt aktif: jawaban live dipetakan ke bentuk snapshot yang sama.
+      answers: attempt.answers.map((a) => ({
+        questionId: a.questionId,
+        text: a.text,
+        optionIds: a.optionIds ?? [],
+        fileId: a.fileId,
+        fileName: a.file?.name ?? null,
+        score: a.score,
+      })),
+      hasAnswerDetail: true,
+    },
+  ];
+
+  return (
+    <>
+      <Dialog
+        open={open}
+        onOpenChange={(v) => {
+          // Tutup juga dialog detail jawaban bila masih terbuka.
+          if (!v) setDetail(null);
+          onOpenChange(v);
+        }}
+      >
+        <DialogContent className="max-w-2xl max-h-[85vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <History className="size-4 text-muted-foreground" />
+              Riwayat percobaan — {user.name}
+            </DialogTitle>
+            <DialogDescription>
+              Semua percobaan pengerjaan siswa ini (paling lama ke terbaru).
+              Nilai akhir yang dipakai = percobaan terakhir.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-2">
+            {entries.map((e) => (
+              <div
+                key={e.isCurrent ? `current-${e.k}` : `archive-${e.k}`}
+                className="rounded-lg border border-border p-3 space-y-2"
+              >
+                {/* Baris judul percobaan */}
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span className="text-sm font-semibold">
+                    Percobaan #{e.k}
+                  </span>
+                  {e.isCurrent ? (
+                    <Badge className="bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 border border-emerald-500/30 gap-1 text-[10px]">
+                      <CheckCircle2 className="size-3" />
+                      Dipakai untuk nilai
+                    </Badge>
+                  ) : (
+                    <Badge variant="outline" className="text-[10px]">
+                      Arsip
+                    </Badge>
+                  )}
+                  <div className="flex-1" />
+                  <Badge variant="outline" className="gap-1">
+                    <CheckCircle2 className="size-3 text-muted-foreground" />
+                    {e.score != null ? `${e.score}/${e.maxScore}` : "—"}
+                  </Badge>
+                </div>
+
+                {/* Meta: durasi, pelanggaran, waktu kirim */}
+                <div className="flex items-center gap-x-4 gap-y-1 flex-wrap text-xs text-muted-foreground">
+                  <span className="inline-flex items-center gap-1">
+                    <Clock className="size-3" />
+                    Durasi {formatDuration(e.startedAt, e.submittedAt)}
+                  </span>
+                  <span
+                    className="inline-flex items-center gap-1"
+                    title={
+                      e.violations.length > 0
+                        ? e.violations
+                            .map(
+                              (v) =>
+                                `${violationLabel(v as never)} (${format(
+                                  new Date(v.at),
+                                  "HH:mm:ss"
+                                )})`
+                            )
+                            .join("\n")
+                        : "Tidak ada pelanggaran"
+                    }
+                  >
+                    <ShieldAlert className="size-3" />
+                    {e.violations.length} pelanggaran
+                  </span>
+                  <span>
+                    Dikumpulkan{" "}
+                    {e.submittedAt
+                      ? format(new Date(e.submittedAt), "d MMM yyyy HH:mm")
+                      : "— belum dikumpulkan"}
+                  </span>
+                </div>
+
+                {/* Detail jenis pelanggaran (bila ada) */}
+                {e.violations.length > 0 ? (
+                  <div className="rounded-md border border-amber-500/30 bg-amber-500/10 px-2.5 py-1.5 space-y-0.5">
+                    {e.violations.slice(0, 10).map((v, i) => (
+                      <p key={i} className="text-[11px] text-muted-foreground">
+                        • {violationLabel(v as never)} —{" "}
+                        {format(new Date(v.at), "HH:mm:ss")}
+                        {v.detail ? ` (${v.detail})` : ""}
+                      </p>
+                    ))}
+                    {e.violations.length > 10 ? (
+                      <p className="text-[11px] text-muted-foreground">
+                        …dan {e.violations.length - 10} lainnya
+                      </p>
+                    ) : null}
+                  </div>
+                ) : null}
+
+                {/* Detail jawaban per percobaan */}
+                {e.hasAnswerDetail ? (
+                  <div className="flex items-center justify-between gap-2 flex-wrap">
+                    <span className="text-[11px] text-muted-foreground">
+                      {e.answers.length} jawaban tersimpan
+                    </span>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="h-7 gap-1.5 text-xs"
+                      onClick={() => setDetail(e)}
+                    >
+                      <Eye className="size-3.5" />
+                      Lihat jawaban
+                    </Button>
+                  </div>
+                ) : (
+                  <p className="text-[11px] text-muted-foreground italic">
+                    Detail jawaban tidak tersimpan (arsip lama) — skor, durasi,
+                    dan pelanggaran tetap tercatat.
+                  </p>
+                )}
+              </div>
+            ))}
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* Dialog kedua: detail jawaban satu percobaan (read-only) */}
+      <AttemptAnswersDialog
+        open={detail != null}
+        onOpenChange={(v) => {
+          if (!v) setDetail(null);
+        }}
+        user={user}
+        entry={detail}
+        questions={questions}
+      />
+    </>
+  );
+}
+
+// Detail jawaban satu percobaan — read-only (arsip maupun percobaan aktif).
+function AttemptAnswersDialog({
+  open,
+  onOpenChange,
+  user,
+  entry,
+  questions,
+}: {
+  open: boolean;
+  onOpenChange: (v: boolean) => void;
+  user: ReviewAttempt["user"];
+  entry: HistoryEntry | null;
+  questions: ReviewQuestion[];
+}) {
+  if (!entry) return null;
+
+  const qById = new Map(questions.map((q) => [q.id, q]));
+  const ansByQ = new Map(entry.answers.map((a) => [a.questionId, a]));
+  // Jawaban untuk soal yang sudah dihapus dari form (tetap ditampilkan).
+  const orphans = entry.answers.filter((a) => !qById.has(a.questionId));
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-2xl max-h-[85vh] overflow-y-auto">
+        <DialogHeader>
+          <DialogTitle>
+            Jawaban percobaan #{entry.k} — {user.name}
+          </DialogTitle>
+          <DialogDescription>
+            {entry.isCurrent
+              ? "Percobaan terakhir (dipakai untuk nilai)."
+              : "Percobaan lama (terarsip)."}{" "}
+            Skor {entry.score != null ? `${entry.score}/${entry.maxScore}` : "—"}{" "}
+            · durasi {formatDuration(entry.startedAt, entry.submittedAt)}.
+          </DialogDescription>
+        </DialogHeader>
+        <div className="space-y-2">
+          {questions.map((q, i) => {
+            const a = ansByQ.get(q.id);
+            const opts = a?.optionIds ?? [];
+            const optLabels = opts
+              .map(
+                (id) =>
+                  q.options.find((o) => o.id === id)?.label ?? `(opsi ${id})`
+              )
+              .join(", ");
+            const answered =
+              opts.length > 0 || !!a?.text || !!a?.fileName || !!a?.fileId;
+            return (
+              <div
+                key={q.id}
+                className="rounded-lg border border-border p-3 space-y-1.5"
+              >
+                <div className="flex items-start justify-between gap-2">
+                  <p className="text-sm font-medium flex items-start gap-2 min-w-0 flex-1">
+                    <span className="text-muted-foreground font-mono text-xs shrink-0 mt-0.5">
+                      #{i + 1}
+                    </span>
+                    <span className="line-clamp-2">{q.text}</span>
+                  </p>
+                  {a?.score != null ? (
+                    <Badge variant="secondary" className="shrink-0">
+                      skor {a.score}
+                    </Badge>
+                  ) : null}
+                </div>
+                {/* Isi jawaban siswa */}
+                {optLabels ? (
+                  <p className="text-sm rounded-md bg-muted/50 border border-border px-3 py-1.5">
+                    {optLabels}
+                  </p>
+                ) : a?.text ? (
+                  <p className="text-sm whitespace-pre-wrap rounded-md bg-muted/50 border border-border px-3 py-2 max-h-32 overflow-y-auto">
+                    {a.text}
+                  </p>
+                ) : a?.fileName ? (
+                  <p className="text-sm inline-flex items-center gap-1.5 rounded-md bg-muted/50 border border-border px-3 py-1.5">
+                    <Paperclip className="size-3.5 text-muted-foreground shrink-0" />
+                    <span className="truncate">{a.fileName}</span>
+                  </p>
+                ) : answered ? (
+                  <p className="text-xs text-muted-foreground italic">
+                    Terjawab (detail tidak tersimpan).
+                  </p>
+                ) : (
+                  <p className="text-xs text-muted-foreground italic">
+                    —kosong—
+                  </p>
+                )}
+              </div>
+            );
+          })}
+          {/* Jawaban untuk soal yang sudah dihapus dari form */}
+          {orphans.map((a, i) => (
+            <div key={a.questionId} className="rounded-lg border border-border border-dashed p-3 space-y-1.5">
+              <div className="flex items-start justify-between gap-2">
+                <p className="text-sm font-medium flex items-start gap-2 min-w-0 flex-1">
+                  <span className="text-muted-foreground font-mono text-xs shrink-0 mt-0.5">
+                    —
+                  </span>
+                  <span className="text-muted-foreground italic">
+                    Soal (sudah dihapus dari form) #{i + 1}
+                  </span>
+                </p>
+                {a.score != null ? (
+                  <Badge variant="secondary" className="shrink-0">
+                    skor {a.score}
+                  </Badge>
+                ) : null}
+              </div>
+              <p className="text-sm rounded-md bg-muted/50 border border-border px-3 py-1.5 truncate">
+                {a.text ??
+                  a.fileName ??
+                  (a.optionIds.length > 0
+                    ? a.optionIds.join(", ")
+                    : "—kosong—")}
+              </p>
+            </div>
+          ))}
+          {questions.length === 0 && orphans.length === 0 ? (
+            <p className="text-sm text-muted-foreground text-center py-4">
+              Tidak ada jawaban tersimpan pada percobaan ini.
+            </p>
+          ) : null}
+        </div>
+      </DialogContent>
+    </Dialog>
   );
 }
 
