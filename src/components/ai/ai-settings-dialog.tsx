@@ -8,7 +8,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
-import { Loader2, KeyRound, Trash2, Info } from "lucide-react";
+import { Loader2, KeyRound, Trash2, Info, PlugZap } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -76,6 +76,10 @@ export function AiSettingsDialog({
   const [model, setModel] = useState("");
   const [apiKey, setApiKey] = useState("");
   const [clearKey, setClearKey] = useState(false);
+  const [testing, setTesting] = useState(false);
+  const [testResult, setTestResult] = useState<
+    { ok: boolean; text: string } | null
+  >(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -96,11 +100,48 @@ export function AiSettingsDialog({
   function switchProvider(p: string) {
     setProvider(p);
     setClearKey(false);
+    setTestResult(null);
     if (p === "") return; // ikuti default admin
     const preset = PROVIDERS[p as keyof typeof PROVIDERS];
     if (preset) {
       setBaseUrl(preset.baseUrl);
       setModel(preset.models[0] ?? "");
+    }
+  }
+
+  async function testConnection() {
+    setTesting(true);
+    setTestResult(null);
+    try {
+      const body =
+        provider === ""
+          ? {} // tes config aktif (user → default admin)
+          : {
+              provider,
+              baseUrl: baseUrl.trim() || undefined,
+              model: model.trim() || undefined,
+              apiKey: apiKey.trim() || undefined,
+            };
+      const res = await fetch("/api/ai/test", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const json = await res.json().catch(() => ({}));
+      if (json?.ok) {
+        const replyTxt = json.reply ? ` dan menjawab: “${json.reply}”` : "";
+        setTestResult({
+          ok: true,
+          text: `Tersambung! Model “${json.model ?? "?"}” berfungsi${replyTxt}.`,
+        });
+        toast.success("Sambungan Teman AI OK");
+      } else {
+        setTestResult({ ok: false, text: json?.error ?? "Tes gagal — coba lagi." });
+      }
+    } catch {
+      setTestResult({ ok: false, text: "Gagal menghubungi server untuk tes." });
+    } finally {
+      setTesting(false);
     }
   }
 
@@ -309,7 +350,34 @@ export function AiSettingsDialog({
           </div>
         )}
 
+        {testResult ? (
+          <div
+            className={cn(
+              "rounded-md border px-3 py-2 text-xs leading-relaxed",
+              testResult.ok
+                ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-700 dark:text-emerald-400"
+                : "border-destructive/40 bg-destructive/10 text-destructive"
+            )}
+          >
+            {testResult.text}
+          </div>
+        ) : null}
+
         <DialogFooter>
+          <Button
+            type="button"
+            variant="outline"
+            onClick={testConnection}
+            disabled={loading || saving || testing}
+          >
+            {testing ? (
+              <Loader2 className="h-4 w-4 animate-spin mr-1.5" />
+            ) : (
+              <PlugZap className="h-4 w-4 mr-1.5" />
+            )}
+            Tes sambungan
+          </Button>
+          <div className="flex-1" />
           <Button variant="outline" onClick={() => onOpenChange(false)} disabled={saving}>
             Batal
           </Button>

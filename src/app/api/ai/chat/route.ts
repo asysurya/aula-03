@@ -3,7 +3,7 @@ import { z } from "zod";
 import { requireUser } from "@/lib/session";
 import { db } from "@/lib/db";
 import { decryptSecret } from "@/lib/crypto";
-import { chatEndpoint, resolveAiConfig, type AiSettingInput } from "@/lib/ai-providers";
+import { chatEndpoint, cleanUpstreamDetail, resolveAiConfig, type AiSettingInput } from "@/lib/ai-providers";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -31,17 +31,29 @@ const bodySchema = z.object({
   message: z.string().trim().min(1, "Pesan tidak boleh kosong").max(8000),
 });
 
-function providerErrorMessage(status: number, detail: string | null): string {
+function providerErrorMessage(status: number, detailRaw: string | null): string {
+  const detail = cleanUpstreamDetail(detailRaw);
   if (status === 401 || status === 403) {
     return "API key tidak valid/ditolak provider. Periksa kunci API di pengaturan Teman AI" +
       (detail ? ` (${detail.slice(0, 160)})` : "") +
       ".";
   }
   if (status === 429) {
-    return "Kuota/limit provider tercapai. Tunggu sebentar lalu coba lagi, atau ganti model/provider di pengaturan.";
+    return (
+      "Model sedang kena limit (429) — API key kamu tidak bermasalah. " +
+      "Model berakhiran ‘:free’ berbagi kuota publik yang sering penuh; " +
+      "tunggu beberapa menit, atau ganti ke model lain di pengaturan (mis. tanpa ‘:free’)." +
+      (detail ? ` (${detail.slice(0, 160)})` : "")
+    );
+  }
+  if (status === 402) {
+    return "Kredit provider tidak cukup (402). Tambah kredit akun provider, atau pilih model gratis (:free) di pengaturan.";
   }
   if (status === 404) {
     return "Endpoint/model tidak ditemukan di provider (404). Periksa Base URL dan nama model di pengaturan.";
+  }
+  if (detail && /location is not supported|blokir wilayah/i.test(detail)) {
+    return "Model ini menolak permintaan dari lokasi server (pembatasan wilayah provider). Ganti ke model lain di pengaturan — API key kamu tidak bermasalah.";
   }
   return `Provider AI menjawab error (HTTP ${status})${detail ? `: ${detail.slice(0, 160)}` : ""}.`;
 }
@@ -175,7 +187,13 @@ export async function POST(req: NextRequest) {
     let detail: string | null = null;
     try {
       const errJson = await upstream.json().catch(() => null);
-      detail = errJson?.error?.message ?? errJson?.message ?? null;
+      // OpenRouter menyimpan alasan asli di error.metadata.raw — pakai itu dulu.
+      detail =
+        errJson?.error?.metadata?.raw ??
+        errJson?.error?.message ??
+        errJson?.message ??
+        null;
+      if (typeof detail !== "string") detail = null;
     } catch {
       /* abaikan */
     }

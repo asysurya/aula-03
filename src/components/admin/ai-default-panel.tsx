@@ -8,7 +8,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
-import { Loader2, KeyRound, Trash2, Info, CheckCircle2, XCircle } from "lucide-react";
+import { Loader2, KeyRound, Trash2, Info, CheckCircle2, XCircle, PlugZap } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -42,6 +42,8 @@ export function AiDefaultPanel() {
   const [model, setModel] = useState("");
   const [apiKey, setApiKey] = useState("");
   const [clearKey, setClearKey] = useState(false);
+  const [testing, setTesting] = useState(false);
+  const [testResult, setTestResult] = useState<{ ok: boolean; text: string } | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -69,10 +71,45 @@ export function AiDefaultPanel() {
   function switchProvider(p: string) {
     setProvider(p);
     setClearKey(false);
+    setTestResult(null);
     const preset = PROVIDERS[p as keyof typeof PROVIDERS];
     if (preset) {
       setBaseUrl(preset.baseUrl);
       setModel(preset.models[0] ?? "");
+    }
+  }
+
+  async function testConnection() {
+    if (!provider) {
+      toast.error("Pilih provider dulu sebelum dites.");
+      return;
+    }
+    setTesting(true);
+    setTestResult(null);
+    try {
+      const res = await fetch("/api/ai/test", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          provider,
+          baseUrl: baseUrl.trim() || undefined,
+          model: model.trim() || undefined,
+          apiKey: apiKey.trim() || undefined,
+          scope: "admin",
+        }),
+      });
+      const json = await res.json().catch(() => ({}));
+      if (json?.ok) {
+        const replyTxt = json.reply ? ` dan menjawab: “${json.reply}”` : "";
+        setTestResult({ ok: true, text: `Tersambung! Model “${json.model ?? "?"}” berfungsi${replyTxt}.` });
+        toast.success("Sambungan default Teman AI OK");
+      } else {
+        setTestResult({ ok: false, text: json?.error ?? "Tes gagal — coba lagi." });
+      }
+    } catch {
+      setTestResult({ ok: false, text: "Gagal menghubungi server untuk tes." });
+    } finally {
+      setTesting(false);
     }
   }
 
@@ -292,7 +329,33 @@ export function AiDefaultPanel() {
               </p>
             )}
 
+            {testResult ? (
+              <div
+                className={cn(
+                  "rounded-md border px-3 py-2 text-xs leading-relaxed",
+                  testResult.ok
+                    ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-700 dark:text-emerald-400"
+                    : "border-destructive/40 bg-destructive/10 text-destructive"
+                )}
+              >
+                {testResult.text}
+              </div>
+            ) : null}
+
             <div className="flex flex-wrap items-center gap-2 pt-1">
+              <Button
+                type="button"
+                variant="outline"
+                onClick={testConnection}
+                disabled={saving || testing}
+              >
+                {testing ? (
+                  <Loader2 className="h-4 w-4 animate-spin mr-1.5" />
+                ) : (
+                  <PlugZap className="h-4 w-4 mr-1.5" />
+                )}
+                Tes sambungan
+              </Button>
               <Button onClick={save} disabled={saving}>
                 {saving ? <Loader2 className="h-4 w-4 animate-spin mr-1.5" /> : null}
                 Simpan default

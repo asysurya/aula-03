@@ -47,11 +47,13 @@ export const PROVIDERS: Record<AiProviderId, AiProviderPreset> = {
     label: "OpenRouter",
     baseUrl: "https://openrouter.ai/api/v1",
     models: [
+      "google/gemma-3-27b-it",
+      "google/gemma-3-12b-it",
+      "google/gemma-4-31b-it",
+      "meta-llama/llama-3.3-70b-instruct",
       "openai/gpt-4o-mini",
-      "meta-llama/llama-3.3-70b-instruct:free",
-      "google/gemini-2.0-flash-exp:free",
     ],
-    hint: "Satu kunci untuk banyak model — ada pilihan gratis.",
+    hint: "Satu kunci untuk banyak model. Catatan: varian berakhiran ‘:free’ berbagi kuota publik dan sering penuh (error 429) — kalau terus error, pakai model tanpa ‘:free’ (butuh kredit).",
   },
   gemini: {
     id: "gemini",
@@ -134,6 +136,42 @@ export function resolveAiConfig(
 /** URL chat completions dari base URL (trailing slash dibuang). */
 export function chatEndpoint(baseUrl: string): string {
   return baseUrl.replace(/\/+$/, "") + "/chat/completions";
+}
+
+/**
+ * Rapikan detail error upstream utk ditampilkan ke user.
+ * OpenRouter menaruh respons mentah provider di error.metadata.raw (string
+ * JSON bertingkat) — coba ambil pesan terdalam yang paling manusiawi.
+ */
+export function cleanUpstreamDetail(detail: string | null | undefined): string | null {
+  if (!detail) return null;
+  let cur: unknown = detail;
+  for (let i = 0; i < 3; i++) {
+    if (typeof cur === "string") {
+      const t = cur.trim();
+      if (t.startsWith("{") || t.startsWith("[")) {
+        try {
+          cur = JSON.parse(t);
+          continue;
+        } catch {
+          /* bukan JSON */
+        }
+      }
+      return t.length > 0 ? t : null;
+    }
+    if (cur && typeof cur === "object") {
+      const o = cur as Record<string, unknown>;
+      const next = (o.error ?? o) as Record<string, unknown>;
+      if (next && typeof next === "object" && "message" in next) {
+        const m = next.message;
+        if (typeof m === "string" && m.trim()) return m.trim();
+      }
+      if (typeof o.message === "string" && o.message.trim()) return o.message.trim();
+      return JSON.stringify(o).slice(0, 200);
+    }
+    return null;
+  }
+  return null;
 }
 
 /** Mask kunci untuk ditampilkan, mis. "sk-…abcd" (4 char terakhir). */
