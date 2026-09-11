@@ -128,7 +128,12 @@ export async function POST(req: NextRequest) {
     if (oldFileId && oldFileId !== fileId) {
       await db.cloudFile.delete({ where: { id: oldFileId } }).catch(() => {});
       if (oldStorageKey) {
-        await deleteFile(oldStorageKey);
+        // Hapus blob HANYA bila tak ada baris lain yang memakai kunci sama
+        // (file hasil "Salin" berbagi blob — dulu ikut terhapus!).
+        const remaining = await db.cloudFile
+          .count({ where: { storageKey: oldStorageKey } })
+          .catch(() => 1);
+        if (remaining === 0) await deleteFile(oldStorageKey).catch(() => {});
       }
     }
   } else {

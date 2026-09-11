@@ -97,10 +97,20 @@ export async function checkStorageAccess(
     }
   }
 
-  const allowed =
-    !file.folderId
-      ? true
-      : canViewFile(
+  const allowed = !file.folderId
+    ? // File TANPA folder:
+      // · visibility ALL (lampiran chat, avatar, gambar soal form) → boleh
+      //   dibaca user login mana pun (memang dibagikan).
+      // · PRIVATE (jawaban FILE/IMAGE siswa) → HANYA pengunggah + guru/admin
+      //   + penerima grant. (Dulu: SEMUA user login bisa membacanya cukup
+      //   dengan memegang storageKey — proteksi PRIVATE tidak berlaku sama
+      //   sekali di penyajian file.)
+      file.visibility === "ALL" ||
+      file.uploadedBy === sessionUser.id ||
+      sessionUser.role === "ADMIN" ||
+      sessionUser.role === "GURU" ||
+      file.grants.some((g) => g.userId === sessionUser.id)
+    : canViewFile(
           {
             id: file.id,
             visibility: file.visibility,

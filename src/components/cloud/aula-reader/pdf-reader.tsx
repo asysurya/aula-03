@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   ChevronLeft,
   ChevronRight,
@@ -117,6 +117,13 @@ export function PdfReader({
 
   const containerRef = useRef<HTMLDivElement>(null);
   const pageRefs = useRef<Map<number, HTMLDivElement>>(new Map());
+  /** Mirror state `page` (dibaca callback stabil tanpa dependensi). */
+  const pageRef = useRef(page);
+  pageRef.current = page;
+  /** Jangkar zoom: halaman aktif + fraksi posisi di dalamnya — agar
+   *  halaman TIDAK "pindah" saat zoom (dulu: ukuran semua halaman berubah
+   *  → konten bergeser sendiri & halaman aktif bisa berubah). */
+  const zoomAnchor = useRef<{ page: number; frac: number } | null>(null);
   const textCache = useRef<Map<number, string>>(new Map());
   const ttsStop = useRef(false);
   /** Sudahkah laporan perubahan halaman pertama dilewati (init/restore). */
@@ -290,7 +297,7 @@ export function PdfReader({
         else break;
       }
     }
-    setPage(cur);
+    setPage((prev) => (prev === cur ? prev : cur));
   }, [numPages, viewMode]);
 
   // ── Jump ke halaman ──
@@ -311,12 +318,57 @@ export function PdfReader({
   );
 
   // ── Zoom ──
-  const changeZoom = useCallback(
-    (delta: number) => {
-      setZoom((z) => Math.min(4, Math.max(0.5, +(z + delta).toFixed(2))));
+  // Sebelum zoom berubah, catat posisi relatif (fraksi 0..1) di dalam
+  // halaman aktif → setelah layout baru dipasang, scroll dikembalikan ke
+  // titik itu. Tanpa ini: tinggi/lebar SEMUA halaman berubah → halaman
+  // aktif bergeser sendiri / "pindah" halaman saat zoom.
+  const applyZoom = useCallback(
+    (next: number) => {
+      const z = Math.min(4, Math.max(0.5, +next.toFixed(2)));
+      if (z === zoom) return;
+      const el = containerRef.current;
+      const node = pageRefs.current.get(pageRef.current);
+      if (el && node) {
+        zoomAnchor.current = {
+          page: pageRef.current,
+          frac:
+            viewMode === "vertical"
+              ? (el.scrollTop - node.offsetTop) /
+                Math.max(1, node.offsetHeight)
+              : (el.scrollLeft - node.offsetLeft) /
+                Math.max(1, node.offsetWidth),
+        };
+      }
+      setZoom(z);
     },
-    []
+    [zoom, viewMode]
   );
+
+  const changeZoom = useCallback(
+    (delta: number) => applyZoom(zoom + delta),
+    [applyZoom, zoom]
+  );
+
+  // Pulihkan jangkar zoom SEBELUM paint (useLayoutEffect — layout baru
+  // sudah terpasang, belum terlihat → tak ada "loncatan").
+  useLayoutEffect(() => {
+    const a = zoomAnchor.current;
+    if (!a) return;
+    zoomAnchor.current = null;
+    const el = containerRef.current;
+    const node = pageRefs.current.get(a.page);
+    if (!el || !node) return;
+    if (viewMode === "vertical") {
+      el.scrollTop = node.offsetTop + a.frac * node.offsetHeight;
+    } else {
+      // Horizontal: snap-mandatory menata ulang — cukup pastikan halaman
+      // aktif yang berada di tengah viewport.
+      el.scrollLeft = Math.max(
+        0,
+        node.offsetLeft - (el.clientWidth - node.offsetWidth) / 2
+      );
+    }
+  }, [zoom, viewMode]);
 
   // ── Mode tampilan (persist) ──
   const toggleViewMode = useCallback(() => {
@@ -338,8 +390,6 @@ export function PdfReader({
 
   // Ganti mode → posisi scroll lama (mis. scrollLeft horizontal) tidak boleh
   // terbawa ke mode baru (dulu: halaman tergeser keluar layar setelah toggle).
-  const pageRef = useRef(page);
-  pageRef.current = page;
   useEffect(() => {
     const el = containerRef.current;
     if (!el) return;
@@ -516,14 +566,14 @@ export function PdfReader({
       } else if (e.key === "-") {
         changeZoom(-0.25);
       } else if (e.key.toLowerCase() === "f") {
-        setZoom(1);
+        applyZoom(1);
       } else if (e.key.toLowerCase() === "n") {
         setNight((v) => !v);
       } else if (e.key.toLowerCase() === "h") {
         toggleViewMode();
       }
     },
-    [page, gotoPage, changeZoom, toggleViewMode]
+    [page, gotoPage, changeZoom, toggleViewMode, applyZoom]
   );
 
   const pageList = useMemo(() => {
@@ -531,6 +581,26 @@ export function PdfReader({
     for (let i = 1; i <= numPages; i++) arr.push(i);
     return arr;
   }, [numPages]);
+
+  // Callback stabil supaya PageView (React.memo) tidak re-render ketika
+  // parent ganti state yang tak terkait. (Dulu: onVisible & registerRef
+  // inline → SEMUA halaman re-render pada tiap scroll tick; observer
+  // juga dibongkar-pasang terus.)
+  const handleVisible = useCallback((i: number, v: boolean) => {
+    setVisible((prev) => {
+      const next = new Set(prev);
+      if (v) next.add(i);
+      else next.delete(i);
+      return next;
+    });
+  }, []);
+  const registerPage = useCallback(
+    (i: number, el: HTMLDivElement | null) => {
+      if (el) pageRefs.current.set(i, el);
+      else pageRefs.current.delete(i);
+    },
+    []
+  );
 
   if (error) {
     return (
@@ -647,7 +717,7 @@ export function PdfReader({
             variant="outline"
             size="icon"
             className="h-9 w-9"
-            onClick={() => setZoom(1)}
+            onClick={() => applyZoom(1)}
             title="Pas layar"
           >
             <Maximize className="size-4" />
@@ -858,18 +928,8 @@ export function PdfReader({
               width={pageWidthOf(i)}
               ratio={ratioOf(i)}
               visible={visible.has(i)}
-              onVisible={(v) =>
-                setVisible((prev) => {
-                  const next = new Set(prev);
-                  if (v) next.add(i);
-                  else next.delete(i);
-                  return next;
-                })
-              }
-              registerRef={(el) => {
-                if (el) pageRefs.current.set(i, el);
-                else pageRefs.current.delete(i);
-              }}
+              onVisible={handleVisible}
+              registerRef={registerPage}
               tool={tool}
               color={color}
               items={anno.items}
@@ -882,7 +942,7 @@ export function PdfReader({
           ))}
           {numPages > 0 && viewMode === "vertical" ? (
             <p className="text-xs text-muted-foreground pb-2 px-4">
-              {numPages} halaman · {anno.count > 0 ? `${anno.count} anotasi tersimpan di perangkat ini · ` : ""}
+              {numPages} halaman · {anno.count > 0 ? `${anno.count} anotasi tersimpan di akunmu · ` : ""}
               Blok teks lalu pilih Bacakan / Stabilo / Salin · gunakan ⯇ ⯈ atau geser
             </p>
           ) : null}
@@ -909,8 +969,10 @@ export function PdfReader({
 }
 
 // ───────────────────────── Satu halaman (render-on-visible) ─────────────────────────
+// React.memo + props stabil dari parent: halaman yang tak berubah TIDAK
+// ikut re-render (penting saat scroll / ganti state di reader).
 
-function PageView({
+const PageView = memo(function PageView({
   doc,
   pageNo,
   width,
@@ -932,8 +994,8 @@ function PageView({
   width: number;
   ratio: number;
   visible: boolean;
-  onVisible: (v: boolean) => void;
-  registerRef: (el: HTMLDivElement | null) => void;
+  onVisible: (pageNo: number, v: boolean) => void;
+  registerRef: (pageNo: number, el: HTMLDivElement | null) => void;
   tool: AnnoTool;
   color: string;
   items: Annotation[];
@@ -953,19 +1015,24 @@ function PageView({
 
   const height = Math.round(width * ratio);
 
-  // Observasi visibilitas (render saat mendekat viewport).
+  // Observasi visibilitas (render saat mendekat viewport). Callback lewat
+  // ref + deps [] → observer dibuat SEKALI per halaman (dulu: dibongkar-
+  // pasang setiap render karena onVisible inline dari parent).
+  const onVisibleRef = useRef(onVisible);
+  onVisibleRef.current = onVisible;
   useEffect(() => {
     const el = wrapRef.current;
     if (!el) return;
     const io = new IntersectionObserver(
       (entries) => {
-        for (const en of entries) onVisible(en.isIntersecting);
+        for (const en of entries)
+          onVisibleRef.current(pageNo, en.isIntersecting);
       },
       { root: null, rootMargin: "120% 0px" }
     );
     io.observe(el);
     return () => io.disconnect();
-  }, [onVisible]);
+  }, [pageNo]);
 
   // Render canvas saat terlihat / ukuran berubah.
   useEffect(() => {
@@ -1077,7 +1144,7 @@ function PageView({
     <div
       ref={(el) => {
         wrapRef.current = el;
-        registerRef(el);
+        registerRef(pageNo, el);
       }}
       data-page={pageNo}
       className={cn(
@@ -1125,4 +1192,4 @@ function PageView({
       ) : null}
     </div>
   );
-}
+});

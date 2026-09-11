@@ -163,7 +163,11 @@ export function AulaReader({
     EMBEDDED_IMAGE_EXTS.has(e) ||
     e === "epub";
 
-  const { entry, error, progress } = useOfficeBuffer(file);
+  // Video/audio/gambar/teks memakai URL langsung → JANGAN unduh buffer
+  // (dulu: ikut terunduh penuh 2× bandwidth + RAM ganda per pratinjau).
+  const { entry, error, progress } = useOfficeBuffer(file, {
+    enabled: needsBuffer,
+  });
 
   // ── EPUB (ekstensi) ──
   if (e === "epub") {

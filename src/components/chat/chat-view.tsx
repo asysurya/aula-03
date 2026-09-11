@@ -469,6 +469,19 @@ export function ChatView({
           /* event rusak — abaikan */
         }
       };
+      es.onerror = () => {
+        // JANGAN andalkan auto-reconnect browser: URL-nya membeku membawa
+        // `since` saat koneksi pertama dibuka — setelah server menutup
+        // stream tiap ±55 dtk, reconnect lama mengulang dari patokan kuno
+        // yang bisa melompati pesan. Tutup & sambung ulang dengan `since`
+        // segar (lastPollRef ter-update oleh tiap event yang masuk).
+        if (stopped || conversationKeyRef.current !== key) return;
+        es?.close();
+        es = null;
+        setTimeout(() => {
+          if (!stopped && !document.hidden) connect();
+        }, 1200);
+      };
     }
 
     function onVisibility() {

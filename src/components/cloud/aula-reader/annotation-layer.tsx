@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import type { Annotation, AnnoTool } from "./annotations";
 import { newId } from "./annotations";
 
@@ -38,6 +38,16 @@ export function AnnotationLayer({
     cur: [number, number];
   } | null>(null);
   const [erased, setErased] = useState<Set<string>>(new Set());
+  /** Sedang menyeret penghapus → k terus menghapus saat digerakkan. */
+  const erasing = useRef(false);
+
+  // HANYA anotasi milik HALAMAN INI yang dirender & bisa dihapus.
+  // (Dulu: seluruh anotasi file dirender di SETIAP halaman → stabilo
+  // halaman 1 muncul di semua halaman pada posisi yang sama.)
+  const pageItems = useMemo(
+    () => items.filter((a) => a.page === page),
+    [items, page]
+  );
 
   function posOf(e: React.PointerEvent): [number, number] {
     const svg = svgRef.current;
@@ -49,7 +59,7 @@ export function AnnotationLayer({
   }
 
   function eraseAt(p: [number, number]) {
-    const hit = hitTest(items, p);
+    const hit = hitTest(pageItems, p);
     if (hit && !erased.has(hit)) {
       setErased((prev) => new Set(prev).add(hit));
       onErase(hit);
@@ -65,7 +75,7 @@ export function AnnotationLayer({
         preserveAspectRatio="none"
         className="absolute inset-0 w-full h-full pointer-events-none"
       >
-        {items.map((a) => (
+        {pageItems.map((a) => (
           <AnnotationShape key={a.id} a={a} />
         ))}
       </svg>
@@ -90,6 +100,7 @@ export function AnnotationLayer({
         }
         const p = posOf(e);
         if (tool === "erase") {
+          erasing.current = true;
           eraseAt(p);
           return;
         }
@@ -97,6 +108,11 @@ export function AnnotationLayer({
         setLive({ pts: [p], start: p, cur: p });
       }}
       onPointerMove={(e) => {
+        if (tool === "erase") {
+          // Seret penghapus: hapus semua anotasi yang dilewati.
+          if (erasing.current) eraseAt(posOf(e));
+          return;
+        }
         const d = drawing.current;
         if (!d) return;
         const p = posOf(e);
@@ -115,6 +131,7 @@ export function AnnotationLayer({
       onPointerUp={() => {
         const d = drawing.current;
         drawing.current = null;
+        erasing.current = false;
         setLive(null);
         if (!d) return;
         if (tool === "pen") {
@@ -162,10 +179,11 @@ export function AnnotationLayer({
       }}
       onPointerCancel={() => {
         drawing.current = null;
+        erasing.current = false;
         setLive(null);
       }}
     >
-      {items.map((a) => (
+      {pageItems.map((a) => (
         <AnnotationShape key={a.id} a={a} />
       ))}
       {live && tool === "pen" ? (
@@ -195,7 +213,7 @@ export function AnnotationLayer({
             width={w}
             height={h}
             fill={color}
-            opacity={0.5}
+            opacity={0.7}
             style={{ mixBlendMode: "multiply" }}
           />
         );
@@ -214,10 +232,12 @@ function AnnotationShape({ a }: { a: Annotation }) {
         width={w}
         height={h}
         fill={a.color}
-        opacity={0.5}
+        opacity={0.7}
         rx={0.004}
         // Multiply: teks hitam tetap hitam, kertas putih jadi warna stabilo —
         // persis stabilo sungguhan (tidak menutupi teks di bawahnya).
+        // Opacity 0.7 (dulu 0.5): stabilo lebih terlihat jelas; teks tetap
+        // gelap karena multiply tak pernah mencerahkan.
         style={{ mixBlendMode: "multiply" }}
       />
     );

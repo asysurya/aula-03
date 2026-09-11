@@ -380,6 +380,15 @@ export const useTransferStore = create<TransferState>((set, get) => ({
   },
 
   clearFinished() {
+    // Kumpulkan id job yang dibuang → runtime-nya ikut dihapus (dulu:
+    // hanya difilter dari daftar; blob utuh tiap unduhan selesai tetap
+    // ditahan di memori sampai reload — 10 unduhan 100MB ≈ 1GB).
+    const removed = get().jobs
+      .filter(
+        (j) => j.status === "done" || j.status === "cancelled" || j.status === "error"
+      )
+      .map((j) => j.id);
+    for (const id of removed) runtimes.delete(id);
     set((s) => ({
       jobs: s.jobs.filter(
         (j) => j.status !== "done" && j.status !== "cancelled" && j.status !== "error"
@@ -468,6 +477,10 @@ function finishJob(id: string, status: "done" | "error" | "cancelled", error?: s
   }));
   const rt = runtimes.get(id);
   if (status === "done" && rt) {
+    // Lepaskan memori bagian unduhan — blob sudah tersusun/disimpan.
+    // (Dulu: parts/segs tetap menahan seluruh isi file di RAM.)
+    rt.parts = [];
+    rt.segs = undefined;
     // Toast ringan tanpa memblokir.
     if (rt.kind === "upload") {
       toast.success(`Upload selesai: ${rt.file?.name ?? "file"}`);
@@ -776,8 +789,19 @@ async function runUpload(rt: JobRuntime) {
       } catch (e) {
         if (fatalError) throw fatalError;
         const msg = e instanceof Error ? e.message : "";
-        if (msg === "__CANCELLED__") throw e;
-        if (msg === "__PAUSED__") throw e; // keluar rapi; loop lama atur gate
+        if (msg === "__CANCELLED__") {
+          inFlight.delete(idx);
+          recompute();
+          throw e;
+        }
+        if (msg === "__PAUSED__") {
+          // Chunk in-flight dibatalkan → progresnya TIDAK dihitung (dulu:
+          // angka lama tertinggal → bar progres "menggembung" hingga bisa
+          // menunjukkan 100% padahal chunk belum tersimpan).
+          inFlight.delete(idx);
+          recompute();
+          throw e; // keluar rapi; loop lama atur gate
+        }
         lastErr = msg;
       }
       if (attempt < 3) await new Promise((r) => setTimeout(r, 600 * attempt));

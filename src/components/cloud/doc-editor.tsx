@@ -50,6 +50,13 @@ export function DocEditor({ docId }: { docId: string }) {
 
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastRemoteContentRef = useRef<string>("");
+  /** Versi (updatedAt) terbaru yang pernah kita terima/tulis — penjaga
+   *  anti race: poll yang berangkat SEBELUM autosave bisa pulang SETELAHNYA
+   *  membawa konten lama; tanpa penjaga ini konten lama menimpa hasil
+   *  simpanan & dianggap "bersih" → suntingan hilang diam-diam. */
+  const lastKnownUpdatedAtRef = useRef<string | null>(null);
+  const dirtyRef = useRef(false);
+  dirtyRef.current = dirty;
 
   const fetchDoc = useCallback(async () => {
     try {
@@ -57,6 +64,17 @@ export function DocEditor({ docId }: { docId: string }) {
       if (!res.ok) throw new Error("Gagal memuat dokumen");
       const json = (await res.json()) as { doc: DocData };
       const d = json.doc;
+      // Abaikan hasil poll yang lebih LAMA dari versi terakhir yang kita
+      // ketahui (balasan GET basi yang terlambat pulang).
+      if (
+        lastKnownUpdatedAtRef.current &&
+        d.updatedAt !== lastKnownUpdatedAtRef.current &&
+        new Date(d.updatedAt).getTime() <
+          new Date(lastKnownUpdatedAtRef.current).getTime()
+      ) {
+        return;
+      }
+      lastKnownUpdatedAtRef.current = d.updatedAt;
       setDoc(d);
       lastRemoteContentRef.current = d.content;
       // Only update local fields when not dirty.
@@ -128,6 +146,8 @@ export function DocEditor({ docId }: { docId: string }) {
       const json = (await res.json()) as { doc: DocData };
       setDoc(json.doc);
       lastRemoteContentRef.current = json.doc.content;
+      // Versi hasil tulis kita = versi terbaru yang kita ketahui.
+      lastKnownUpdatedAtRef.current = json.doc.updatedAt;
       setLastSavedAt(json.doc.updatedAt);
       setDirty(false);
       setRemoteUpdated(false);
@@ -138,6 +158,27 @@ export function DocEditor({ docId }: { docId: string }) {
       setSaving(false);
     }
   }
+
+  // Flush suntingan yang masih di debounce saat komponen ditutup /
+  // tab disembunyikan — dulu: timer dibatalkan diam-diam → suntingan
+  // <1,5 dtk terakhir HILANG.
+  const saveRef = useRef(save);
+  saveRef.current = save;
+  useEffect(() => {
+    const flush = () => {
+      if (debounceRef.current) {
+        clearTimeout(debounceRef.current);
+        debounceRef.current = null;
+      }
+      if (dirtyRef.current) void saveRef.current();
+    };
+    window.addEventListener("pagehide", flush);
+    return () => {
+      window.removeEventListener("pagehide", flush);
+      flush();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   function handleBack() {
     openCloudFolder(cloudFolderId, cloudClassroomId);

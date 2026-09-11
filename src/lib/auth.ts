@@ -52,11 +52,23 @@ export const authOptions: NextAuthOptions = {
       return session;
     },
   },
-  // Fallback secret if env var missing (prevents JWT decryption errors).
-  // In production, always set NEXTAUTH_SECRET env var to a strong random value.
-  secret:
-    process.env.NEXTAUTH_SECRET ||
-    "aula-dev-fallback-secret-change-in-production-9f3a7c2e1b",
+  // Produksi TANPA NEXTAUTH_SECRET = konfigurasi rusak → gagal cepat
+  // (dulu: fallback konstanta yang TERPUBLIKASI di repo — siapa pun bisa
+  // memalsukan cookie sesi admin bila env lupa di-set). Dev lokal tetap
+  // pakai fallback supaya mudah; build (NEXT_PHASE=phase-production-build)
+  // juga dikecualikan karena modul dievaluasi saat `next build`.
+  secret: (() => {
+    if (process.env.NEXTAUTH_SECRET) return process.env.NEXTAUTH_SECRET;
+    const isProdRuntime =
+      process.env.NODE_ENV === "production" &&
+      process.env.NEXT_PHASE !== "phase-production-build";
+    if (isProdRuntime) {
+      throw new Error(
+        "NEXTAUTH_SECRET wajib di-set di produksi — tanpa ini sesi tidak aman."
+      );
+    }
+    return "aula-dev-fallback-secret-change-in-production-9f3a7c2e1b";
+  })(),
 };
 
 export type AppSession = {

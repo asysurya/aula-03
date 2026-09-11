@@ -467,7 +467,14 @@ export function MessageInput({
     );
 
     // Remove completed (success or error) from the uploading list.
-    setUploading((prev) => prev.filter((u) => !u.result && !u.error));
+    // (previewUrl di-revoke — dulu: blob URL gambar bocor terus di memori.)
+    setUploading((prev) => {
+      for (const u of prev) {
+        if ((u.result || u.error) && u.previewUrl)
+          URL.revokeObjectURL(u.previewUrl);
+      }
+      return prev.filter((u) => !u.result && !u.error);
+    });
   }
 
   function removePending(fileId: string) {
@@ -475,7 +482,11 @@ export function MessageInput({
   }
 
   function dismissUploading(id: string) {
-    setUploading((prev) => prev.filter((u) => u.id !== id));
+    setUploading((prev) => {
+      const target = prev.find((u) => u.id === id);
+      if (target?.previewUrl) URL.revokeObjectURL(target.previewUrl);
+      return prev.filter((u) => u.id !== id);
+    });
   }
 
   // ── Drag & drop (Discord-style) ──
@@ -545,7 +556,14 @@ export function MessageInput({
     setMention(null);
     setSending(true);
     try {
-      await onSend(content, attachmentFileIds, assignmentId);
+      const sentId = await onSend(content, attachmentFileIds, assignmentId);
+      // onSend mengembalikan null bila GAGAL (error sudah ditangani di
+      // chat-view: bubble optimistic dibatalkan + toast). Dulu: pembersihan
+      // "sukses" tetap jalan → teks + lampiran + balasan + draft HILANG.
+      if (sentId === null || sentId === undefined) {
+        setValue(content); // pulihkan teks agar bisa dikirim ulang
+        return;
+      }
       // On success: clear pending attachments + tugas + reply target + draft.
       setPending([]);
       setPendingAssignment(null);
@@ -562,10 +580,31 @@ export function MessageInput({
     }
   }
 
-  // Polling dikirim lewat jalur sama (konten teks terformat) — dipakai
-  // untuk auto-react angka setelah pesan nyata dibuat.
-  async function sendPollContent(content: string): Promise<string | null> {
-    return onSend(content, [], null);
+  // Polling dikirim lewat jalur sama (konten teks terformat). Setelah pesan
+  // nyata dibuat → otomatis pasang reaksi angka (dulu: dijanjikan di teks
+  // pesan + toast tapi TIDAK PERNAH dipasang — anggota tak bisa memilih).
+  async function sendPollContent(
+    content: string,
+    optionCount: number
+  ): Promise<string | null> {
+    const id = await onSend(content, [], null);
+    if (id && optionCount > 0) {
+      const NUMBER_EMOJIS = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"];
+      void (async () => {
+        for (let i = 0; i < Math.min(optionCount, 5); i++) {
+          try {
+            await fetch(`/api/chat/messages/${id}/reactions`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ emoji: NUMBER_EMOJIS[i] }),
+            });
+          } catch {
+            /* best-effort — polling tetap terkirim */
+          }
+        }
+      })();
+    }
+    return id;
   }
 
   // Shift+Enter to send; plain Enter = newline (default behavior).

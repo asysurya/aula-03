@@ -172,9 +172,15 @@ export function TemanAiView({ me }: { me: MeResponse }) {
             got += ev.text;
             patchMsg(aiId, { content: got, streaming: true });
           } else if (ev.type === "error") {
+            // JANGAN timpa jawaban parsial yang sudah tampil — server tetap
+            // menyimpan potongannya, jadi tampilkan error DI BAWAH teks
+            // (dulu: potongan hilang di layar padahal tersimpan → membingungkan
+            // setelah reload muncul lagi).
             patchMsg(aiId, {
-              content: ev.message ?? "Terjadi error.",
-              error: true,
+              content: got
+                ? `${got}\n\n---\n\n⚠️ ${ev.message ?? "Terjadi error."}`
+                : (ev.message ?? "Terjadi error."),
+              error: !got,
               streaming: false,
             });
           }

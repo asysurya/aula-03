@@ -401,6 +401,15 @@ export async function computeChatSyncDelta(
     new: hydratedNew,
     changed: hydratedChanged,
     deletedIds,
-    serverTime,
+    // Patokan (`serverTime` dipakai semua konsumen sebagai `since` berikutnya):
+    // bila jendela 100 pesan BARU penuh tercapai, JANGAN lompat ke "sekarang"
+    // — pesan di belakang 100 tertua belum terkirim & akan terlewati
+    // selamanya. Gunakan createdAt pesan TERAKHIR yang terkirim supaya
+    // delta berikutnya melanjutkan sisa antrean (client dedupe by id
+    // membuat pengiriman ulang aman).
+    serverTime:
+      newRaw.length >= 100 && newRaw.length > 0
+        ? new Date(newRaw[newRaw.length - 1].createdAt).toISOString()
+        : serverTime,
   };
 }

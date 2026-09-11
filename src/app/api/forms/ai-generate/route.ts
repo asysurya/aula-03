@@ -21,6 +21,9 @@ const MAX_COUNT = 40;
 export async function POST(req: NextRequest) {
   const user = await requireUser().catch(() => null);
   if (!user) return errorResponse("UNAUTHORIZED", 401);
+  // Fitur guru: siswa tidak boleh memanggil generator ini (membakar kuota
+  // ZAI server & bisa memperoleh kunci jawaban draf).
+  if (user.role === "STUDENT") return errorResponse("FORBIDDEN", 403);
 
   const body = await req.json().catch(() => null);
   const prompt = body?.prompt == null ? "" : String(body.prompt).trim();
@@ -42,7 +45,9 @@ export async function POST(req: NextRequest) {
     const zai = await ZAI.create();
     const completion = await zai.chat.completions.create({
       messages: [
-        { role: "assistant", content: buildAiSystemPrompt(count, types) },
+        // System prompt HARUS role "system" (bukan "assistant") supaya
+        // instruksi format ditaati model secara konsisten.
+        { role: "system", content: buildAiSystemPrompt(count, types) },
         { role: "user", content: prompt },
       ],
       thinking: { type: "disabled" },

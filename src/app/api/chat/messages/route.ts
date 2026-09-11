@@ -237,12 +237,16 @@ export async function GET(req: NextRequest) {
     }
   }
 
-  const messages = await db.message.findMany({
+  // Jendela pesan: ambil 200 TERBARU (desc lalu dibalik) — dulu: asc+take
+  // mengembalikan 200 TERLAMA, jadi kelas dengan >200 pesan menampilkan
+  // awal semester & tak bisa mencapai pesan baru.
+  const rows = await db.message.findMany({
     where,
-    orderBy: { createdAt: "asc" },
+    orderBy: { createdAt: "desc" },
     take: 200,
     include: messageInclude,
   });
+  const messages = rows.reverse();
 
   const hydrated = await hydrateAssignments(
     sanitizeMessages(messages).map(toDto)

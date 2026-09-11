@@ -49,10 +49,16 @@ export async function hardDeleteCloudFilesByIds(
   });
   await db.cloudFile.deleteMany({ where: { id: { in: unique } } });
 
-  // 3. Hapus blob fisik (MEGA node / file lokal) — permanen.
+  // 3. Hapus blob fisik (MEGA node / file lokal) — permanen — TAPI hanya
+  //    bila tak ada baris CloudFile lain yang memakai storageKey sama.
+  //    (File hasil "Salin"/copy folder berbagi storageKey: menghapus satu
+  //    salinan dulu ikut menghapus blob → file asli & salinan lain rusak.)
   for (const f of files) {
     try {
-      await deleteFile(f.storageKey);
+      const remaining = await db.cloudFile.count({
+        where: { storageKey: f.storageKey },
+      });
+      if (remaining === 0) await deleteFile(f.storageKey);
     } catch {
       /* best-effort — baris DB sudah terhapus */
     }

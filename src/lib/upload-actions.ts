@@ -233,7 +233,14 @@ export async function uploadSubmissionAction(
     });
     if (oldFileId && oldFileId !== fileId) {
       await db.cloudFile.delete({ where: { id: oldFileId } }).catch(() => {});
-      if (oldStorageKey) await deleteFile(oldStorageKey);
+      if (oldStorageKey) {
+        // Hapus blob HANYA bila tak ada baris lain yang memakai kunci sama
+        // (file hasil "Salin" berbagi blob — dulu ikut terhapus!).
+        const remaining = await db.cloudFile
+          .count({ where: { storageKey: oldStorageKey } })
+          .catch(() => 1);
+        if (remaining === 0) await deleteFile(oldStorageKey).catch(() => {});
+      }
     }
   } else {
     submission = await db.submission.create({
@@ -491,7 +498,10 @@ export async function uploadFormImageAction(
       storageKey: stored.storageKey,
       size: stored.size,
       mimetype: file.mimetype,
-      visibility: "PRIVATE",
+      // Gambar soal dibaca SISWA kelas saat mengerjakan form → visibility
+      // ALL (kebijakan storage utk file tanpa folder kini memperketat
+      // PRIVATE menjadi pengunggah + guru/admin — lihat storage-access.ts).
+      visibility: "ALL",
       cloudAccountId: stored.cloudAccountId,
     },
     select: { id: true, name: true, size: true, mimetype: true, storageKey: true },

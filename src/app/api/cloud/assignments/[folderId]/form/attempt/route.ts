@@ -164,25 +164,53 @@ export async function PATCH(
   const body = await req.json().catch(() => null);
   if (!body || typeof body !== "object") return errorResponse("INVALID_BODY", 400);
 
-  // Valid question ids
-  const validQuestions = new Set(
-    (
-      await db.formQuestion.findMany({
-        where: { formId: form.id },
-        select: { id: true, type: true },
-      })
-    ).map((q) => q.id)
+  // Valid question ids + tipe soal (jawaban file hanya utk soal FILE/IMAGE)
+  const questions = await db.formQuestion.findMany({
+    where: { formId: form.id },
+    select: { id: true, type: true },
+  });
+  const validQuestions = new Map(questions.map((q) => [q.id, q.type]));
+
+  // Validasi fileId: HARUS file milik user sendiri (dulu: siswa bisa
+  // menautkan CloudFile SIAPA PUN — termasuk file jawaban siswa lain —
+  // lalu mengunduhnya lewat GET form).
+  const requestedFileIds = Array.from(
+    new Set(
+      ((Array.isArray(body.answers) ? body.answers : []) as {
+        fileId?: unknown;
+      }[])
+        .map((a) => (a?.fileId == null ? null : String(a.fileId)))
+        .filter((x): x is string => !!x)
+    )
+  );
+  const ownedFileIds = new Set(
+    requestedFileIds.length === 0
+      ? []
+      : (
+          await db.cloudFile.findMany({
+            where: {
+              id: { in: requestedFileIds },
+              uploadedBy: user.id,
+            },
+            select: { id: true },
+          })
+        ).map((f) => f.id)
   );
 
   const answers = Array.isArray(body.answers) ? body.answers : [];
   for (const a of answers) {
     const questionId = String(a.questionId || "");
-    if (!validQuestions.has(questionId)) continue;
+    const qType = validQuestions.get(questionId);
+    if (!qType) continue;
     const text = a.text == null ? null : String(a.text).slice(0, 8000);
     const optionIds = Array.isArray(a.optionIds)
       ? a.optionIds.map(String).filter((id: string) => id.length > 0).slice(0, 20)
       : null;
-    const fileId = a.fileId == null ? null : String(a.fileId);
+    let fileId = a.fileId == null ? null : String(a.fileId);
+    // File bukan milik user / soal bukan tipe unggahan → tolak file-nya.
+    if (fileId && (!ownedFileIds.has(fileId) || (qType !== "FILE" && qType !== "IMAGE"))) {
+      fileId = null;
+    }
     await db.formAnswer.upsert({
       where: { attemptId_questionId: { attemptId: attempt.id, questionId } },
       update: { text, optionIds: optionIds ? JSON.stringify(optionIds) : null, fileId },

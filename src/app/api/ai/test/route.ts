@@ -8,6 +8,59 @@ import { chatEndpoint, cleanUpstreamDetail, resolveAiConfig, type AiSettingInput
 export const runtime = "nodejs";
 export const maxDuration = 30;
 
+// ── Rate limit sederhana per user (mencegah pembakaran kuota/kredit
+//    lewat spam tombol tes) ──
+const RATE_LIMIT = 10; // maksimal percobaan
+const RATE_WINDOW_MS = 60_000; // per menit
+const rateHits = new Map<string, { n: number; reset: number }>();
+
+function rateLimited(userId: string): boolean {
+  const now = Date.now();
+  const h = rateHits.get(userId);
+  if (!h || h.reset < now) {
+    rateHits.set(userId, { n: 1, reset: now + RATE_WINDOW_MS });
+    return false;
+  }
+  h.n += 1;
+  return h.n > RATE_LIMIT;
+}
+
+// Bersihkan entri basi sesekali (anti pertumbuhan tanpa batas).
+if (typeof setInterval === "function") {
+  const t = setInterval(() => {
+    const now = Date.now();
+    for (const [k, v] of rateHits) if (v.reset < now) rateHits.delete(k);
+  }, RATE_WINDOW_MS);
+  // Node: jangan tahan event loop tetap hidup khusus untuk timer ini.
+  (t as unknown as { unref?: () => void }).unref?.();
+}
+
+/** Blokir target internal (anti-SSRF utk tes form dengan baseUrl bebas). */
+function isInternalHost(url: string): boolean {
+  try {
+    const u = new URL(url);
+    const h = u.hostname.toLowerCase();
+    if (
+      h === "localhost" ||
+      h === "::1" ||
+      h.endsWith(".internal") ||
+      h === "metadata.google.internal"
+    )
+      return true;
+    if (
+      /^127\./.test(h) ||
+      /^10\./.test(h) ||
+      /^192\.168\./.test(h) ||
+      /^172\.(1[6-9]|2\d|3[01])\./.test(h) ||
+      /^169\.254\./.test(h)
+    )
+      return true;
+    return false;
+  } catch {
+    return true;
+  }
+}
+
 // ─────────────────────────────────────────────────────────────────────
 // POST /api/ai/test — tes sambungan Teman AI.
 // Body opsional (untuk tes form BELUM disimpan):
@@ -53,6 +106,13 @@ export async function POST(req: NextRequest) {
   const user = await requireUser().catch(() => null);
   if (!user) return NextResponse.json({ error: "UNAUTHORIZED" }, { status: 401 });
 
+  if (rateLimited(user.id)) {
+    return NextResponse.json(
+      { ok: false, error: "Terlalu banyak percobaan — tunggu sebentar lalu coba lagi." },
+      { status: 429 }
+    );
+  }
+
   let body: unknown = {};
   try {
     body = await req.json().catch(() => ({}));
@@ -75,8 +135,17 @@ export async function POST(req: NextRequest) {
     );
     // ApiKey kosong di form → fallback ke kunci TERSIMPAN sesuai scope:
     // user → AiUserSetting; admin → AppSetting "ai.default".
+    // ⚠ scope "admin" = membaca kunci default admin → hanya ADMIN boleh.
+    // (Dulu: user biasa bisa mengarahkan kunci admin ke baseUrl attackernya
+    // dan mencegatnya — eksfiltrasi kunci.)
     if (!d.apiKey) {
       if (d.scope === "admin") {
+        if (user.role !== "ADMIN") {
+          return NextResponse.json(
+            { ok: false, error: "Hanya admin yang boleh menguji default admin." },
+            { status: 403 }
+          );
+        }
         const adminRow = await db.appSetting.findUnique({ where: { key: "ai.default" } });
         if (adminRow) {
           try {
@@ -91,9 +160,11 @@ export async function POST(req: NextRequest) {
               config = resolveAiConfig(
                 {
                   provider: d.provider,
-                  baseUrl: d.baseUrl ?? raw.baseUrl ?? null,
+                  // Pakai baseUrl TERSIMPAN saja — baseUrl dari klien TIDAK
+                  // dipercaya saat memakai kunci tersimpan (anti eksfiltrasi).
+                  baseUrl: raw.baseUrl ?? null,
                   apiKey: savedKey,
-                  model: d.model ?? raw.model ?? null,
+                  model: raw.model ?? null,
                 },
                 null
               );
@@ -109,7 +180,9 @@ export async function POST(req: NextRequest) {
           config = resolveAiConfig(
             {
               provider: d.provider,
-              baseUrl: d.baseUrl ?? row.baseUrl,
+              // baseUrl tersimpan saja (anti eksfiltrasi kunci sendiri ke
+              // URL pihak lain yang diketik ulang).
+              baseUrl: row.baseUrl,
               apiKey: savedKey,
               model: d.model ?? row.model,
             },
@@ -117,6 +190,13 @@ export async function POST(req: NextRequest) {
           );
         }
       }
+    } else if (d.baseUrl && isInternalHost(d.baseUrl)) {
+      // Tes form dengan kunci yang diketik sendiri + baseUrl internal →
+      // tolak (SSRF ke jaringan dalam server).
+      return NextResponse.json(
+        { ok: false, error: "Base URL ke jaringan internal tidak diizinkan." },
+        { status: 400 }
+      );
     }
   } else {
     // Tes config aktif: milik user → default admin.

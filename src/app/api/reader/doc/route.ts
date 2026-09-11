@@ -36,8 +36,10 @@ const annoSchema = z.object({
 
 const putSchema = z.object({
   storageKey: z.string().trim().min(1).max(300),
-  annotations: z.array(annoSchema).max(MAX_ANNOTATIONS),
   page: z.number().int().min(1).max(100000),
+  // optional: tanpa annotations → update POSISI HALAMAN saja (ringan,
+  // dipakai setiap pindah halaman — tidak mengirim ulang semua anotasi).
+  annotations: z.array(annoSchema).max(MAX_ANNOTATIONS).optional(),
 });
 
 export async function GET(req: NextRequest) {
@@ -61,6 +63,10 @@ export async function GET(req: NextRequest) {
     storageKey,
     annotations,
     page: doc?.page ?? 1,
+    // exists=false → dokumen belum pernah ada (klien boleh migrasi cache
+    // lama). exists=true + annotations kosong → user memang sudah menghapus
+    // semua anotasi (jangan migrasi ulang!).
+    exists: !!doc,
   });
 }
 
@@ -81,11 +87,18 @@ export async function PUT(req: NextRequest) {
   }
   const { storageKey, annotations, page } = parsed.data;
 
+  // Tanpa `annotations` → simpan posisi halaman saja (jangan menimpa
+  // anotasi yang tersimpan).
   await db.readerDoc.upsert({
     where: { userId_storageKey: { userId: user.id, storageKey } },
-    update: { annotations, page },
-    create: { userId: user.id, storageKey, annotations, page },
+    update: annotations ? { annotations, page } : { page },
+    create: {
+      userId: user.id,
+      storageKey,
+      annotations: annotations ?? [],
+      page,
+    },
   });
 
-  return NextResponse.json({ ok: true, count: annotations.length });
+  return NextResponse.json({ ok: true, count: annotations?.length ?? null });
 }

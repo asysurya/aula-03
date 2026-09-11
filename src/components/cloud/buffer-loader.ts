@@ -412,8 +412,17 @@ export interface FetchProgress {
 export { formatSpeed };
 
 // ───────────────────────── Hook buffer office ─────────────────────────
-export function useOfficeBuffer(file: CloudFileItem) {
+export function useOfficeBuffer(
+  file: CloudFileItem,
+  opts?: {
+    /** false → JANGAN mengunduh apa pun (dipakai AulaReader utk tipe yang
+     *  tidak butuh buffer: video/audio/gambar/teks memakai URL langsung —
+     *  dulu ikut terunduh penuh → bandwidth ganda + RAM ±2× ukuran file). */
+    enabled?: boolean;
+  }
+) {
   const key = file.storageKey;
+  const enabled = opts?.enabled !== false;
   const [entry, setEntry] = useState<OfficeCacheEntry | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [progress, setProgress] = useState<FetchProgress | null>(null);
@@ -427,8 +436,12 @@ export function useOfficeBuffer(file: CloudFileItem) {
   }
 
   useEffect(() => {
+    if (!enabled) return;
     if (entry || error) return;
     let cancelled = false;
+    // Batalkan unduhan bila dialog ditutup di tengah jalan (dulu: download
+    // 100MB terus berjalan di latar belakang lalu dibuang begitu saja).
+    const ac = new AbortController();
     (async () => {
       try {
         // 1) Sudah di cache (memori sesi / Cache Storage) → instan.
@@ -449,6 +462,7 @@ export function useOfficeBuffer(file: CloudFileItem) {
         //    paralel, atau streaming proxy — progress real-time per chunk.
         setProgress({ loaded: 0, total: null });
         const buffer = await fastFetchBuffer(key, {
+          signal: ac.signal,
           onProgress: (p: FastProgress) => {
             if (!cancelled) setProgress(p);
           },
@@ -464,7 +478,7 @@ export function useOfficeBuffer(file: CloudFileItem) {
         });
         setProgress(null);
       } catch (err) {
-        if (!cancelled) {
+        if (!cancelled && !(err instanceof DOMException && err.name === "AbortError")) {
           setError(err instanceof Error ? err.message : "Gagal memuat file");
           setProgress(null);
         }
@@ -472,8 +486,9 @@ export function useOfficeBuffer(file: CloudFileItem) {
     })();
     return () => {
       cancelled = true;
+      ac.abort();
     };
-  }, [key, entry, error]);
+  }, [key, entry, error, enabled]);
 
   return { entry, error, progress };
 }

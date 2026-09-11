@@ -14,6 +14,17 @@ export async function pingPresence(userId: string) {
 }
 
 export async function setOffline(userId: string) {
+  // Tandai baris presence basi juga — dulu hanya User.status yang diubah,
+  // padahal daftar online (getOnlineUserIds) membaca presenceRecord.lastPing
+  // → user tetap tampil "online" sampai 45 dtk setelah tab ditutup.
+  await db.presenceRecord
+    .update({
+      where: { userId },
+      data: { lastPing: new Date(0) },
+    })
+    .catch(() => {
+      /* baris memang belum ada */
+    });
   await db.user.update({
     where: { id: userId },
     data: { status: "offline", lastSeen: new Date() },

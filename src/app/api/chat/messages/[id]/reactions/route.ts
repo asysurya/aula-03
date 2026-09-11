@@ -136,9 +136,31 @@ export async function POST(
     return NextResponse.json({ reacted: false, emoji });
   }
 
-  await db.messageReaction.create({
-    data: { messageId, userId, emoji },
-  });
+  try {
+    await db.messageReaction.create({
+      data: { messageId, userId, emoji },
+    });
+  } catch (e: unknown) {
+    // Dua toggle beruntun (double-click / dua tab) bisa sama-sama lolos
+    // findFirst lalu sama-sama create → pelanggaran unique (P2002 = 500).
+    // Anggap "sudah direaksi" → hapus (netral, sesuai makna toggle).
+    if ((e as { code?: string })?.code === "P2002") {
+      try {
+        const dupe = await db.messageReaction.findFirst({
+          where: { messageId, userId, emoji },
+          select: { id: true },
+        });
+        if (dupe) {
+          await db.messageReaction.delete({ where: { id: dupe.id } });
+          await touchMessageReaction(messageId);
+          return NextResponse.json({ reacted: false, emoji });
+        }
+      } catch {
+        /* jatuh ke throw di bawah */
+      }
+    }
+    throw e;
+  }
   await touchMessageReaction(messageId);
   return NextResponse.json({ reacted: true, emoji });
 }

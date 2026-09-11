@@ -108,8 +108,10 @@ function Header({
   const [reloading, setReloading] = useState(false);
   const handleReload = () => {
     setReloading(true);
-    qc.invalidateQueries({ queryKey: ["cloud-folders"] });
-    qc.invalidateQueries({ queryKey: ["cloud-assignment"] });
+    // Prefix ["cloud"] mencakup semua query cloud (["cloud","folder",…],
+    // ["cloud","assignment",…] dll — dulu: key yang tak pernah cocok →
+    // daftar tak pernah benar-benar dimuat ulang).
+    qc.invalidateQueries({ queryKey: ["cloud"] });
     qc.invalidateQueries({ queryKey: ["admin-cloud-accounts"] });
     // Stop spin after 1.2s
     setTimeout(() => setReloading(false), 1200);

@@ -28,7 +28,7 @@ export function PollComposer({
 }: {
   open: boolean;
   onOpenChange: (o: boolean) => void;
-  onSendPoll: (content: string) => Promise<string | null>;
+  onSendPoll: (content: string, optionCount: number) => Promise<string | null>;
 }) {
   const [question, setQuestion] = useState("");
   const [options, setOptions] = useState<string[]>(["", ""]);
@@ -55,7 +55,7 @@ export function PollComposer({
         "",
         "_Pilih dengan men-tap reaksi angka di pesan ini._",
       ].join("\n");
-      const id = await onSendPoll(lines);
+      const id = await onSendPoll(lines, filled.length);
       if (id) {
         toast.success("Polling terkirim — pilihan angka otomatis ditambahkan");
         setQuestion("");

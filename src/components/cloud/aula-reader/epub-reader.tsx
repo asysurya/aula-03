@@ -28,6 +28,19 @@ interface SpineItem {
   title: string;
 }
 
+/** Base64 dari Uint8Array — dipotong per 32KB. (Dulu:
+ *  btoa(String.fromCharCode(...data)) → gambar >±100KB CRASH
+ *  "Maximum call stack size exceeded" karena spread melebihi batas
+ *  argumen fungsi, dan bab tidak pernah muncul.) */
+function u8ToBase64(u8: Uint8Array): string {
+  let s = "";
+  const CHUNK = 0x8000;
+  for (let i = 0; i < u8.length; i += CHUNK) {
+    s += String.fromCharCode(...u8.subarray(i, i + CHUNK));
+  }
+  return btoa(s);
+}
+
 export function EpubReader({
   file,
   entry,
@@ -115,59 +128,80 @@ export function EpubReader({
     if (!current || !zipFiles) return;
     let cancelled = false;
     (async () => {
-      const raw = zipFiles.get(current.href);
-      if (!raw) return;
-      const { strFromU8 } = await import("fflate");
-      const doc = new DOMParser().parseFromString(
-        strFromU8(raw),
-        "application/xhtml+xml"
-      );
-      // Sanitasi.
-      doc
-        .querySelectorAll("script, iframe, object, embed, link, meta[http-equiv]")
-        .forEach((el) => el.remove());
-      doc.querySelectorAll("*").forEach((el) => {
-        [...el.attributes].forEach((attr) => {
-          if (/^on/i.test(attr.name)) el.removeAttribute(attr.name);
+      try {
+        const raw = zipFiles.get(current.href);
+        if (!raw) return;
+        const { strFromU8 } = await import("fflate");
+        const doc = new DOMParser().parseFromString(
+          strFromU8(raw),
+          "application/xhtml+xml"
+        );
+        // Sanitasi: elemen aktif/phishing dibuang SELURUHNYA, termasuk
+        // <style> (CSS exfil) & <form>/<input> (phishing), plus <base>.
+        doc
+          .querySelectorAll(
+            "script, iframe, object, embed, link, meta[http-equiv], style, base, form, input, button, select, textarea"
+          )
+          .forEach((el) => el.remove());
+        doc.querySelectorAll("*").forEach((el) => {
+          [...el.attributes].forEach((attr) => {
+            const n = attr.name.toLowerCase();
+            // Event handler (onclick, onerror, dsb.).
+            if (n.startsWith("on")) el.removeAttribute(attr.name);
+            // URL berbahaya: javascript:/vbscript:/data: (kecuali data:image
+            // internal yang sudah kita pasang sendiri).
+            else if (
+              (n === "href" ||
+                n === "xlink:href" ||
+                n === "src" ||
+                n === "srcset" ||
+                n === "background") &&
+              /^\s*(javascript|vbscript|data)\s*:/i.test(attr.value)
+            )
+              el.removeAttribute(attr.name);
+          });
         });
-      });
-      // Gambar → data URL dari zip.
-      const imgs = doc.querySelectorAll("img");
-      for (const img of imgs) {
-        const src = img.getAttribute("src");
-        if (!src) continue;
-        const path = new URL(src, "http://x/" + current.href).pathname.slice(1);
-        const data = zipFiles.get(path) ?? zipFiles.get(src);
-        if (data) {
-          const e = path.split(".").pop()?.toLowerCase() ?? "jpg";
-          const mime =
-            e === "png"
-              ? "image/png"
-              : e === "gif"
-              ? "image/gif"
-              : e === "svg"
-              ? "image/svg+xml"
-              : "image/jpeg";
-          img.setAttribute(
-            "src",
-            `data:${mime};base64,${btoa(String.fromCharCode(...data.subarray(0, 3_000_000)))}`
-          );
-        } else {
-          img.remove();
+        // Gambar → data URL dari zip.
+        const imgs = doc.querySelectorAll("img");
+        for (const img of imgs) {
+          const src = img.getAttribute("src");
+          if (!src) continue;
+          const path = new URL(src, "http://x/" + current.href).pathname.slice(1);
+          const data = zipFiles.get(path) ?? zipFiles.get(src);
+          if (data) {
+            const e = path.split(".").pop()?.toLowerCase() ?? "jpg";
+            const mime =
+              e === "png"
+                ? "image/png"
+                : e === "gif"
+                ? "image/gif"
+                : e === "svg"
+                ? "image/svg+xml"
+                : "image/jpeg";
+            img.setAttribute("src", `data:${mime};base64,${u8ToBase64(data)}`);
+          } else {
+            img.remove();
+          }
         }
+        const body = doc.body?.innerHTML ?? "";
+        const title = doc.querySelector("title")?.textContent?.trim() ?? "";
+        if (cancelled) return;
+        setHtml(body);
+        setChapters((prev) => {
+          if (!prev) return prev;
+          if (prev[idx]?.title) return prev;
+          const next = [...prev];
+          next[idx] = { ...next[idx], title: title || `Bagian ${idx + 1}` };
+          return next;
+        });
+        scrollRef.current?.scrollTo({ top: 0 });
+      } catch (e) {
+        // Dulu: tanpa try/catch → error pembukaan bab = spinner selamanya.
+        if (!cancelled)
+          setError(
+            e instanceof Error ? e.message : "Gagal membuka bagian buku ini"
+          );
       }
-      const body = doc.body?.innerHTML ?? "";
-      const title = doc.querySelector("title")?.textContent?.trim() ?? "";
-      if (cancelled) return;
-      setHtml(body);
-      setChapters((prev) => {
-        if (!prev) return prev;
-        if (prev[idx]?.title) return prev;
-        const next = [...prev];
-        next[idx] = { ...next[idx], title: title || `Bagian ${idx + 1}` };
-        return next;
-      });
-      scrollRef.current?.scrollTo({ top: 0 });
     })();
     return () => {
       cancelled = true;

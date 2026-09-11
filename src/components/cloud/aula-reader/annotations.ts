@@ -32,10 +32,10 @@ export interface Annotation {
 
 export const ANNO_COLORS = [
   "#fde047", // kuning stabilo
-  "#86efac", // hijau
-  "#93c5fd", // biru
-  "#fda4af", // merah muda
-  "#c4b5fd", // ungu
+  "#4ade80", // hijau
+  "#60a5fa", // biru
+  "#fb7185", // merah muda
+  "#a78bfa", // ungu
 ];
 
 const PREFIX = "aula.anno.v1:";
@@ -66,10 +66,18 @@ export function useAnnotations(storageKey: string) {
   const [savedPage, setSavedPage] = useState(1);
   const pageRef = useRef(1);
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  /** true kalau ada perubahan lokal yang belum tersinkron (server tidak
-   * boleh menimpa yang belum tersimpan). */
+  /** true kalau ada perubahan ANOTASI lokal yang belum tersinkron (server
+   * tidak boleh menimpa yang belum tersimpan). Posisi halaman tidak
+   * dihitung — penyimpanan halaman ringan & sering. */
   const dirtyRef = useRef(false);
   const keyRef = useRef(storageKey);
+  /** PUT penuh (anotasi+halaman) sedang berjalan → antrikan yang baru
+   * (dulu: dua PUT bisa selesai di server DENGAN URUTAN TERBALIK →
+   * anotasi terbaru tertimpa snapshot lama). */
+  const saving = useRef(false);
+  const pendingSave = useRef(false);
+  /** Ada perubahan anotasi sejak terakhir PUT penuh? */
+  const fullPending = useRef(false);
 
   // Ganti file → muat ulang (di effect, bukan saat render).
   useEffect(() => {
@@ -93,6 +101,9 @@ export function useAnnotations(storageKey: string) {
         const data = (await res.json()) as {
           annotations?: Annotation[];
           page?: number;
+          /** false = belum ada dokumen di server (kalau API lama:
+           * undefined → perlakukan seperti ada). */
+          exists?: boolean;
         };
         if (cancelled || keyRef.current !== storageKey) return;
         const remote = Array.isArray(data.annotations)
@@ -107,7 +118,11 @@ export function useAnnotations(storageKey: string) {
         }
 
         const local = load(storageKey);
-        if (remote.length === 0 && local.length > 0) {
+        // Migrasi HANYA bila dokumen BELUM PERNAH ada di server
+        // (exists === false). Dulu: remote kosong + lokal ada → migrasi,
+        // sehingga anotasi yang sudah DIHAPUS user di perangkat lain
+        // "bangkit" lagi dari cache localStorage perangkat ini.
+        if (remote.length === 0 && local.length > 0 && data.exists === false) {
           // MIGRASI: server masih kosong, localStorage punya data lama →
           // angkat ke MongoDB (tetap 1x saja: dirtyRef mencegah dobel).
           setItems(local);
@@ -115,7 +130,7 @@ export function useAnnotations(storageKey: string) {
             setSavedPage(data.page);
           }
           dirtyRef.current = true;
-          scheduleSave();
+          scheduleSave(true);
           return;
         }
 
@@ -136,29 +151,104 @@ export function useAnnotations(storageKey: string) {
   }, [storageKey]);
 
   // ── Simpan (debounce): localStorage instan + PUT MongoDB ──
-  const scheduleSave = useCallback(() => {
-    if (saveTimer.current) clearTimeout(saveTimer.current);
-    saveTimer.current = setTimeout(async () => {
+  // `full=true` → kirim anotasi + halaman; `full=false` → halaman saja
+  // (payload kecil — tiap pindah halaman tidak mengirim ulang semua
+  // anotasi). PUT diJALANKAN SATU-SATU (serial) supaya server selalu
+  // menerima snapshot terbaru yang terakhir — anti race urutan network.
+  const runSave = useCallback(async (full: boolean) => {
+    if (saving.current) {
+      pendingSave.current = true;
+      if (full) fullPending.current = true;
+      return;
+    }
+    saving.current = true;
+    const isFull = full || fullPending.current;
+    fullPending.current = false;
+    let ok = false;
+    try {
       const key = keyRef.current;
-      const current = itemsRef.current;
-      persistLocal(key, current);
+      const snap = itemsRef.current;
+      persistLocal(key, snap);
+      const payload: Record<string, unknown> = {
+        storageKey: key,
+        page: pageRef.current,
+      };
+      if (isFull) payload.annotations = snap.slice(-2000);
+      const res = await fetch("/api/reader/doc", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      ok = res.ok;
+    } catch {
+      /* offline — tetap dirty, dicoba lagi pada perubahan berikutnya */
+    }
+    saving.current = false;
+    if (ok && !pendingSave.current) {
+      // Snapshot yang barusan dikirim masih terbaru → bersih.
+      dirtyRef.current = false;
+    }
+    if (pendingSave.current) {
+      pendingSave.current = false;
+      void runSave(fullPending.current);
+    } else if (!ok && isFull) {
+      // Gagal kirim snapshot penuh → coba lagi (paling tidak saat
+      // perubahan berikutnya).
+      fullPending.current = true;
+      dirtyRef.current = true;
+    }
+  }, []);
+
+  const scheduleSave = useCallback(
+    (full: boolean) => {
+      if (full) fullPending.current = true;
+      if (saveTimer.current) clearTimeout(saveTimer.current);
+      saveTimer.current = setTimeout(() => {
+        void runSave(fullPending.current);
+      }, SAVE_DEBOUNCE_MS);
+    },
+    // runSave stabil (deps []).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    []
+  );
+
+  // ── Flush saat tab ditutup / disembunyikan (anti kehilangan anotasi
+  //    yang belum lewat debounce 1,2 dtk) ──
+  useEffect(() => {
+    const flush = () => {
+      const key = keyRef.current;
+      const snap = itemsRef.current;
+      persistLocal(key, snap);
+      const payload: Record<string, unknown> = {
+        storageKey: key,
+        page: pageRef.current,
+      };
+      if (fullPending.current || dirtyRef.current) {
+        payload.annotations = snap.slice(-2000);
+      }
       try {
-        await fetch("/api/reader/doc", {
+        // keepalive: permintaan tetap terkirim walau halaman sedang
+        // dibongkar.
+        void fetch("/api/reader/doc", {
           method: "PUT",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            storageKey: key,
-            annotations: current.slice(-2000),
-            page: pageRef.current,
-          }),
+          body: JSON.stringify(payload),
+          keepalive: true,
         });
-        if (keyRef.current === key && current === itemsRef.current) {
-          dirtyRef.current = false;
-        }
       } catch {
-        /* tetap dirty — dicoba lagi pada perubahan berikutnya */
+        /* abaikan */
       }
-    }, SAVE_DEBOUNCE_MS);
+    };
+    const onHide = () => {
+      if (document.visibilityState === "hidden") flush();
+    };
+    window.addEventListener("pagehide", flush);
+    document.addEventListener("visibilitychange", onHide);
+    return () => {
+      window.removeEventListener("pagehide", flush);
+      document.removeEventListener("visibilitychange", onHide);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const itemsRef = useRef(items);
@@ -170,12 +260,12 @@ export function useAnnotations(storageKey: string) {
     };
   }, []);
 
-  /** Lapor posisi halaman (dipakai melanjutkan baca terakhir). */
+  /** Lapor posisi halaman (dipakai melanjutkan baca terakhir) —
+   * simpan ringan (halaman saja, tanpa anotasi). */
   const reportPage = useCallback(
     (n: number) => {
       pageRef.current = n;
-      dirtyRef.current = true;
-      scheduleSave();
+      scheduleSave(false);
     },
     [scheduleSave]
   );
@@ -184,7 +274,7 @@ export function useAnnotations(storageKey: string) {
     (a: Annotation) => {
       dirtyRef.current = true;
       setItems((prev) => [...prev, a]);
-      scheduleSave();
+      scheduleSave(true);
     },
     [scheduleSave]
   );
@@ -193,7 +283,7 @@ export function useAnnotations(storageKey: string) {
     (id: string) => {
       dirtyRef.current = true;
       setItems((prev) => prev.filter((x) => x.id !== id));
-      scheduleSave();
+      scheduleSave(true);
     },
     [scheduleSave]
   );
@@ -204,13 +294,13 @@ export function useAnnotations(storageKey: string) {
       if (prev.length === 0) return prev;
       return prev.slice(0, -1);
     });
-    scheduleSave();
+    scheduleSave(true);
   }, [scheduleSave]);
 
   const clearAll = useCallback(() => {
     dirtyRef.current = true;
     setItems([]);
-    scheduleSave();
+    scheduleSave(true);
   }, [scheduleSave]);
 
   const count = items.length;

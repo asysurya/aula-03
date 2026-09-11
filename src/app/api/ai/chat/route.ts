@@ -24,8 +24,28 @@ const SYSTEM_PROMPT =
   "Bantu mengerjakan dan menjelaskan materi sekolah dengan sabar (jangan hanya memberi jawaban akhir, " +
   "jelaskan langkahnya). Format jawaban dengan markdown bila membantu (daftar, tebal, blok kode).";
 
-const TIMEOUT_MS = 90_000; // abort upstream setelah 90 detik
+const TIMEOUT_MS = 55_000; // abort upstream — HARUS < maxDuration (60 dtk);
+                       // dulu 90 dtk: platform memotong duluan di 60 dtk →
+                       // stream terputus tanpa event error/done & jawaban
+                       // parsial tak pernah tersimpan.
 const HISTORY_LIMIT = 20;
+
+// Rate limit sederhana per user (in-memory; best-effort lintas instance
+// serverless) — tanpa ini siswa bisa spam loop dan membakar kredit
+// kunci default admin.
+const RATE_LIMIT = 20; // pesan
+const RATE_WINDOW_MS = 60_000; // per menit
+const rateHits = new Map<string, { n: number; reset: number }>();
+function rateLimited(userId: string): boolean {
+  const now = Date.now();
+  const h = rateHits.get(userId);
+  if (!h || h.reset < now) {
+    rateHits.set(userId, { n: 1, reset: now + RATE_WINDOW_MS });
+    return false;
+  }
+  h.n += 1;
+  return h.n > RATE_LIMIT;
+}
 
 const bodySchema = z.object({
   message: z.string().trim().min(1, "Pesan tidak boleh kosong").max(8000),
@@ -61,6 +81,13 @@ function providerErrorMessage(status: number, detailRaw: string | null): string 
 export async function POST(req: NextRequest) {
   const user = await requireUser().catch(() => null);
   if (!user) return NextResponse.json({ error: "UNAUTHORIZED" }, { status: 401 });
+
+  if (rateLimited(user.id)) {
+    return NextResponse.json(
+      { error: "Terlalu banyak pesan beruntun — tunggu sebentar lalu coba lagi." },
+      { status: 429 }
+    );
+  }
 
   let body: unknown;
   try {
@@ -175,15 +202,15 @@ export async function POST(req: NextRequest) {
     clearTimeout(timer);
     req.signal?.removeEventListener("abort", onClientAbort);
     const msg = timedOut
-      ? "Waktu tunggu habis — provider tidak merespons dalam 90 detik. Coba lagi atau ganti model."
+      ? "Waktu tunggu habis — provider tidak merespons dalam waktu cukup. Coba lagi atau ganti model."
       : "Gagal menghubungi server AI. Periksa Base URL di pengaturan (dan koneksi internet).";
     return NextResponse.json({ error: msg, detail: String((err as Error)?.name ?? "") }, { status: 502 });
   }
 
   // Error sebelum stream mulai → balas sebagai status HTTP (bukan stream).
+  // Timer TIDAK di-clear sebelum body error terbaca — dulu: upstream.json()
+  // tanpa batas waktu bisa menggantung sampai platform memotong (60 dtk).
   if (!upstream.ok) {
-    clearTimeout(timer);
-    req.signal?.removeEventListener("abort", onClientAbort);
     let detail: string | null = null;
     try {
       const errJson = await upstream.json().catch(() => null);
@@ -197,6 +224,8 @@ export async function POST(req: NextRequest) {
     } catch {
       /* abaikan */
     }
+    clearTimeout(timer);
+    req.signal?.removeEventListener("abort", onClientAbort);
     return NextResponse.json(
       { error: providerErrorMessage(upstream.status, detail) },
       { status: 502 }
