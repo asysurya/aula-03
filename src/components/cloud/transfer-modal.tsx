@@ -2,7 +2,7 @@
 
 // Modal Manajer Transfer — tombol di header halaman Cloud.
 // Menampilkan semua job upload/download yang berjalan di background:
-// progress bar (di-update tiap 2 detik oleh store), kontrol pause/resume,
+// progress bar (di-update tiap 1 detik oleh store), kontrol pause/resume,
 // cancel, retry, atur urutan antrean (naik/turun), dan bersihkan riwayat.
 
 import { useState } from "react";
@@ -77,7 +77,7 @@ export function TransferManagerButton() {
           </DialogTitle>
           <DialogDescription>
             Upload dan download berjalan di latar belakang — progress bar
-            diperbarui setiap 2 detik. Atur antrean: jeda, lanjutkan, batalkan,
+            diperbarui setiap 1 detik. Atur antrean: jeda, lanjutkan, batalkan,
             atau ubah urutan.
           </DialogDescription>
         </DialogHeader>
@@ -175,10 +175,19 @@ function TransferRow({ job }: { job: TransferJob }) {
 
   const pct =
     job.size > 0 ? Math.min(100, Math.round((job.loaded / job.size) * 100)) : null;
+  // Fase finalisasi upload: semua byte terkirim, server sedang merakit chunk
+  // & menyimpan ke cloud (complete) — tampilkan pengganti speed/ETA.
+  const isFinalizing =
+    job.status === "active" &&
+    (job.phase === "finalizing" ||
+      (job.kind === "upload" && job.size > 0 && job.loaded >= job.size));
   const speedText =
-    job.status === "active" && job.speed > 0 ? `${formatBytes(job.speed)}/dtk` : "";
+    !isFinalizing && job.status === "active" && job.speed > 0
+      ? `${formatBytes(job.speed)}/dtk`
+      : "";
+  // ETA hanya dihitung saat speed valid (>0) — tidak pernah NaN/Infinity.
   const etaText =
-    job.status === "active" && job.speed > 0 && job.size > job.loaded
+    !isFinalizing && job.status === "active" && job.speed > 0 && job.size > job.loaded
       ? `± ${etaFormat((job.size - job.loaded) / job.speed)}`
       : "";
 
@@ -252,6 +261,9 @@ function TransferRow({ job }: { job: TransferJob }) {
           </span>
           {pct !== null && job.status !== "done" ? (
             <span className="tabular-nums">{pct}%</span>
+          ) : null}
+          {isFinalizing ? (
+            <span className="text-primary/80">Menyimpan ke cloud…</span>
           ) : null}
           {speedText ? <span className="tabular-nums">{speedText}</span> : null}
           {etaText ? <span className="tabular-nums">{etaText}</span> : null}

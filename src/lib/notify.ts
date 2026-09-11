@@ -2,6 +2,7 @@
 
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
+import { initPushWorker } from "@/lib/push-client";
 
 // ─────────────────────────────────────────────────────────────────────────
 // Notifikasi Aula — pusat notifikasi web.
@@ -227,6 +228,8 @@ export function notifyEvent(input: {
 // Dipasang SEKALI di AppShell. lastSeen per percakapan disimpan di
 // localStorage ("aula.lastseen") — poll pertama hanya mengisi patokan
 // tanpa menotifikasi (pesan lama tidak dianggap baru).
+// Service worker /sw.js (Web Push PWA) juga dipasang di sini supaya
+// siap sejak login — tanpa perlu menunggu user membuka panel notifikasi.
 
 interface LastMsgInfo {
   id: string;
@@ -284,6 +287,9 @@ export function startOverviewPoller(opts: {
   if (pollerStarted || typeof window === "undefined") return;
   pollerStarted = true;
 
+  // Pasang service worker Web Push (sekali, guarded di dalamnya).
+  void initPushWorker();
+
   const seen = loadLastSeen();
   let timer: ReturnType<typeof setTimeout> | null = null;
 
@@ -319,7 +325,7 @@ export function startOverviewPoller(opts: {
           opts.myUsername || opts.myName
             ? new RegExp(
                 `@(?:${[opts.myUsername, opts.myName]
-                  .filter(Boolean)
+                  .filter((s): s is string => !!s)
                   .map((s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
                   .join("|")})\\b`,
                 "i"

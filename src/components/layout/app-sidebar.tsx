@@ -33,6 +33,7 @@ import {
   ChevronRight,
   CalendarDays,
   GraduationCap,
+  Bot,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { roleLabel } from "@/lib/constants";
@@ -64,6 +65,7 @@ export function AppSidebar({
     openProfile,
     openAdmin,
     openStudy,
+    openAi,
   } = useUIStore();
   const [dmPickerOpen, setDmPickerOpen] = useState(false);
   const [upcomingOpen, setUpcomingOpen] = useState(false);
@@ -130,6 +132,12 @@ export function AppSidebar({
               label="Pusat Belajar"
               active={section === "study"}
               onClick={openStudy}
+            />
+            <SideButton
+              icon={<Bot className="h-4 w-4" />}
+              label="Teman AI"
+              active={section === "ai"}
+              onClick={openAi}
             />
             {isAdmin ? (
               <SideButton

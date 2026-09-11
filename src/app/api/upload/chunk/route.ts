@@ -85,14 +85,9 @@ export async function POST(req: NextRequest) {
     create: { sessionId: session.id, idx, data: bytes },
   });
 
-  const received = await db.uploadChunk.count({
-    where: { sessionId: session.id },
-  });
-
-  return NextResponse.json({
-    ok: true,
-    idx,
-    received,
-    total: session.chunkCount,
-  });
+  // Catatan: TIDAK ada query COUNT di sini — chunk dikirim PARALEL dari
+  // client (3 XHR bersamaan) dan hitungan per-chunk hanya membebani MongoDB
+  // tanpa dipakai client. Kelengkapan chunk diverifikasi sekali saja di
+  // /api/upload/complete.
+  return NextResponse.json({ ok: true, idx });
 }

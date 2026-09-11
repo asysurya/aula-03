@@ -16,6 +16,10 @@ interface Entry {
 }
 
 const cache = new Map<string, Entry>();
+/** Promise load yang sedang berjalan, per key — pemanggil bersamaan
+ *  dengan key sama BERBAGI satu load (anti thundering herd, mis. 4 request
+ *  Range paralel ke /api/storage/[key] tidak memicu 4x download dari S3). */
+const inflight = new Map<string, Promise<Buffer | null>>();
 let totalBytes = 0;
 
 function touch(key: string, entry: Entry): void {
@@ -60,6 +64,41 @@ export function fileCacheDelete(key: string): void {
   if (!entry) return;
   totalBytes -= entry.bytes.length;
   cache.delete(key);
+}
+
+/**
+ * Ambil dari cache, atau muat sekali untuk SEMUA pemanggil bersamaan.
+ *
+ * Pemanggil paralel dengan key sama berbagi SATU promise load in-flight
+ * (mis. 4 request Range paralel ke file yang sama → hanya 1x download dari
+ * MEGA/S3). Setelah sukses, hasil masuk cache LRU. Setelah gagal, promise
+ * dibuang dari registry sehingga percobaan berikutnya benar-benar mengulang
+ * load-nya (retry-friendly).
+ */
+export function fileCacheGetOrLoad(
+  key: string,
+  loader: () => Promise<Buffer | null>
+): Promise<Buffer | null> {
+  const cached = fileCacheGet(key);
+  if (cached) return Promise.resolve(cached);
+
+  const existing = inflight.get(key);
+  if (existing) return existing;
+
+  const p = (async () => {
+    try {
+      const data = await loader();
+      if (data) fileCacheSet(key, data);
+      return data;
+    } finally {
+      inflight.delete(key);
+    }
+  })();
+  // Pita pengaman anti unhandled-rejection bila suatu pemanggil tidak
+  // meng-await hasilnya — pemanggil yang await tetap menerima rejection.
+  p.catch(() => {});
+  inflight.set(key, p);
+  return p;
 }
 
 export function fileCacheStats(): { entries: number; totalBytes: number } {

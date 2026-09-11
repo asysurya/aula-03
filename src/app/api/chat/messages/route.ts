@@ -11,6 +11,7 @@ import { folderClassroomId, getClassroomRole } from "@/lib/cloud-utils";
 import { canViewFile, canViewFolder, type UserRole } from "@/lib/cloud-perms";
 import { parseMegaKey } from "@/lib/mega-storage";
 import { canViewMount } from "@/lib/mount-access";
+import { sendPushToUsers } from "@/lib/web-push";
 
 type ConversationKind = "classroom" | "group" | "dm";
 
@@ -555,6 +556,60 @@ export async function POST(req: NextRequest) {
     data,
     include: messageInclude,
   });
+
+  // ── Web Push (PWA): beri tahu anggota percakapan KECUALI pengirim ──
+  // Kegagalan push TIDAK BOLEH menggagalkan respons pesan — dibatasi
+  // maks 5 detik (Promise.race) lalu dibiarkan selesai di latar belakang.
+  try {
+    let recipientIds: string[] = [];
+    if (kind === "classroom") {
+      const members = await db.classroomMember.findMany({
+        where: { classroomId: id },
+        select: { userId: true },
+      });
+      recipientIds = members.map((m) => m.userId);
+    } else if (kind === "group") {
+      const members = await db.groupMember.findMany({
+        where: { groupId: id },
+        select: { userId: true },
+      });
+      recipientIds = members.map((m) => m.userId);
+    } else {
+      const dm = await db.dMConversation.findUnique({
+        where: { id },
+        select: { user1Id: true, user2Id: true },
+      });
+      recipientIds = dm ? [dm.user1Id, dm.user2Id] : [];
+    }
+
+    let pushBody = content.slice(0, 120);
+    if (!pushBody) pushBody = "[Lampiran]";
+    if (replyToId) pushBody = `[Balasan] ${pushBody}`.slice(0, 140);
+
+    const pushJob = sendPushToUsers(
+      recipientIds,
+      {
+        title: message.sender.name,
+        body: pushBody,
+        url: "/",
+        tag: `${kind}:${id}`,
+      },
+      { excludeUserId: userId }
+    );
+    // Jangan menunda respons lebih dari 5 detik karena push.
+    await Promise.race([
+      pushJob.then((r) => {
+        if (r.attempted > 0) {
+          console.log(
+            `[push] ${kind}:${id} → terkirim ${r.sent}/${r.attempted}, gagal ${r.failed}, dihapus ${r.removed}`
+          );
+        }
+      }),
+      new Promise((resolve) => setTimeout(resolve, 5000)),
+    ]);
+  } catch (e) {
+    console.error("[push] kirim push pesan baru gagal (diabaikan):", e);
+  }
 
   const [dto] = await hydrateAssignments([toDto(message)]);
 

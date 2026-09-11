@@ -2,11 +2,12 @@
 
 import { useState } from "react";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Users, School, Shield, Database, UsersRound } from "lucide-react";
+import { Users, School, Shield, Database, UsersRound, Bot } from "lucide-react";
 import { UsersPanel } from "@/components/admin/users-panel";
 import { ClassroomsPanel } from "@/components/admin/classrooms-panel";
 import { DataCloudPanel } from "@/components/admin/data-cloud-panel";
 import { GroupsPanel } from "@/components/admin/groups-panel";
+import { AiDefaultPanel } from "@/components/admin/ai-default-panel";
 
 export function AdminView() {
   const [tab, setTab] = useState("users");
@@ -37,6 +38,9 @@ export function AdminView() {
             <TabsTrigger value="datacloud" className="gap-1.5">
               <Database className="h-4 w-4" /> Data & Cloud
             </TabsTrigger>
+            <TabsTrigger value="temanai" className="gap-1.5">
+              <Bot className="h-4 w-4" /> Teman AI
+            </TabsTrigger>
           </TabsList>
           <TabsContent value="users" className="mt-0">
             <UsersPanel />
@@ -49,6 +53,9 @@ export function AdminView() {
           </TabsContent>
           <TabsContent value="datacloud" className="mt-0">
             <DataCloudPanel />
+          </TabsContent>
+          <TabsContent value="temanai" className="mt-0">
+            <AiDefaultPanel />
           </TabsContent>
         </Tabs>
       </div>

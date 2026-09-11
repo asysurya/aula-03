@@ -8,6 +8,7 @@ import { MembersView } from "@/components/members/members-view";
 import { AdminView } from "@/components/admin/admin-view";
 import { ProfileView } from "@/components/profile/profile-view";
 import { StudyHub } from "@/components/study/study-hub";
+import { TemanAiView } from "@/components/ai/teman-ai-view";
 import { EmptyState } from "@/components/shared/empty-state";
 
 export function MainContent({
@@ -42,6 +43,7 @@ export function MainContent({
     );
   if (section === "profile") return me.user ? <ProfileView me={me} /> : null;
   if (section === "study") return <StudyHub me={me} />;
+  if (section === "ai") return <TemanAiView me={me} />;
 
   return null;
 }

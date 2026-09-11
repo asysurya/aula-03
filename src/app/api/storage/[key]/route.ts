@@ -9,7 +9,7 @@ import { canViewFile, type UserRole, type ClassroomRole } from "@/lib/cloud-perm
 import { parseMegaKey } from "@/lib/mega-storage";
 import { canViewMount } from "@/lib/mount-access";
 import { mimetypeFromName } from "@/lib/cloud-format";
-import { fileCacheGet, fileCacheSet } from "@/lib/file-cache";
+import { fileCacheGetOrLoad } from "@/lib/file-cache";
 
 // Serve uploaded files (preview-friendly & anti-lag):
 // 1. Effective mimetype = magic bytes (deteksi isi asli) > mimetype DB > ekstensi.
@@ -228,14 +228,14 @@ function serveFile(req: NextRequest, opts: ServeOptions): NextResponse {
   });
 }
 
-/** Ambil bytes file dengan LRU cache proses (unduh MEGA/S3 cukup sekali). */
+/** Ambil bytes file dengan LRU cache proses + dedup in-flight (unduh
+ *  MEGA/S3 cukup sekali walau beberapa request Range paralel datang
+ *  bersamaan — semua pemanggil berbagi satu promise load). */
 async function loadBytes(key: string): Promise<Buffer | null> {
-  const cached = fileCacheGet(key);
-  if (cached) return cached;
-  const data = await getFile(key);
-  if (!data) return null;
-  fileCacheSet(key, data.bytes);
-  return data.bytes;
+  return fileCacheGetOrLoad(key, async () => {
+    const data = await getFile(key);
+    return data ? data.bytes : null;
+  });
 }
 
 // ───────────────────────── GET / HEAD ─────────────────────────

@@ -44,6 +44,9 @@ model User {
   fileGrants           FileAccess[]
   reactions            MessageReaction[]
   formAttempts         FormAttempt[]
+  pushSubscriptions    PushSubscription[]
+  aiSetting            AiUserSetting?
+  aiMessages           AiMessage[]
 }
 
 enum Role {
@@ -625,4 +628,61 @@ model Favorite {
   @@index([userId])
   @@index([userId, fileId])
   @@index([userId, folderId])
+}
+
+// ───────────────── Pengaturan aplikasi global (key-value JSON) ─────────────────
+// Koleksi serbaguna untuk konfigurasi server-side (tidak boleh bocor ke client
+// apa pun selain nilai publiknya): kunci VAPID Web Push, default provider AI,
+// dsb. Koleksi baru — MongoDB membuatnya otomatis (tanpa migrasi).
+model AppSetting {
+  key       String   @id @map("_id")
+  value     String // JSON
+  updatedAt DateTime @updatedAt
+}
+
+// ───────────────── Langganan Web Push (PWA) per user/perangkat ─────────────────
+// Satu user bisa punya banyak perangkat. endpoint unik global (dari push
+// service browser). Dihapus saat unsubscribe / saat push service balas 404|410.
+model PushSubscription {
+  id        String   @id @default(cuid()) @map("_id")
+  userId    String
+  endpoint  String   @unique
+  p256dh    String
+  auth      String
+  agent     String?
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([userId])
+}
+
+// ───────────────── Teman AI: pengaturan per user (BYOK) ─────────────────
+// provider "" = ikut default admin. apiKeyEnc = API key user terenkripsi
+// AES-256-GCM (kunci derivasi NEXTAUTH_SECRET) — tidak pernah dikirim balik
+// ke client apa pun selain mask (sk••••abcd).
+model AiUserSetting {
+  id        String   @id @default(cuid()) @map("_id")
+  userId    String   @unique
+  provider  String   @default("")
+  baseUrl   String?
+  apiKeyEnc String?
+  model     String?
+  updatedAt DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+}
+
+// ───────────────── Teman AI: riwayat percakapan per user ─────────────────
+// Satu thread berjalan per user (chat tanpa judul). role: user | assistant | system.
+model AiMessage {
+  id        String   @id @default(cuid()) @map("_id")
+  userId    String
+  role      String
+  content   String
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([userId, createdAt])
 }

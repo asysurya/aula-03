@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
   Bell,
@@ -13,6 +13,7 @@ import {
   Trash2,
   Volume2,
   VolumeX,
+  Smartphone,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -20,6 +21,7 @@ import {
   PopoverContent,
   PopoverTrigger,
 } from "@/components/ui/popover";
+import { Switch } from "@/components/ui/switch";
 import { cn } from "@/lib/utils";
 import { useUIStore, type Conversation } from "@/stores/ui-store";
 import {
@@ -28,6 +30,12 @@ import {
   notifPermission,
   requestNotifPermission,
 } from "@/lib/notify";
+import {
+  getPushStatus,
+  enableDevicePush,
+  disableDevicePush,
+  type PushStatus,
+} from "@/lib/push-client";
 
 // ─────────────────────────────────────────────────────────────────────────
 // Lonceng notifikasi global — dipasang di header sidebar & topbar mobile.
@@ -72,6 +80,47 @@ export function NotificationBell({ compact = false }: { compact?: boolean }) {
   const openConversation = useUIStore((s) => s.openConversation);
   const router = useRouter();
   const [perm, setPerm] = useState(() => notifPermission());
+
+  // ── Notifikasi perangkat (Web Push PWA) ──
+  const [push, setPush] = useState<PushStatus | null>(null);
+  const [pushBusy, setPushBusy] = useState(false);
+  const [pushError, setPushError] = useState<string | null>(null);
+
+  const refreshPush = useCallback(async () => {
+    try {
+      setPush(await getPushStatus());
+    } catch {
+      setPush({ supported: false, permission: "unsupported", subscribed: false });
+    }
+  }, []);
+
+  useEffect(() => {
+    if (open) void refreshPush();
+  }, [open, refreshPush]);
+
+  async function onTogglePush(checked: boolean) {
+    setPushBusy(true);
+    setPushError(null);
+    try {
+      if (checked) {
+        const res = await enableDevicePush();
+        if (!res.ok) {
+          setPushError(
+            res.error === "denied"
+              ? "Izin notifikasi ditolak browser — ubah di pengaturan situs lalu coba lagi."
+              : res.error === "unsupported"
+                ? "Browser/perangkat ini tidak mendukung Web Push."
+                : "Gagal mengaktifkan notifikasi perangkat — coba lagi."
+          );
+        }
+      } else {
+        await disableDevicePush();
+      }
+    } finally {
+      await refreshPush();
+      setPushBusy(false);
+    }
+  }
 
   function onItemClick(item: NotifItem) {
     if (item.conv) {
@@ -178,6 +227,59 @@ export function NotificationBell({ compact = false }: { compact?: boolean }) {
             mengaktifkan kembali. Notifikasi dalam aplikasi tetap berjalan.
           </div>
         ) : null}
+
+        {/* Notifikasi perangkat — Web Push (PWA) */}
+        <div className="px-3 py-2.5 border-b border-border bg-muted/40">
+          <div className="flex items-center justify-between gap-3">
+            <div className="min-w-0">
+              <p className="text-xs font-medium flex items-center gap-1.5">
+                <Smartphone className="size-3.5 text-primary shrink-0" />
+                Notifikasi perangkat
+              </p>
+              <p className="text-[11px] text-muted-foreground mt-0.5">
+                Muncul walau browser ditutup (PWA)
+              </p>
+            </div>
+            <Switch
+              checked={!!push?.subscribed}
+              disabled={pushBusy || !push?.supported || push?.permission === "denied"}
+              onCheckedChange={(v) => void onTogglePush(v)}
+              aria-label="Notifikasi perangkat (muncul walau browser ditutup)"
+            />
+          </div>
+
+          {!push ? (
+            <p className="text-[11px] text-muted-foreground mt-1.5">Memeriksa…</p>
+          ) : !push.supported ? (
+            <p className="text-[11px] text-muted-foreground mt-1.5">
+              Browser/perangkat ini tidak mendukung notifikasi push.
+            </p>
+          ) : push.permission === "denied" ? (
+            <p className="text-[11px] text-destructive mt-1.5">
+              Izin notifikasi diblokir — ubah di pengaturan situs browser
+              untuk mengaktifkan.
+            </p>
+          ) : push.subscribed ? (
+            <p className="text-[11px] text-emerald-600 dark:text-emerald-400 mt-1.5">
+              Aktif di perangkat ini — pesan baru diterima walau aplikasi
+              tidak dibuka.
+            </p>
+          ) : (
+            <p className="text-[11px] text-muted-foreground mt-1.5">
+              Nonaktif — nyalakan untuk menerima pesan baru di perangkat ini.
+            </p>
+          )}
+
+          {pushError ? (
+            <p className="text-[11px] text-destructive mt-1">{pushError}</p>
+          ) : null}
+
+          <p className="text-[10px] text-muted-foreground/80 mt-1.5">
+            Android/iOS: instal aplikasi dari menu browser ("Tambahkan ke
+            layar utama") supaya notifikasi tetap berjalan saat browser
+            ditutup.
+          </p>
+        </div>
 
         <div className="max-h-80 overflow-auto">
           {items.length === 0 ? (
