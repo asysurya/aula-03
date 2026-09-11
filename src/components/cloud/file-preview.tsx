@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
+import { cn } from "@/lib/utils";
 import {
   Download,
   Loader2,
@@ -148,9 +149,14 @@ export function FilePreview({
             />
             <div
               ref={bodyRef}
-              className={`flex flex-col flex-1 min-h-0 overflow-hidden bg-secondary/30 ${
-                isFullscreen ? "bg-black flex items-center justify-center" : ""
-              }`}
+              className={cn(
+                "flex flex-col flex-1 min-h-0 overflow-hidden bg-secondary/30",
+                isFullscreen && "bg-black",
+                // Pusatkan hanya pratinjau native (gambar/pdf bawaan).
+                // Aula Reader harus MEMENUHI layar penuh — dulu items-center
+                // menyusutkan lebar reader jadi file tampak kecil di layar penuh.
+                isFullscreen && mode !== "aula" && "items-center justify-center"
+              )}
             >
               {mode === "ask" ? (
                 <ModeChooser onPick={pickMode} />

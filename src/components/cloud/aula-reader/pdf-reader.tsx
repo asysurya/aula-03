@@ -298,6 +298,22 @@ export function PdfReader({
     });
   }, []);
 
+  // Ganti mode → posisi scroll lama (mis. scrollLeft horizontal) tidak boleh
+  // terbawa ke mode baru (dulu: halaman tergeser keluar layar setelah toggle).
+  const pageRef = useRef(page);
+  pageRef.current = page;
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    el.scrollTo({ left: 0, top: 0 });
+    const node = pageRefs.current.get(pageRef.current);
+    if (node)
+      node.scrollIntoView({
+        block: viewMode === "horizontal" ? "nearest" : "start",
+        inline: viewMode === "horizontal" ? "center" : "start",
+      });
+  }, [viewMode]);
+
   // ── TTS: baca halaman, lanjut otomatis ──
   const speakPage = useCallback(
     async (n: number) => {
@@ -502,9 +518,16 @@ export function PdfReader({
 
   return (
     <div className="flex flex-col flex-1 h-full min-h-0">
-      {/* ── Toolbar ── */}
-      <div className="flex items-center gap-1.5 flex-wrap px-3 py-2 border-b border-border bg-background/95 sticky top-0 z-20">
-        <div className="flex items-center gap-1">
+      {/* ── Toolbar (satu baris, bisa digulir ke samping di layar sempit —
+          dulu flex-wrap: 4 baris di HP memakan ruang file & menutup tool) ── */}
+      <div
+        className={cn(
+          "flex items-center gap-1.5 px-3 py-2 border-b border-border bg-background/95 z-20",
+          "flex-nowrap overflow-x-auto",
+          "[scrollbar-width:none] [-ms-overflow-style:none] [&::-webkit-scrollbar]:hidden"
+        )}
+      >
+        <div className="flex items-center gap-1 shrink-0">
           <Button
             variant="outline"
             size="icon"
@@ -542,7 +565,7 @@ export function PdfReader({
           </Button>
         </div>
 
-        <div className="flex items-center gap-1">
+        <div className="flex items-center gap-1 shrink-0">
           <Button
             variant="outline"
             size="icon"
@@ -593,7 +616,7 @@ export function PdfReader({
           </Button>
         </div>
 
-        <div className="flex items-center gap-1">
+        <div className="flex items-center gap-1 shrink-0">
           <Button
             variant="outline"
             size="icon"
@@ -624,7 +647,7 @@ export function PdfReader({
         </div>
 
         {/* Alat anotasi */}
-        <div className="flex items-center gap-1">
+        <div className="flex items-center gap-1 shrink-0">
           <Button
             variant={tool === "hl" ? "secondary" : "outline"}
             size="icon"
@@ -652,7 +675,7 @@ export function PdfReader({
           >
             <Eraser className="size-4" />
           </Button>
-          <div className="flex items-center gap-1 px-1">
+          <div className="flex items-center gap-1 px-1 shrink-0">
             {ANNO_COLORS.map((c) => (
               <button
                 key={c}
@@ -801,7 +824,7 @@ export function PdfReader({
               horizontal={viewMode === "horizontal"}
             />
           ))}
-          {numPages > 0 ? (
+          {numPages > 0 && viewMode === "vertical" ? (
             <p className="text-xs text-muted-foreground pb-2 px-4">
               {numPages} halaman · {anno.count > 0 ? `${anno.count} anotasi tersimpan di perangkat ini · ` : ""}
               Blok teks lalu pilih Bacakan / Stabilo / Salin · gunakan ⯇ ⯈ atau geser

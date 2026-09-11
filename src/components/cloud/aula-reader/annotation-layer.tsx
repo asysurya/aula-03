@@ -30,6 +30,7 @@ export function AnnotationLayer({
   const drawing = useRef<{
     pts: [number, number][];
     start: [number, number];
+    cur: [number, number];
   } | null>(null);
   const [live, setLive] = useState<{
     pts: [number, number][];
@@ -82,23 +83,31 @@ export function AnnotationLayer({
       style={{ touchAction: "none" }}
       onPointerDown={(e) => {
         e.preventDefault();
-        (e.target as Element).setPointerCapture?.(e.pointerId);
+        try {
+          (e.currentTarget as Element).setPointerCapture?.(e.pointerId);
+        } catch {
+          /* pointer sudah lepas / sintetis — tetap lanjut menggambar */
+        }
         const p = posOf(e);
         if (tool === "erase") {
           eraseAt(p);
           return;
         }
-        drawing.current = { pts: [p], start: p };
+        drawing.current = { pts: [p], start: p, cur: p };
         setLive({ pts: [p], start: p, cur: p });
       }}
       onPointerMove={(e) => {
-        if (!drawing.current) return;
+        const d = drawing.current;
+        if (!d) return;
         const p = posOf(e);
+        d.cur = p;
         if (tool === "pen") {
-          drawing.current.pts.push(p);
-          setLive((l) =>
-            l ? { ...l, pts: [...drawing.current!.pts] } : l
-          );
+          d.pts.push(p);
+          // Snapshot lokal sebelum setState — mencegah race dengan
+          // pointerup yang meng-null-kan drawing.current (dulu crash
+          // "Cannot read properties of null (reading 'pts')").
+          const pts = [...d.pts];
+          setLive((l) => (l ? { ...l, pts } : l));
         } else {
           setLive((l) => (l ? { ...l, cur: p } : l));
         }
@@ -115,30 +124,41 @@ export function AnnotationLayer({
               page,
               tool: "pen",
               color,
-              w: 0.004,
+              w: 0.006,
               pts: d.pts,
               created: Date.now(),
             });
           }
           return;
         }
-        // stabilo: kotak
-        const x2 = live?.cur?.[0] ?? d.start[0];
-        const y2 = live?.cur?.[1] ?? d.start[1];
-        const x = Math.min(d.start[0], x2);
-        const y = Math.min(d.start[1], y2);
-        const w = Math.abs(x2 - d.start[0]);
-        const h = Math.abs(y2 - d.start[1]);
-        if (w > 0.004 && h > 0.004) {
-          onAdd({
-            id: newId(),
-            page,
-            tool: "hl",
-            color,
-            rect: [x, y, w, h],
-            created: Date.now(),
-          });
+        // stabilo: kotak dari titik awal → titik terakhir (dari ref,
+        // bukan state live yang bisa basi). Gestur stabilo natural = seret
+        // mendatar pada satu baris teks → tinggi 0 → beri tinggi minimal
+        // seperti coretan stabilo sungguhan (dulu: kotak ditolak).
+        const x2 = d.cur[0];
+        const y2 = d.cur[1];
+        let x = Math.min(d.start[0], x2);
+        let y = Math.min(d.start[1], y2);
+        let w = Math.abs(x2 - d.start[0]);
+        let h = Math.abs(y2 - d.start[1]);
+        if (h < 0.012) {
+          const cy = y + h / 2;
+          y = cy - 0.006;
+          h = 0.012;
         }
+        if (w < 0.004) {
+          const cx = x + w / 2;
+          x = cx - 0.002;
+          w = 0.004;
+        }
+        onAdd({
+          id: newId(),
+          page,
+          tool: "hl",
+          color,
+          rect: [x, y, w, h],
+          created: Date.now(),
+        });
       }}
       onPointerCancel={() => {
         drawing.current = null;
@@ -153,22 +173,33 @@ export function AnnotationLayer({
           points={live.pts.map(([x, y]) => `${x},${y}`).join(" ")}
           fill="none"
           stroke={color}
-          strokeWidth={0.004}
-          vectorEffect="non-scaling-stroke"
+          strokeWidth={0.006}
           strokeLinecap="round"
           strokeLinejoin="round"
         />
       ) : null}
-      {live && tool === "hl" ? (
-        <rect
-          x={Math.min(live.start[0], live.cur[0])}
-          y={Math.min(live.start[1], live.cur[1])}
-          width={Math.abs(live.cur[0] - live.start[0])}
-          height={Math.abs(live.cur[1] - live.start[1])}
-          fill={color}
-          opacity={0.35}
-        />
-      ) : null}
+      {live && tool === "hl" ? (() => {
+        // Band stabilo: tinggi minimal 0.012 agar seret mendatar tetap
+        // terlihat sebagai coretan stabilo (bukan garis tanpa tinggi).
+        const x = Math.min(live.start[0], live.cur[0]);
+        const rawH = Math.abs(live.cur[1] - live.start[1]);
+        const y = rawH < 0.012
+          ? (live.start[1] + live.cur[1]) / 2 - 0.006
+          : Math.min(live.start[1], live.cur[1]);
+        const h = Math.max(rawH, 0.012);
+        const w = Math.max(Math.abs(live.cur[0] - live.start[0]), 0.004);
+        return (
+          <rect
+            x={x}
+            y={y}
+            width={w}
+            height={h}
+            fill={color}
+            opacity={0.5}
+            style={{ mixBlendMode: "multiply" }}
+          />
+        );
+      })() : null}
     </svg>
   );
 }
@@ -183,8 +214,11 @@ function AnnotationShape({ a }: { a: Annotation }) {
         width={w}
         height={h}
         fill={a.color}
-        opacity={0.35}
+        opacity={0.5}
         rx={0.004}
+        // Multiply: teks hitam tetap hitam, kertas putih jadi warna stabilo —
+        // persis stabilo sungguhan (tidak menutupi teks di bawahnya).
+        style={{ mixBlendMode: "multiply" }}
       />
     );
   }
@@ -194,8 +228,7 @@ function AnnotationShape({ a }: { a: Annotation }) {
         points={a.pts.map(([x, y]) => `${x},${y}`).join(" ")}
         fill="none"
         stroke={a.color}
-        strokeWidth={a.w ?? 0.004}
-        vectorEffect="non-scaling-stroke"
+        strokeWidth={a.w ?? 0.006}
         strokeLinecap="round"
         strokeLinejoin="round"
       />

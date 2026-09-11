@@ -1,6 +1,12 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react";
 import { Volume2, Square, Copy, Highlighter } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
@@ -161,10 +167,14 @@ export function useSelectionMenu({
         state.rects = rects;
       }
 
-      // Jangan menutupi teks: muncul di atas seleksi; clamp ke kontainer.
-      state.y = Math.max(4, state.y - 48);
-      const maxX = el.clientWidth - 240;
-      state.x = Math.min(Math.max(4, state.x), Math.max(4, maxX));
+      // Jangan menutupi teks: muncul di atas seleksi; clamp ke AREA TERLIHAT
+      // kontainer (koordinat konten = scroll + viewport — tanpa ini, di mode
+      // horizontal menu terdorong ke tepi kiri / terpotong karena clamp lama
+      // mengabaikan scrollLeft).
+      state.y = Math.max(el.scrollTop + 4, state.y - 48);
+      const minX = el.scrollLeft + 4;
+      const maxX = el.scrollLeft + Math.max(4, el.clientWidth - 250);
+      state.x = Math.min(Math.max(minX, state.x), Math.max(minX, maxX));
       setMenu(state);
     };
 
@@ -231,10 +241,28 @@ export function SelectionToolbar({
   onClose: () => void;
   activeColor?: string;
 }) {
+  const ref = useRef<HTMLDivElement>(null);
+
+  // Clamp presisi setelah terukur: geser ke dalam AREA TERLIHAT kontainer
+  // (memperhitungkan scrollLeft/scrollTop) — di mode horizontal seleksi
+  // di halaman jauh, posisi mentah bisa keluar viewport dan terpotong.
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const c = el.offsetParent as HTMLElement | null;
+    if (!c) return;
+    const visL = c.scrollLeft;
+    const visR = c.scrollLeft + c.clientWidth;
+    const overR = el.offsetLeft + el.offsetWidth - visR;
+    if (overR > 0) el.style.left = Math.max(visL + 4, el.offsetLeft - overR) + "px";
+    if (el.offsetLeft < visL) el.style.left = visL + 4 + "px";
+  }, [menu]);
+
   const preview =
     menu.text.length > 40 ? menu.text.slice(0, 40) + "…" : menu.text;
   return (
     <div
+      ref={ref}
       role="toolbar"
       aria-label="Aksi teks terpilih"
       className="absolute z-30 flex items-center gap-0.5 rounded-lg border border-border bg-background shadow-lg px-1 py-1"
