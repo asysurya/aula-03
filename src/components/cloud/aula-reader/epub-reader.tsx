@@ -9,18 +9,26 @@ import {
   ZoomOut,
   Loader2,
   BookOpen,
+  Moon,
+  Sun,
+  Highlighter,
+  Undo2,
+  Trash2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
 import { useSelectionMenu, SelectionToolbar } from "./selection-actions";
+import { ANNO_COLORS, newId, useAnnotations } from "./annotations";
 import type { OfficeCacheEntry } from "@/components/cloud/buffer-loader";
 
 // ─────────────────────────────────────────────────────────────────────────
 // Aula Reader — EPUB (buku digital).
 // Unzip → container.xml → OPF → urutan baca (spine) → render bab per bab
-// (XHTML disanitasi: script/iframe/object dibuang; gambar di-embed dari
-// dalam zip). Navigasi bab, daftar isi, ukuran font.
+// (XHTML disanitasi; gambar di-embed dari dalam zip).
+// Fitur: navigasi bab, daftar isi, ukuran font (persist), TEMA baca,
+// LANJUT BACA (bab terakhir → MongoDB), STABILO TEKS per bab (offset
+// karakter → MongoDB), menu seleksi (Bacakan / Salin).
 // ─────────────────────────────────────────────────────────────────────────
 
 interface SpineItem {
@@ -41,6 +49,68 @@ function u8ToBase64(u8: Uint8Array): string {
   return btoa(s);
 }
 
+const FONT_KEY = "aula.epub.font";
+const THEME_KEY = "aula.epub.theme";
+type EpubTheme = "light" | "paper" | "dark";
+
+function loadFont(): number {
+  try {
+    const v = Number(localStorage.getItem(FONT_KEY));
+    return v >= 12 && v <= 30 ? v : 17;
+  } catch {
+    return 17;
+  }
+}
+function loadTheme(): EpubTheme {
+  try {
+    const v = localStorage.getItem(THEME_KEY);
+    return v === "light" || v === "dark" ? v : "paper";
+  } catch {
+    return "paper";
+  }
+}
+
+/** Bungkus rentang [start,end) offset karakter dengan <mark> di dalam
+ *  kontainer (offset dihitung dari node teks via TreeWalker — stabil
+ *  terhadap struktur HTML bab). Dipanggil setiap isi bab dipasang ulang. */
+function applyTextMarks(
+  root: HTMLElement,
+  marks: { start: number; end: number; color: string }[]
+) {
+  if (marks.length === 0) return;
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  const nodes: Text[] = [];
+  let n: Node | null;
+  while ((n = walker.nextNode())) nodes.push(n as Text);
+  let pos = 0;
+  const ops: { node: Text; from: number; to: number; color: string }[] = [];
+  for (const node of nodes) {
+    const nodeStart = pos;
+    const nodeEnd = pos + node.length;
+    for (const m of marks) {
+      const from = Math.max(m.start, nodeStart);
+      const to = Math.min(m.end, nodeEnd);
+      if (from < to)
+        ops.push({ node, from: from - nodeStart, to: to - nodeStart, color: m.color });
+    }
+    pos = nodeEnd;
+  }
+  if (ops.length === 0) return;
+  // Terapkan per-node dari offset TERTINGGI dulu — splitText tidak
+  // menggeser offset operasi yang lebih kecil.
+  ops.sort((a, b) => b.from - a.from);
+  for (const op of ops) {
+    if (op.to < op.node.length) op.node.splitText(op.to);
+    const target = op.node.splitText(op.from);
+    const mark = document.createElement("mark");
+    mark.style.backgroundColor = op.color;
+    mark.style.color = "inherit";
+    mark.className = "rounded-sm";
+    target.parentNode?.insertBefore(mark, target);
+    mark.appendChild(target);
+  }
+}
+
 export function EpubReader({
   file,
   entry,
@@ -53,11 +123,64 @@ export function EpubReader({
   const [idx, setIdx] = useState(0);
   const [html, setHtml] = useState<string | null>(null);
   const [tocOpen, setTocOpen] = useState(false);
-  const [fontSize, setFontSize] = useState(17);
+  const [fontSize, setFontSize] = useState(loadFont);
+  const [theme, setTheme] = useState<EpubTheme>(loadTheme);
   const [error, setError] = useState<string | null>(null);
+  const [hlColor, setHlColor] = useState(ANNO_COLORS[0]);
   const scrollRef = useRef<HTMLDivElement>(null);
-  // Menu aksi teks terpilih (Bacakan / Salin) di isi bab.
-  const sel = useSelectionMenu({ containerRef: scrollRef });
+  const bodyRef = useRef<HTMLDivElement>(null);
+  /** Sudah coba restore bab terakhir? */
+  const restored = useRef(false);
+
+  // Anotasi (MongoDB): page = nomor bab (1-based) · thl = stabilo teks.
+  const anno = useAnnotations(file.storageKey);
+
+  // Menu aksi teks terpilih (Bacakan / Salin / Stabilo) di isi bab.
+  const sel = useSelectionMenu({
+    containerRef: scrollRef,
+    onHighlight: () => {
+      // Offset dihitung dari seleksi AKTIF saat tombol ditekan.
+      const s = window.getSelection();
+      const root = bodyRef.current;
+      if (!s || s.isCollapsed || !root || !s.anchorNode || !s.focusNode) return;
+      if (!root.contains(s.anchorNode) || !root.contains(s.focusNode)) return;
+      const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+      const nodes: Text[] = [];
+      let n: Node | null;
+      while ((n = walker.nextNode())) nodes.push(n as Text);
+      let pos = 0;
+      let start = -1;
+      let end = -1;
+      for (const node of nodes) {
+        if (node === s.anchorNode) start = pos + (s.anchorOffset ?? 0);
+        if (node === s.focusNode) end = pos + (s.focusOffset ?? 0);
+        pos += node.length;
+      }
+      if (start < 0 || end < 0 || start === end) return;
+      anno.add({
+        id: newId(),
+        page: idx + 1,
+        tool: "thl",
+        color: hlColor,
+        start: Math.min(start, end),
+        end: Math.max(start, end),
+        created: Date.now(),
+      });
+      window.getSelection()?.removeAllRanges();
+    },
+    activeColor: hlColor,
+  });
+
+  // Stabilo teks bab aktif.
+  const chapterMarks = useMemo(
+    () =>
+      anno.items
+        .filter(
+          (a) => a.tool === "thl" && a.page === idx + 1 && typeof a.start === "number"
+        )
+        .sort((a, b) => a.start! - b.start!),
+    [anno.items, idx]
+  );
 
   // Parse EPUB.
   useEffect(() => {
@@ -94,8 +217,6 @@ export function EpubReader({
           const href = it.getAttribute("href");
           if (id && href) manifest.set(id, baseDir + decodeURIComponent(href));
         });
-        const titles = new Map<string, string>();
-        // docProps judul per file (opsional) — pakai <title> tiap bab saat render.
         // 3. spine order
         const spine: SpineItem[] = [];
         opfDoc.querySelectorAll("spine > itemref").forEach((ref) => {
@@ -122,6 +243,28 @@ export function EpubReader({
 
   const current = chapters?.[idx] ?? null;
   const zipFiles = files;
+
+  // ── Lanjut baca: bab terakhir dari MongoDB (sekali) ──
+  // TIDAK menandai "restored" sebelum data server tiba (savedPage masih 1
+  // saat mount) — dulu: parse EPUB lokal instan → efek ini jalan duluan,
+  // restored=true terpasang, lalu savedPage datang terlambat → buku selalu
+  // terbuka dari Bab 1 lagi.
+  useEffect(() => {
+    if (!chapters || restored.current) return;
+    const p = anno.savedPage;
+    if (p > 1 && p <= chapters.length) {
+      restored.current = true;
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setIdx(p - 1);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [chapters, anno.savedPage]);
+
+  // Laporan bab aktif (untuk lanjut baca berikutnya).
+  useEffect(() => {
+    if (chapters) anno.reportPage(idx + 1);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [idx, chapters]);
 
   // Render bab aktif.
   useEffect(() => {
@@ -161,13 +304,24 @@ export function EpubReader({
               el.removeAttribute(attr.name);
           });
         });
-        // Gambar → data URL dari zip.
+        // Gambar → data URL dari zip. Path persen-ter-encode (mis.
+        // "gambarku%20bagus.png") didekode sebelum lookup — dulu gambar
+        // seperti itu gagal ditemukan lalu ikut dibuang.
         const imgs = doc.querySelectorAll("img");
         for (const img of imgs) {
           const src = img.getAttribute("src");
           if (!src) continue;
-          const path = new URL(src, "http://x/" + current.href).pathname.slice(1);
-          const data = zipFiles.get(path) ?? zipFiles.get(src);
+          let path = "";
+          try {
+            path = new URL(src, "http://x/" + current.href).pathname.slice(1);
+          } catch {
+            path = src;
+          }
+          const data =
+            zipFiles.get(path) ??
+            zipFiles.get(decodeURIComponent(path)) ??
+            zipFiles.get(src) ??
+            zipFiles.get(decodeURIComponent(src));
           if (data) {
             const e = path.split(".").pop()?.toLowerCase() ?? "jpg";
             const mime =
@@ -177,6 +331,8 @@ export function EpubReader({
                 ? "image/gif"
                 : e === "svg"
                 ? "image/svg+xml"
+                : e === "webp"
+                ? "image/webp"
                 : "image/jpeg";
             img.setAttribute("src", `data:${mime};base64,${u8ToBase64(data)}`);
           } else {
@@ -208,16 +364,52 @@ export function EpubReader({
     };
   }, [current, zipFiles, idx]);
 
+  // ── Pasang isi bab + stabilo teks (setiap html / marks berubah,
+  //    kontainer DI-RESET dari sumber lalu mark dibungkus ulang —
+  //    tidak pakai dangerouslySetInnerHTML supaya reset terkendali). ──
+  useEffect(() => {
+    const el = bodyRef.current;
+    if (!el || html === null) return;
+    el.innerHTML = html;
+    applyTextMarks(
+      el,
+      chapterMarks.map((m) => ({ start: m.start!, end: m.end!, color: m.color }))
+    );
+  }, [html, chapterMarks, idx]);
+
   function go(delta: number) {
     if (!chapters) return;
     const next = Math.min(chapters.length - 1, Math.max(0, idx + delta));
     setIdx(next);
   }
 
+  function setFont(v: number) {
+    setFontSize(v);
+    try {
+      localStorage.setItem(FONT_KEY, String(v));
+    } catch {}
+  }
+  function cycleTheme() {
+    setTheme((t) => {
+      const next = t === "light" ? "paper" : t === "paper" ? "dark" : "light";
+      try {
+        localStorage.setItem(THEME_KEY, next);
+      } catch {}
+      return next;
+    });
+  }
+
   const chapterTitle = useMemo(
     () => chapters?.[idx]?.title || `Bagian ${idx + 1}`,
     [chapters, idx]
   );
+
+  const themeCls =
+    theme === "dark"
+      ? "bg-neutral-900 text-neutral-200"
+      : theme === "paper"
+      ? "bg-[#f7f2e7] text-neutral-800"
+      : "bg-white text-neutral-900";
 
   if (error) {
     return (
@@ -278,19 +470,67 @@ export function EpubReader({
           variant="outline"
           size="icon"
           className="h-9 w-9"
-          onClick={() => setFontSize((s) => Math.max(12, s - 1))}
+          onClick={() => setFont(Math.max(12, fontSize - 1))}
           title="Perkecil"
         >
           <ZoomOut className="size-4" />
+        </Button>
+        <span className="text-xs tabular-nums text-muted-foreground w-8 text-center">
+          {fontSize}
+        </span>
+        <Button
+          variant="outline"
+          size="icon"
+          className="h-9 w-9"
+          onClick={() => setFont(Math.min(30, fontSize + 1))}
+          title="Perbesar"
+        >
+          <ZoomIn className="size-4" />
         </Button>
         <Button
           variant="outline"
           size="icon"
           className="h-9 w-9"
-          onClick={() => setFontSize((s) => Math.min(30, s + 1))}
-          title="Perbesar"
+          onClick={cycleTheme}
+          title="Ganti tema baca (terang / kertas / malam)"
         >
-          <ZoomIn className="size-4" />
+          {theme === "dark" ? <Moon className="size-4" /> : <Sun className="size-4" />}
+        </Button>
+        {/* Stabilo teks */}
+        <div className="flex items-center gap-1 px-1">
+          {ANNO_COLORS.map((c) => (
+            <button
+              key={c}
+              type="button"
+              aria-label={`Warna ${c}`}
+              onClick={() => setHlColor(c)}
+              className={cn(
+                "size-5 rounded-full border-2",
+                hlColor === c ? "border-foreground scale-110" : "border-transparent"
+              )}
+              style={{ backgroundColor: c }}
+            />
+          ))}
+        </div>
+        <Button
+          variant="outline"
+          size="icon"
+          className="h-9 w-9"
+          onClick={() => anno.undoTool("thl")}
+          disabled={chapterMarks.length === 0}
+          title="Urungkan stabilo terakhir"
+        >
+          <Undo2 className="size-4" />
+        </Button>
+        <Button
+          variant="outline"
+          size="icon"
+          className="h-9 w-9"
+          onClick={() => anno.clearTool("thl")}
+          disabled={chapterMarks.length === 0}
+          title="Hapus semua stabilo buku ini"
+        >
+          <Trash2 className="size-4" />
         </Button>
       </div>
 
@@ -318,15 +558,19 @@ export function EpubReader({
           </div>
         ) : null}
 
-        {/* Isi bab — teks bisa diseleksi lalu dibacakan / disalin */}
-        <div ref={scrollRef} className="relative flex-1 min-h-0 overflow-auto bg-[#f7f2e7]">
+        {/* Isi bab — teks bisa diseleksi lalu distabilo / dibacakan / disalin */}
+        <div
+          ref={scrollRef}
+          className="relative flex-1 min-h-0 overflow-auto select-text"
+        >
           <div
-            className="mx-auto max-w-2xl px-6 py-8 text-neutral-800 prose-sm select-text"
+            className={cn("min-h-full transition-colors", themeCls)}
             style={{ fontSize: `${fontSize}px`, lineHeight: 1.8 }}
           >
             <div
-              className="epub-body [&_h1]:text-2xl [&_h1]:font-bold [&_h1]:mt-6 [&_h1]:mb-3 [&_h2]:text-xl [&_h2]:font-semibold [&_h2]:mt-5 [&_h2]:mb-2 [&_h3]:text-lg [&_h3]:font-semibold [&_h3]:mt-4 [&_h3]:mb-2 [&_p]:my-3 [&_img]:max-w-full [&_img]:rounded-md [&_a]:text-blue-600 [&_a]:underline [&_ul]:list-disc [&_ul]:pl-6 [&_ol]:list-decimal [&_ol]:pl-6 [&_blockquote]:border-l-4 [&_blockquote]:border-neutral-300 [&_blockquote]:pl-4 [&_blockquote]:italic [&_table]:w-full [&_table]:text-sm [&_td]:border [&_td]:p-1.5 [&_th]:border [&_th]:p-1.5 [&_th]:bg-neutral-200"
-              dangerouslySetInnerHTML={{ __html: html }}
+              ref={bodyRef}
+              data-page={idx + 1}
+              className="mx-auto max-w-2xl px-6 py-8 epub-body [&_h1]:text-2xl [&_h1]:font-bold [&_h1]:mt-6 [&_h1]:mb-3 [&_h2]:text-xl [&_h2]:font-semibold [&_h2]:mt-5 [&_h2]:mb-2 [&_h3]:text-lg [&_h3]:font-semibold [&_h3]:mt-4 [&_h3]:mb-2 [&_p]:my-3 [&_img]:max-w-full [&_img]:rounded-md [&_a]:underline [&_a]:text-blue-600 [&_ul]:list-disc [&_ul]:pl-6 [&_ol]:list-decimal [&_ol]:pl-6 [&_blockquote]:border-l-4 [&_blockquote]:border-neutral-300 [&_blockquote]:pl-4 [&_blockquote]:italic [&_table]:w-full [&_table]:text-sm [&_td]:border [&_td]:p-1.5 [&_th]:border [&_th]:p-1.5 [&_th]:bg-neutral-200"
             />
           </div>
           {sel.menu ? (
@@ -335,10 +579,12 @@ export function EpubReader({
               playing={sel.playing}
               onSpeak={sel.speak}
               onStopSpeak={sel.stopSpeak}
+              onHighlight={sel.highlight}
               onCopy={(ok) =>
                 ok ? toast.success("Teks tersalin") : toast.error("Gagal menyalin")
               }
               onClose={sel.closeMenu}
+              activeColor={hlColor}
             />
           ) : null}
         </div>

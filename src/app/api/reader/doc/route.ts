@@ -17,22 +17,31 @@ export const runtime = "nodejs";
 
 const MAX_ANNOTATIONS = 2000;
 
-const annoSchema = z.object({
-  id: z.string().min(1).max(64),
-  page: z.number().int().min(1).max(100000),
-  tool: z.enum(["hl", "pen"]),
-  color: z.string().min(1).max(32),
-  w: z.number().min(0).max(4).optional(),
-  pts: z
-    .array(z.tuple([z.number().min(-1).max(2), z.number().min(-1).max(2)]))
-    .max(6000)
-    .optional(),
-  rect: z
-    .array(z.number().min(-1).max(2))
-    .length(4)
-    .optional(),
-  created: z.number(),
-});
+const annoSchema = z
+  .object({
+    id: z.string().min(1).max(64),
+    page: z.number().int().min(1).max(100000),
+    // thl = stabilo TEKS (offset karakter start..end — dipakai
+    // TextReader & EPUB); hl = kotak; pen = goresan.
+    tool: z.enum(["hl", "pen", "thl"]),
+    color: z.string().min(1).max(32),
+    w: z.number().min(0).max(4).optional(),
+    pts: z
+      .array(z.tuple([z.number().min(-1).max(2), z.number().min(-1).max(2)]))
+      .max(6000)
+      .optional(),
+    rect: z
+      .array(z.number().min(-1).max(2))
+      .length(4)
+      .optional(),
+    start: z.number().int().min(0).max(2_000_000).optional(),
+    end: z.number().int().min(0).max(2_000_000).optional(),
+    created: z.number(),
+  })
+  .refine(
+    (a) => a.tool !== "thl" || (a.start !== undefined && a.end !== undefined && a.end > a.start),
+    { message: "stabilo teks (thl) butuh start < end" }
+  );
 
 const putSchema = z.object({
   storageKey: z.string().trim().min(1).max(300),

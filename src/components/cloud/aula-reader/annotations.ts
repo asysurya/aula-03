@@ -19,7 +19,7 @@ export interface Annotation {
   id: string;
   /** 1-based; untuk media tanpa halaman selalu 1 */
   page: number;
-  tool: "hl" | "pen";
+  tool: "hl" | "pen" | "thl";
   color: string;
   /** lebar goresan (norm thd lebar halaman) */
   w?: number;
@@ -27,6 +27,9 @@ export interface Annotation {
   pts?: [number, number][];
   /** hl: kotak [x, y, w, h] ternormalisasi */
   rect?: [number, number, number, number];
+  /** thl: stabilo TEKS — offset karakter [start, end) */
+  start?: number;
+  end?: number;
   created: number;
 }
 
@@ -64,6 +67,10 @@ function persistLocal(storageKey: string, items: Annotation[]) {
 export function useAnnotations(storageKey: string) {
   const [items, setItems] = useState<Annotation[]>(() => load(storageKey));
   const [savedPage, setSavedPage] = useState(1);
+  /** true setelah GET /api/reader/doc selesai (sukses/gagal) — dipakai
+   *  fitur “lanjut baca” supaya tidak membaca savedPage=1 yang masih
+   *  nilai awal (race: parse lokal instan vs fetch server). */
+  const [loaded, setLoaded] = useState(false);
   const pageRef = useRef(1);
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   /** true kalau ada perubahan ANOTASI lokal yang belum tersinkron (server
@@ -97,7 +104,10 @@ export function useAnnotations(storageKey: string) {
           `/api/reader/doc?storageKey=${encodeURIComponent(storageKey)}`,
           { cache: "no-store" }
         );
-        if (!res.ok) return;
+        if (!res.ok) {
+          if (!cancelled) setLoaded(true);
+          return;
+        }
         const data = (await res.json()) as {
           annotations?: Annotation[];
           page?: number;
@@ -114,6 +124,7 @@ export function useAnnotations(storageKey: string) {
           // Ada edit lokal yang belum tersimpan → jangan ditimpa; simpan
           // posisi halaman saja.
           if (typeof data.page === "number") setSavedPage(data.page);
+          setLoaded(true);
           return;
         }
 
@@ -131,6 +142,7 @@ export function useAnnotations(storageKey: string) {
           }
           dirtyRef.current = true;
           scheduleSave(true);
+          setLoaded(true);
           return;
         }
 
@@ -140,8 +152,10 @@ export function useAnnotations(storageKey: string) {
           setSavedPage(data.page);
           pageRef.current = data.page;
         }
+        setLoaded(true);
       } catch {
         /* offline — cache localStorage tetap dipakai */
+        if (!cancelled) setLoaded(true);
       }
     })();
     return () => {
@@ -303,9 +317,48 @@ export function useAnnotations(storageKey: string) {
     scheduleSave(true);
   }, [scheduleSave]);
 
+  /** Urungkan anotasi TERAKHIR dari satu jenis alat (mis. thl di
+   *  TextReader — undo() global akan menghapus anotasi jenis lain
+   *  yang tidak terlihat di konteks itu). */
+  const undoTool = useCallback(
+    (tool: Annotation["tool"]) => {
+      dirtyRef.current = true;
+      setItems((prev) => {
+        for (let i = prev.length - 1; i >= 0; i--) {
+          if (prev[i].tool === tool) return prev.filter((_, j) => j !== i);
+        }
+        return prev;
+      });
+      scheduleSave(true);
+    },
+    [scheduleSave]
+  );
+
+  /** Hapus SEMUA anotasi satu jenis alat. */
+  const clearTool = useCallback(
+    (tool: Annotation["tool"]) => {
+      dirtyRef.current = true;
+      setItems((prev) => prev.filter((a) => a.tool !== tool));
+      scheduleSave(true);
+    },
+    [scheduleSave]
+  );
+
   const count = items.length;
 
-  return { items, add, remove, undo, clearAll, count, savedPage, reportPage };
+  return {
+    items,
+    add,
+    remove,
+    undo,
+    clearAll,
+    undoTool,
+    clearTool,
+    count,
+    savedPage,
+    loaded,
+    reportPage,
+  };
 }
 
 export function newId(): string {

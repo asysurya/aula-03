@@ -228,7 +228,7 @@ export function GoogleDocsReader({
   file,
   entry,
 }: {
-  file: { name: string };
+  file: { storageKey: string; name: string };
   entry: OfficeCacheEntry;
 }) {
   const [info, setInfo] = useState<{
@@ -310,6 +310,7 @@ export function GoogleDocsReader({
 
   return (
     <UnknownReader
+      storageKey={file.storageKey}
       name={file.name}
       size={0}
       url={entry.objectUrl}
@@ -347,33 +348,30 @@ function DownloadButton({
 }
 
 export function UnknownReader({
+  storageKey,
   name,
   size,
   url,
   hint,
 }: {
+  /** Kunci anotasi ASLI (stabilo teks mode "buka sebagai teks" tersimpan
+   *  per file — dulu memakai NAMA file sehingga berganti-ganti antar
+   *  perangkat / tidak konsisten dengan mode lain). */
+  storageKey: string;
   name: string;
   size: number;
   url: string;
   hint?: string;
 }) {
   const [asText, setAsText] = useState(false);
-  const [textUrl, setTextUrl] = useState<string | null>(null);
 
-  async function tryText() {
-    const res = await fetch(`${url}${url.includes("?") ? "&" : "?"}rawtext=1`);
-    if (!res.ok) {
-      setAsText(true);
-      setTextUrl(url);
-      return;
-    }
-    setTextUrl(url);
-    setAsText(true);
-  }
-
-  if (asText && textUrl) {
+  if (asText) {
     return (
-      <TextReader file={{ storageKey: name, name }} url={textUrl} isMarkdown={false} />
+      <TextReader
+        file={{ storageKey, name }}
+        url={url}
+        isMarkdown={false}
+      />
     );
   }
 
@@ -395,7 +393,7 @@ export function UnknownReader({
       </Badge>
       <div className="flex items-center gap-2">
         <DownloadButton name={name} size={size} url={url} />
-        <Button variant="outline" onClick={() => void tryText()}>
+        <Button variant="outline" onClick={() => setAsText(true)}>
           <PackageOpen className="size-4" /> Coba buka sebagai teks
         </Button>
       </div>

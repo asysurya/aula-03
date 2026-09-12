@@ -18,29 +18,22 @@ import {
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
-import ReactMarkdown from "react-markdown";
-import { ANNO_COLORS } from "./annotations";
-import { newId } from "./annotations";
+import { ANNO_COLORS, newId, useAnnotations } from "./annotations";
 import { copyTextToClipboard } from "./selection-actions";
+import { AiMarkdown } from "@/components/ai/ai-markdown";
 
 // ─────────────────────────────────────────────────────────────────────────
 // Aula Reader — Teks / Markdown / kode.
 // - Ukuran font & tema baca (terang / kertas / malam) — nyaman di TV.
-// - TTS: bacakan seluruh isi.
-// - Stabilo teks: seleksi teks → tombol warna → tersimpan di perangkat.
+// - TTS: bacakan seluruh isi / teks terpilih.
+// - Stabilo teks (thl): offset karakter → tersimpan di MongoDB (ikut user
+//   di semua perangkat) — dulu HANYA localStorage per perangkat.
 // ─────────────────────────────────────────────────────────────────────────
-
-interface TextHighlight {
-  id: string;
-  start: number;
-  end: number;
-  color: string;
-  created: number;
-}
 
 const HL_PREFIX = "aula.t hl.v1:";
 
-function loadHl(key: string): TextHighlight[] {
+/** Cache stabilo-teks lama (pra-MongoDB) — dipakai untuk migrasi sekali. */
+function loadOldHl(key: string): { start: number; end: number; color: string }[] {
   try {
     const raw = localStorage.getItem(HL_PREFIX + key);
     const parsed = raw ? JSON.parse(raw) : [];
@@ -65,7 +58,6 @@ export function TextReader({
   const [theme, setTheme] = useState<"light" | "paper" | "dark">("paper");
   const [mono, setMono] = useState(false);
   const [ttsPlaying, setTtsPlaying] = useState(false);
-  const [hls, setHls] = useState<TextHighlight[]>(() => loadHl(file.storageKey));
   const [selRange, setSelRange] = useState<{ start: number; end: number } | null>(null);
   const [selColor, setSelColor] = useState(ANNO_COLORS[0]);
   const [showHlBar, setShowHlBar] = useState(false);
@@ -73,54 +65,97 @@ export function TextReader({
   const bodyRef = useRef<HTMLDivElement>(null);
   const ttsStop = useRef(false);
 
+  const anno = useAnnotations(file.storageKey);
+
+  // Stabilo teks = anotasi tool "thl" (MongoDB).
+  const thls = useMemo(
+    () =>
+      anno.items
+        .filter((a) => a.tool === "thl" && typeof a.start === "number")
+        .sort((a, b) => (a.start! - b.start!)),
+    [anno.items]
+  );
+
+  // ── Migrasi satu kali: stabilo lama (localStorage) → MongoDB ──
+  const migrated = useRef(false);
+  useEffect(() => {
+    if (migrated.current) return;
+    const old = loadOldHl(file.storageKey);
+    if (old.length === 0) {
+      migrated.current = true;
+      return;
+    }
+    // Server sudah punya thl → cache lama basi, buang saja (jangan
+    // membangkitkan stabilo yang sudah dihapus user di perangkat lain).
+    if (anno.items.some((a) => a.tool === "thl")) {
+      try {
+        localStorage.removeItem(HL_PREFIX + file.storageKey);
+      } catch {}
+      migrated.current = true;
+      return;
+    }
+    migrated.current = true;
+    old.forEach((h) =>
+      anno.add({
+        id: newId(),
+        page: 1,
+        tool: "thl",
+        color: h.color,
+        start: h.start,
+        end: h.end,
+        created: Date.now(),
+      })
+    );
+    try {
+      localStorage.removeItem(HL_PREFIX + file.storageKey);
+    } catch {}
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [anno.items, file.storageKey]);
+
+  // Muat isi teks (batal otomatis saat ditutup).
   useEffect(() => {
     let cancelled = false;
+    const ac = new AbortController();
     (async () => {
       try {
-        const res = await fetch(url);
+        const res = await fetch(url, { signal: ac.signal });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const raw = await res.text();
         if (!cancelled) setText(raw.length > 2_000_000 ? raw.slice(0, 2_000_000) : raw);
       } catch (e) {
-        if (!cancelled)
+        if (!cancelled && !(e instanceof DOMException && e.name === "AbortError"))
           setError(e instanceof Error ? e.message : "Gagal memuat teks");
       }
     })();
     return () => {
       cancelled = true;
+      ac.abort();
     };
   }, [url]);
 
-  // Persist stabilo teks (debounce).
-  useEffect(() => {
-    const t = setTimeout(() => {
-      try {
-        localStorage.setItem(HL_PREFIX + file.storageKey, JSON.stringify(hls.slice(-500)));
-      } catch {}
-    }, 400);
-    return () => clearTimeout(t);
-  }, [hls, file.storageKey]);
-
   const applyHighlight = useCallback(() => {
     if (!selRange) return;
-    setHls((prev) => [
-      ...prev,
-      {
-        id: newId(),
-        start: selRange.start,
-        end: selRange.end,
-        color: selColor,
-        created: Date.now(),
-      },
-    ]);
+    anno.add({
+      id: newId(),
+      page: 1,
+      tool: "thl",
+      color: selColor,
+      start: selRange.start,
+      end: selRange.end,
+      created: Date.now(),
+    });
     setSelRange(null);
     setShowHlBar(false);
-    if (typeof window !== "undefined") window.getSelection()?.removeAllRanges();
-  }, [selRange, selColor]);
+    window.getSelection()?.removeAllRanges();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selRange, selColor, anno.add]);
 
   // Seleksi teks → tampilkan bar stabilo.
+  // Offset stabil di mode teks biasa MAUPUN mono (keduanya merender teks
+  // mentah; TreeWalker hanya menghitung node teks). Markdown = HTML
+  // hasil render → offset tidak stabil → stabilo dimatikan di sana.
   function onSelect() {
-    if (mono) return; // offset pre-wrap stabil hanya pada tampilan teks
+    if (isMarkdown) return;
     const sel = window.getSelection();
     if (!sel || sel.isCollapsed || !bodyRef.current) {
       setShowHlBar(false);
@@ -230,18 +265,18 @@ export function TextReader({
   // Render teks dengan stabilo (potong berdasarkan offset).
   const segments = useMemo(() => {
     if (!text) return [];
-    const sorted = [...hls].sort((a, b) => a.start - b.start);
+    const sorted = [...thls].sort((a, b) => a.start! - b.start!);
     const out: { text: string; color?: string }[] = [];
     let pos = 0;
     for (const h of sorted) {
-      if (h.start < pos) continue; // tumpang tindih — lewati
-      if (h.start > pos) out.push({ text: text.slice(pos, h.start) });
-      out.push({ text: text.slice(h.start, h.end), color: h.color });
-      pos = h.end;
+      if (h.start! < pos) continue; // tumpang tindih — lewati
+      if (h.start! > pos) out.push({ text: text.slice(pos, h.start) });
+      out.push({ text: text.slice(h.start!, h.end), color: h.color });
+      pos = h.end!;
     }
     if (pos < text.length) out.push({ text: text.slice(pos) });
     return out;
-  }, [text, hls]);
+  }, [text, thls]);
 
   const wordCount = useMemo(
     () => (text ? text.trim().split(/\s+/).filter(Boolean).length : 0),
@@ -325,16 +360,13 @@ export function TextReader({
         >
           <FileText className="size-4" />
         </Button>
-        {!mono ? (
+        {!isMarkdown ? (
           <Button
             variant="outline"
             size="icon"
             className="h-9 w-9"
-            onClick={() => {
-              if (hls.length === 0) return;
-              setHls((prev) => prev.slice(0, -1));
-            }}
-            disabled={hls.length === 0}
+            onClick={() => anno.undoTool("thl")}
+            disabled={thls.length === 0}
             title="Urungkan stabilo terakhir"
           >
             <Undo2 className="size-4" />
@@ -344,8 +376,8 @@ export function TextReader({
           variant="outline"
           size="icon"
           className="h-9 w-9"
-          onClick={() => setHls([])}
-          disabled={hls.length === 0}
+          onClick={() => anno.clearTool("thl")}
+          disabled={thls.length === 0}
           title="Hapus semua stabilo file ini"
         >
           <Trash2 className="size-4" />
@@ -413,11 +445,25 @@ export function TextReader({
           >
             {mono ? (
               <pre className="whitespace-pre-wrap break-words font-mono p-4">
-                {text}
+                {segments.map((s, i) =>
+                  s.color ? (
+                    <mark
+                      key={i}
+                      style={{ backgroundColor: s.color, color: "inherit" }}
+                      className="rounded-sm px-0.5"
+                    >
+                      {s.text}
+                    </mark>
+                  ) : (
+                    <span key={i}>{s.text}</span>
+                  )
+                )}
               </pre>
             ) : isMarkdown ? (
               <div className="p-5">
-                <ReactMarkdown>{text}</ReactMarkdown>
+                {/* GFM: tabel, ~~coret~~, task list — renderer bersama
+                 * dengan Teman AI (dulu tabel .md tampil mentah). */}
+                <AiMarkdown content={text} />
                 <p className="mt-4 text-xs opacity-60">
                   Stabilo teks tersedia di tab Teks (non-markdown).
                 </p>

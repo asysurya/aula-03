@@ -155,13 +155,17 @@ export function AulaReader({
     filePublicUrl(file.storageKey) +
     (file.raw ? `?name=${encodeURIComponent(file.name)}` : "");
 
+  // EPUB bisa terdeteksi dari ekstensi ATAU mimetype (file tanpa .epub
+  // — mis. hasil unduhan bernama acak — dulu jatuh ke pratinjau arsip).
+  const isEpub = e === "epub" || file.mimetype === "application/epub+zip";
+
   // Tipe yang butuh unduhan buffer penuh di level ini.
   const needsBuffer =
     kind === "pdf" ||
     kind === "gdoc" ||
     kind === "raw" ||
     EMBEDDED_IMAGE_EXTS.has(e) ||
-    e === "epub";
+    isEpub;
 
   // Video/audio/gambar/teks memakai URL langsung → JANGAN unduh buffer
   // (dulu: ikut terunduh penuh 2× bandwidth + RAM ganda per pratinjau).
@@ -169,8 +173,8 @@ export function AulaReader({
     enabled: needsBuffer,
   });
 
-  // ── EPUB (ekstensi) ──
-  if (e === "epub") {
+  // ── EPUB (ekstensi / mimetype) ──
+  if (isEpub) {
     if (error) return <BufferError onOpenNative={onOpenNative} />;
     if (!entry) return <BufferLoading progress={progress} />;
     return <EpubReader file={file} entry={entry} />;
@@ -227,7 +231,14 @@ export function AulaReader({
 
   // ── Video / audio ──
   if (kind === "video" || kind === "audio") {
-    return <MediaReader url={url} kind={kind} name={file.name} />;
+    return (
+      <MediaReader
+        storageKey={file.storageKey}
+        url={url}
+        kind={kind}
+        name={file.name}
+      />
+    );
   }
 
   // ── Teks / markdown / kode ──

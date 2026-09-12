@@ -36,7 +36,7 @@ import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import ReactMarkdown from "react-markdown";
+import { AiMarkdown } from "@/components/ai/ai-markdown";
 import { filePublicUrl } from "@/lib/file-constants";
 import { formatBytes, type CloudFileItem } from "@/lib/cloud-format";
 import { useTransferStore } from "@/lib/transfer-store";
@@ -714,6 +714,8 @@ function PptxView({
 
   useEffect(() => {
     let cancelled = false;
+    let raf = 0;
+    let attempts = 0;
     (async () => {
       try {
         const mod = await import("pptx-preview");
@@ -723,11 +725,33 @@ function PptxView({
         ) => { preview: (data: ArrayBuffer) => void };
         const el = containerRef.current;
         if (!el) return;
-        // Lebar responsif: ikuti lebar dialog (maks 1150), rasio 16:9.
-        const width = Math.max(480, Math.min(el.clientWidth || 960, 1150));
-        const viewer = init(el, { width, height: Math.round((width * 9) / 16) });
-        viewer.preview(entry.buffer);
-        if (!cancelled) setReady(true);
+        // Ukur lebar dengan sabar: dialog baru saja dibuka → layout bisa
+        // belum siap (clientWidth 0). Dulu: fallback 960 terpakai padahal
+        // dialog lebih lebar → slide tampil kecil / rasio salah. Coba
+        // ulang tiap frame hingga terukur (maks ±10 frame).
+        const start = () => {
+          const width = Math.max(
+            480,
+            Math.min(el.clientWidth || 960, 1150)
+          );
+          if (cancelled) return;
+          const viewer = init(el, {
+            width,
+            height: Math.round((width * 9) / 16),
+          });
+          viewer.preview(entry.buffer);
+          setReady(true);
+        };
+        const tryMeasure = () => {
+          if (cancelled) return;
+          if (el.clientWidth > 0 || attempts >= 10) {
+            start();
+          } else {
+            attempts++;
+            raf = requestAnimationFrame(tryMeasure);
+          }
+        };
+        tryMeasure();
       } catch (e) {
         if (!cancelled)
           setError(e instanceof Error ? e.message : "Gagal merender .pptx");
@@ -735,6 +759,7 @@ function PptxView({
     })();
     return () => {
       cancelled = true;
+      cancelAnimationFrame(raf);
     };
   }, [entry.buffer]);
 
@@ -788,7 +813,8 @@ function TextPreview({
 
   useEffect(() => {
     let cancelled = false;
-    fetch(url)
+    const ac = new AbortController();
+    fetch(url, { signal: ac.signal })
       .then(async (res) => {
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const text = await res.text();
@@ -802,11 +828,12 @@ function TextPreview({
         }
       })
       .catch((e) => {
-        if (!cancelled)
+        if (!cancelled && !(e instanceof DOMException && e.name === "AbortError"))
           setError(e instanceof Error ? e.message : "Gagal memuat teks");
       });
     return () => {
       cancelled = true;
+      ac.abort();
     };
   }, [url]);
 
@@ -859,7 +886,7 @@ function TextPreview({
       <ScrollArea className="h-full">
         {renderMarkdown ? (
           <div className="prose prose-sm dark:prose-invert max-w-none p-6 break-words">
-            <ReactMarkdown>{content}</ReactMarkdown>
+            <AiMarkdown content={content} />
           </div>
         ) : (
           <pre className="p-6 text-xs font-mono whitespace-pre-wrap break-words leading-relaxed">
@@ -911,14 +938,55 @@ function NotAvailable({
 }
 
 // ───────────────────────── Arsip (ZIP dkk) — daftar isi in-app ─────────────────────────
-// File arsip TIDAK di-download otomatis. Untuk .zip kita daftar isinya
-// (fflate, client-side); rar/7z/tar dkk → kartu info + tombol unduh.
+// File arsip TIDak di-download otomatis. Untuk .zip kita daftar isinya
+// langsung dari CENTRAL DIRECTORY (header saja — TANPA dekompresi;
+// dulu fflate unzip mendekompresi SELURUH isi: zip 60MB bisa makan
+// ratusan MB RAM hanya untuk menampilkan nama file); rar/7z/tar dkk →
+// kartu info + tombol unduh. Unduhan memakai cache pratinjau bersama
+// (progress + abort otomatis saat dialog ditutup).
 
 interface ZipEntryInfo {
   path: string;
   size: number;
   compressedSize?: number;
   isFile: boolean;
+}
+
+/** Baca daftar isi ZIP dari EOCD → central directory (tanpa dekompresi). */
+function listZipEntries(u8: Uint8Array): ZipEntryInfo[] {
+  // Temukan End of Central Directory (signature PK\x05\x06) dari belakang
+  // (komentar ZIP bisa sampai 64KB).
+  const dv = new DataView(u8.buffer, u8.byteOffset, u8.byteLength);
+  let eocd = -1;
+  const stop = Math.max(0, u8.length - 22 - 65535);
+  for (let i = u8.length - 22; i >= stop; i--) {
+    if (dv.getUint32(i, true) === 0x06054b50) {
+      eocd = i;
+      break;
+    }
+  }
+  if (eocd < 0) throw new Error("Bukan arsip ZIP yang valid.");
+  const count = dv.getUint16(eocd + 10, true);
+  let off = dv.getUint32(eocd + 16, true);
+  const dec = new TextDecoder();
+  const out: ZipEntryInfo[] = [];
+  for (let i = 0; i < count && off + 46 <= u8.length; i++) {
+    if (dv.getUint32(off, true) !== 0x02014b50) break; // tanda tangan CD
+    const compSize = dv.getUint32(off + 20, true);
+    const uncompSize = dv.getUint32(off + 24, true);
+    const nameLen = dv.getUint16(off + 28, true);
+    const extraLen = dv.getUint16(off + 30, true);
+    const commentLen = dv.getUint16(off + 32, true);
+    const name = dec.decode(u8.subarray(off + 46, off + 46 + nameLen));
+    out.push({
+      path: name,
+      size: uncompSize,
+      compressedSize: compSize || undefined,
+      isFile: !name.endsWith("/"),
+    });
+    off += 46 + nameLen + extraLen + commentLen;
+  }
+  return out;
 }
 
 function ArchivePreview({
@@ -933,48 +1001,55 @@ function ArchivePreview({
   const [error, setError] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const ext2 = ext(file.name);
-  // Batas aman: zip raksasa dkk → kartu info (decompress semua isinya
-  // bisa memberatkan browser).
+  // Batas aman: zip raksasa → kartu info (membaca header pun berat).
   const ZIP_LIST_LIMIT = 60 * 1024 * 1024;
   const isZip =
     (ext2 === "zip" || ext2 === "epub" || file.mimetype === "application/zip") &&
     (file.size || 0) <= ZIP_LIST_LIMIT;
 
+  // Buffer via cache bersama (progress + abort saat dialog ditutup).
+  const { entry, error: bufError, progress } = useOfficeBuffer(file, {
+    enabled: isZip,
+  });
+
   useEffect(() => {
-    if (!isZip) return;
+    if (!isZip || !entry) return;
     let cancelled = false;
     (async () => {
       try {
-        const { unzip } = await import("fflate");
-        const res = await fetch(url);
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const buf = new Uint8Array(await res.arrayBuffer());
-        // unzip sync hanya membaca central directory → ringan.
-        unzip(buf, (err, unzipped) => {
-          if (cancelled) return;
-          if (err) {
-            setError("Bukan arsip ZIP yang valid.");
-            return;
-          }
-          const list: ZipEntryInfo[] = Object.entries(unzipped).map(
-            ([path, data]) => ({
-              path,
-              size: data.byteLength,
-              isFile: !path.endsWith("/"),
-            })
-          );
-          list.sort((a, b) => a.path.localeCompare(b.path));
-          setEntries(list);
-        });
+        // Parse di microtask berikutnya (setelah buffer siap) — setState
+        // tidak lagi sinkron di badan effect.
+        await Promise.resolve();
+        if (cancelled) return;
+        const list = listZipEntries(new Uint8Array(entry.buffer));
+        list.sort((a, b) => a.path.localeCompare(b.path));
+        setEntries(list);
       } catch (e) {
         if (!cancelled)
-          setError(e instanceof Error ? e.message : "Gagal memuat arsip");
+          setError(e instanceof Error ? e.message : "Gagal membaca arsip");
       }
     })();
     return () => {
       cancelled = true;
     };
-  }, [url, isZip]);
+  }, [isZip, entry]);
+
+  if (isZip && bufError) {
+    return (
+      <ErrorBlock
+        message={bufError}
+        url={url}
+        kindLabel="arsip"
+        name={file.name}
+        size={file.size}
+      />
+    );
+  }
+  if (isZip && !entry) {
+    return (
+      <LoadingBlock progress={progress} label="Mengunduh arsip dari cloud…" />
+    );
+  }
 
   if (!isZip) {
     return (

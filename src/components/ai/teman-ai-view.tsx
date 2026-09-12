@@ -13,7 +13,6 @@ import {
   useState,
   type KeyboardEvent,
 } from "react";
-import ReactMarkdown from "react-markdown";
 import { toast } from "sonner";
 import {
   Bot,
@@ -46,6 +45,7 @@ import {
   fetchAiSettings,
   type AiSettingsData,
 } from "@/components/ai/ai-settings-dialog";
+import { AiMarkdown } from "@/components/ai/ai-markdown";
 
 interface ChatMsg {
   id: string;
@@ -363,71 +363,10 @@ export function TemanAiView({ me }: { me: MeResponse }) {
                     </p>
                   ) : (
                     <div className="text-sm min-w-0 break-words [&>*:first-child]:mt-0 [&>*:last-child]:mb-0">
-                      <ReactMarkdown
-                        components={{
-                          p: (props) => (
-                            <p className="leading-relaxed my-1.5" {...props} />
-                          ),
-                          ul: (props) => (
-                            <ul className="list-disc pl-5 my-1.5 space-y-0.5" {...props} />
-                          ),
-                          ol: (props) => (
-                            <ol className="list-decimal pl-5 my-1.5 space-y-0.5" {...props} />
-                          ),
-                          li: (props) => <li className="pl-0.5" {...props} />,
-                          h1: (props) => (
-                            <h1 className="text-base font-bold mt-2.5 mb-1" {...props} />
-                          ),
-                          h2: (props) => (
-                            <h2 className="text-sm font-bold mt-2.5 mb-1" {...props} />
-                          ),
-                          h3: (props) => (
-                            <h3 className="text-sm font-semibold mt-2 mb-1" {...props} />
-                          ),
-                          blockquote: (props) => (
-                            <blockquote
-                              className="border-l-4 border-border pl-3 my-1.5 opacity-90"
-                              {...props}
-                            />
-                          ),
-                          pre: (props) => (
-                            <pre
-                              className="rounded-md bg-background/70 border border-border/60 px-3 py-2 text-xs font-mono overflow-x-auto my-1.5"
-                              {...props}
-                            />
-                          ),
-                          code: (props) => (
-                            <code
-                              className="rounded bg-background/70 px-1 py-0.5 font-mono text-[13px]"
-                              {...props}
-                            />
-                          ),
-                          a: (props) => (
-                            <a
-                              className="underline underline-offset-2 break-all"
-                              target="_blank"
-                              rel="noopener noreferrer"
-                              {...props}
-                            />
-                          ),
-                          table: (props) => (
-                            <div className="overflow-x-auto my-1.5">
-                              <table className="text-xs border-collapse" {...props} />
-                            </div>
-                          ),
-                          th: (props) => (
-                            <th
-                              className="border border-border px-2 py-1 bg-background/50 font-semibold"
-                              {...props}
-                            />
-                          ),
-                          td: (props) => (
-                            <td className="border border-border px-2 py-1" {...props} />
-                          ),
-                        }}
-                      >
-                        {m.content}
-                      </ReactMarkdown>
+                      {/* GFM (tabel/coret/task list) + blok kode dengan tombol
+                       * salin — komponen memo: streaming tidak me-render
+                       * ulang seluruh riwayat. */}
+                      <AiMarkdown content={m.content} streaming={!!m.streaming} />
                     </div>
                   )}
                   {m.streaming && !m.content ? (

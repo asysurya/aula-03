@@ -52,6 +52,25 @@ export function AnnotationLayer({
   function posOf(e: React.PointerEvent): [number, number] {
     const svg = svgRef.current;
     if (!svg) return [0, 0];
+    // getScreenCTM: koordinat layar → ruang lokal SVG (0..1), LENGKAP
+    // dengan transform CSS leluhur (rotate/scale/translate). Dipakai agar
+    // anotasi tetap presisi saat gambar dirotasi 90°/180°/270° —
+    // getBoundingClientRect hanya memberi kotak pembatas sumbu-X/Y sehingga
+    // koordinatnya SALAH untuk elemen yang dirotasi.
+    try {
+      const ctm = svg.getScreenCTM();
+      if (ctm) {
+        const local = new DOMPoint(e.clientX, e.clientY).matrixTransform(
+          ctm.inverse()
+        );
+        return [
+          Math.min(1, Math.max(0, local.x)),
+          Math.min(1, Math.max(0, local.y)),
+        ];
+      }
+    } catch {
+      /* browser tanpa DOMPoint → fallback di bawah */
+    }
     const r = svg.getBoundingClientRect();
     const x = Math.min(1, Math.max(0, (e.clientX - r.left) / r.width));
     const y = Math.min(1, Math.max(0, (e.clientY - r.top) / r.height));
