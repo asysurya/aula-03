@@ -30,7 +30,7 @@ import {
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Textarea } from "@/components/ui/textarea";
+import { AutoTextarea } from "@/components/ui/auto-textarea";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { Card } from "@/components/ui/card";
@@ -1272,11 +1272,11 @@ function AnswerRow({
             ) : null}
           </div>
           <div className="flex items-start gap-2">
-            <Textarea
+            <AutoTextarea
               value={feedbackInput}
               onChange={(e) => setFeedbackInput(e.target.value)}
               placeholder="cth: Jawabanmu hampir tepat, tapi perhatikan rumus di langkah kedua…"
-              rows={2}
+              maxHeight={120}
               maxLength={1000}
               className="text-xs"
             />

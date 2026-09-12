@@ -13,6 +13,7 @@ import { Logo } from "@/components/shared/logo";
 import { ThemeToggle } from "@/components/shared/theme-toggle";
 import { CommandPalette } from "@/components/shared/command-palette";
 import { NotificationBell } from "@/components/shared/notification-bell";
+import { PreviewLayer } from "@/components/cloud/preview-layer";
 import { startOverviewPoller } from "@/lib/notify";
 import { sweepReaderCache } from "@/lib/reader-file-cache";
 import { Menu } from "lucide-react";
@@ -104,6 +105,10 @@ export function AppShell() {
           <MainContent me={me} onlineIds={onlineIds} />
         </main>
       </div>
+
+      {/* Jendela pratinjau global + kartu PiP (bertahan selama berpindah
+          section; maks 3 pratinjau terbuka bersamaan). */}
+      <PreviewLayer />
     </div>
   );
 }

@@ -27,7 +27,7 @@ import {
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Textarea } from "@/components/ui/textarea";
+import { AutoTextarea } from "@/components/ui/auto-textarea";
 import { cn } from "@/lib/utils";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
@@ -65,7 +65,9 @@ export type ApplyMode = "append" | "replace";
 
 // Textarea yang tumbuh mengikuti isi hingga batas tinggi — lalu scroll
 // (perilaku sama dengan input chat). Dipakai untuk paste JSON panjang.
-function AutoTextarea({
+// (Nama lama: AutoTextarea — di-rename agar tidak bentrok dengan
+// komponen bersama di ui/auto-textarea.tsx.)
+function JsonTextarea({
   value,
   onChange,
   placeholder,
@@ -98,7 +100,6 @@ function AutoTextarea({
     <textarea
       id={id}
       ref={ref}
-      rows={rows}
       value={value}
       readOnly={readOnly}
       placeholder={placeholder}
@@ -321,9 +322,9 @@ export function AiGenerateDialog({
         <div className="space-y-3">
           <div className="space-y-1.5">
             <Label htmlFor="ai-prompt">Prompt</Label>
-            <Textarea
+            <AutoTextarea
               id="ai-prompt"
-              rows={3}
+              maxHeight={160}
               value={prompt}
               onChange={(e) => setPrompt(e.target.value)}
               placeholder="Contoh: 10 soal tentang Fotosintesis untuk SMP kelas 8, campuran PG dan isian, kesulitan sedang"
@@ -455,7 +456,7 @@ export function AiGenerateDialog({
                     {copied ? "Tersalin" : "Salin prompt"}
                   </Button>
                 </div>
-                <AutoTextarea
+                <JsonTextarea
                   readOnly
                   value={externalPromptText}
                   placeholder="Tulis prompt Anda dulu — prompt siap-salin muncul di sini"
@@ -464,7 +465,7 @@ export function AiGenerateDialog({
               </div>
               <div className="space-y-1.5">
                 <Label htmlFor="ai-reply">Jawaban AI (tempel apa adanya)</Label>
-                <AutoTextarea
+                <JsonTextarea
                   id="ai-reply"
                   value={reply}
                   onChange={(v) => {
@@ -605,7 +606,7 @@ export function FormImportDialog({
                 <Upload className="size-3.5 mr-1" /> Pilih file
               </Button>
             </div>
-            <AutoTextarea
+            <JsonTextarea
               id="import-text"
               value={text}
               onChange={(v) => {

@@ -55,7 +55,7 @@ import {
   SelectValue,
 } from "@/components/ui/select"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
-import { Textarea } from "@/components/ui/textarea"
+import { AutoTextarea } from "@/components/ui/auto-textarea"
 
 /* ------------------------------------------------------------------ */
 /* Tipe & util bersama                                                */
@@ -328,12 +328,12 @@ function NotesTab({
             </div>
             <div className="flex flex-col gap-1.5">
               <Label htmlFor="note-body">Isi catatan</Label>
-              <Textarea
+              <AutoTextarea
                 id="note-body"
                 value={body}
                 onChange={(e) => setBody(e.target.value)}
                 placeholder="Tulis catatanmu di sini…"
-                rows={6}
+                maxHeight={200}
               />
             </div>
           </div>
@@ -840,12 +840,12 @@ function GlossaryTab({
             </div>
             <div className="flex flex-col gap-1.5">
               <Label htmlFor="gloss-def">Arti / definisi</Label>
-              <Textarea
+              <AutoTextarea
                 id="gloss-def"
                 value={definition}
                 onChange={(e) => setDefinition(e.target.value)}
                 placeholder="mis. Proses tumbuhan membuat makanan dengan bantuan cahaya matahari"
-                rows={3}
+                maxHeight={140}
               />
             </div>
           </div>
@@ -1038,12 +1038,12 @@ function ErrorBookTab({
           <div className="flex flex-col gap-3">
             <div className="flex flex-col gap-1.5">
               <Label htmlFor="err-q">Soal / pertanyaan</Label>
-              <Textarea
+              <AutoTextarea
                 id="err-q"
                 value={question}
                 onChange={(e) => setQuestion(e.target.value)}
                 placeholder="mis. Hasil dari 12 + 5 × 2 adalah…"
-                rows={2}
+                maxHeight={120}
               />
             </div>
             <div className="flex flex-col gap-1.5">

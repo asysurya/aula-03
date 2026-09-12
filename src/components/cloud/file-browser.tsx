@@ -31,7 +31,7 @@ import {
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Textarea } from "@/components/ui/textarea";
+import { AutoTextarea } from "@/components/ui/auto-textarea";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { Card } from "@/components/ui/card";
@@ -2241,11 +2241,11 @@ function NewAssignmentDialog({
           </div>
           <div className="space-y-2">
             <Label htmlFor="a-desc">Deskripsi (opsional)</Label>
-            <Textarea
+            <AutoTextarea
               id="a-desc"
               value={description}
               onChange={(e) => setDescription(e.target.value)}
-              rows={3}
+              maxHeight={140}
               placeholder="Instruksi tugas…"
             />
           </div>

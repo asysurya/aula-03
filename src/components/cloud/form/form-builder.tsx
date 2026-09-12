@@ -31,7 +31,7 @@ import {
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Textarea } from "@/components/ui/textarea";
+import { AutoTextarea } from "@/components/ui/auto-textarea";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { Card } from "@/components/ui/card";
@@ -899,10 +899,10 @@ export function FormBuilder({
                 {/* Question text */}
                 <div className="space-y-1.5">
                   <Label>Teks soal</Label>
-                  <Textarea
+                  <AutoTextarea
                     value={q.text}
                     disabled={locked}
-                    rows={2}
+                    maxHeight={120}
                     maxLength={2000}
                     placeholder="Tulis pertanyaan di sini…"
                     onChange={(e) =>

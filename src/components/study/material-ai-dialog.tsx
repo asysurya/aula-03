@@ -26,7 +26,7 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Textarea } from "@/components/ui/textarea";
+import { AutoTextarea } from "@/components/ui/auto-textarea";
 
 const TOPIC_MAX = 500;
 
@@ -228,11 +228,12 @@ export function MaterialAiDialog({
                   (opsional)
                 </span>
               </Label>
-              <Textarea
+              <AutoTextarea
                 id="material-notes"
                 value={notes}
                 onChange={(e) => setNotes(e.target.value.slice(0, 1000))}
                 placeholder="mis. fokus pada peran klorofil, tambahkan contoh soal essay"
+                maxHeight={180}
                 className="min-h-16 text-sm"
               />
             </div>

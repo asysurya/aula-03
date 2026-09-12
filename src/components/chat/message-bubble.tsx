@@ -27,7 +27,7 @@ import { FilePreview } from "@/components/cloud/file-preview";
 import { mimeToIcon, type CloudFileItem } from "@/lib/cloud-format";
 import { formatBytes, isImageMime } from "@/lib/file-constants";
 import { Button } from "@/components/ui/button";
-import { Textarea } from "@/components/ui/textarea";
+import { AutoTextarea } from "@/components/ui/auto-textarea";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -451,10 +451,10 @@ function EditComposer({
 
   return (
     <div className="flex flex-col gap-1.5 w-full">
-      <Textarea
+      <AutoTextarea
         value={value}
         onChange={(e) => setValue(e.target.value)}
-        rows={Math.min(6, Math.max(1, value.split("\n").length))}
+        maxHeight={200}
         disabled={saving}
         maxLength={MAX_EDIT_LENGTH}
         className="resize-none min-h-[40px] max-h-40 bg-card w-full rounded-lg"

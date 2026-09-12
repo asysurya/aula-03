@@ -14,7 +14,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Textarea } from "@/components/ui/textarea";
+import { AutoTextarea } from "@/components/ui/auto-textarea";
 import {
   Select,
   SelectContent,
@@ -124,12 +124,12 @@ export function GroupCreateDialog({
         </div>
         <div className="space-y-1.5">
           <Label htmlFor="grp-desc">Deskripsi (opsional)</Label>
-          <Textarea
+          <AutoTextarea
             id="grp-desc"
             value={description}
             onChange={(e) => setDescription(e.target.value)}
             placeholder="Apa tujuan grup ini?"
-            rows={2}
+            maxHeight={120}
             maxLength={280}
           />
         </div>

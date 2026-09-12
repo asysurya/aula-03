@@ -13,16 +13,11 @@ import {
   Check,
   Maximize2,
   Minimize2,
+  PictureInPicture2,
   ExternalLink,
   BookOpenText,
   Monitor,
 } from "lucide-react";
-import {
-  Dialog,
-  DialogContent,
-  DialogTitle,
-  DialogDescription,
-} from "@/components/ui/dialog";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -40,6 +35,7 @@ import { AiMarkdown } from "@/components/ai/ai-markdown";
 import { filePublicUrl } from "@/lib/file-constants";
 import { formatBytes, type CloudFileItem } from "@/lib/cloud-format";
 import { useTransferStore } from "@/lib/transfer-store";
+import { usePreviewStore } from "@/stores/preview-store";
 import {
   classify as classifyKind,
   ext as fileExt,
@@ -51,14 +47,7 @@ import {
   type OfficeCacheEntry,
   type PreviewKind,
 } from "./buffer-loader";
-import { evictReaderFile } from "@/lib/reader-file-cache";
-import { AulaReader } from "./aula-reader/aula-reader";
-import {
-  ModeChooser,
-  loadPreviewPref,
-  savePreviewPref,
-  type PreviewMode,
-} from "./aula-reader/mode-chooser";
+import type { PreviewMode } from "./aula-reader/mode-chooser";
 
 function classify(mime: string, name: string): PreviewKind {
   return classifyKind(mime, name);
@@ -70,6 +59,16 @@ function ext(name: string): string {
 
 // ───────────────────────── Component utama ─────────────────────────
 
+// FilePreview kini HANYA ADAPTER menuju registry global pratinjau
+// (preview-store + preview-layer). Tanda tangan komponen dipertahankan
+// agar semua host (file-browser, mega-mount, form-review, assignment-
+// detail) tidak perlu diubah:
+//   <FilePreview file={x} onClose={...} />
+// - file berubah → daftarkan/fokuskan pratinjau di store (maks 3, lebih
+//   dari itu yang terlama ditutup otomatis + toast).
+// - pratinjau ditutup/dievict dari store → panggil onClose host.
+// - MINIMIZE BUKAN onClose: entri tetap hidup di store sebagai kartu
+//   PiP (video/audio tetap berjalan) — host tidak diberitahu.
 export function FilePreview({
   file,
   onClose,
@@ -77,123 +76,47 @@ export function FilePreview({
   file: CloudFileItem | null;
   onClose: () => void;
 }) {
-  const open = file !== null;
-  const bodyRef = useRef<HTMLDivElement>(null);
-  const [isFullscreen, setIsFullscreen] = useState(false);
-  // Mode pratinjau: "ask" (pilih tiap kali) | "aula" (Aula Reader) |
-  // "native" (pratinjau bawaan). Preferensi tersimpan per perangkat.
-  const [mode, setMode] = useState<PreviewMode>(() => loadPreviewPref());
-  const [fileKey, setFileKey] = useState<string | null>(
-    file?.storageKey ?? null
-  );
+  const openPreview = usePreviewStore((s) => s.openPreview);
+  const entries = usePreviewStore((s) => s.entries);
+  const lastKey = useRef<string | null>(null);
 
-  // File berubah → mode mengikuti preferensi tersimpan.
-  if (file && fileKey !== file.storageKey) {
-    setFileKey(file.storageKey);
-    setMode(loadPreviewPref());
-  }
-
+  // Host membuka file (file berubah null → item) → daftarkan ke registry.
   useEffect(() => {
-    const onFsChange = () => setIsFullscreen(!!document.fullscreenElement);
-    document.addEventListener("fullscreenchange", onFsChange);
-    return () => document.removeEventListener("fullscreenchange", onFsChange);
-  }, []);
-
-  function pickMode(m: "aula" | "native", always: boolean) {
-    setMode(m);
-    if (always) {
-      savePreviewPref(m);
-      toast.info(
-        m === "aula"
-          ? "Selanjutnya file otomatis dibuka dengan Aula Reader."
-          : "Selanjutnya file otomatis dibuka dengan pratinjau bawaan."
-      );
+    if (file && lastKey.current !== file.storageKey) {
+      lastKey.current = file.storageKey;
+      openPreview(file);
     }
-  }
+    if (!file) lastKey.current = null;
+  }, [file, openPreview]);
 
-  async function toggleFullscreen() {
-    try {
-      if (document.fullscreenElement) {
-        await document.exitFullscreen();
-      } else if (bodyRef.current) {
-        await bodyRef.current.requestFullscreen();
-      }
-    } catch {
-      toast.error("Browser menolak mode layar penuh");
+  // Pratinjau ditutup dari jendelanya (atau di-evict karena buka ke-4)
+  // → beri tahu host. Bukan sebaliknya: menutup via host (onClose) cukup
+  // mengosongkan state host; entri store sudah tidak ada.
+  const registered =
+    file !== null && entries.some((e) => e.id === file.storageKey);
+  useEffect(() => {
+    if (!file || lastKey.current !== file.storageKey) return;
+    if (!registered) {
+      lastKey.current = null;
+      onClose();
     }
-  }
+  }, [file, registered, onClose]);
 
-  return (
-    <Dialog
-      open={open}
-      onOpenChange={(o) => {
-        if (!o) {
-          if (document.fullscreenElement) void document.exitFullscreen();
-          // Tutup pratinjau → buffer file dihapus dari cache sementara
-          // (anotasi tetap aman di MongoDB).
-          if (file?.storageKey) void evictReaderFile(file.storageKey);
-          onClose();
-        }
-      }}
-    >
-      <DialogContent
-        className="sm:max-w-6xl max-h-[92vh] w-[96vw] flex flex-col p-0 gap-0 overflow-hidden"
-        onOpenAutoFocus={(e) => e.preventDefault()}
-      >
-        {file ? (
-          <div className="flex flex-col min-h-0 flex-1">
-            <PreviewHeader
-              file={file}
-              mode={mode}
-              onSetMode={pickMode}
-              onResetMode={() => {
-                savePreviewPref("ask");
-                setMode("ask");
-              }}
-              isFullscreen={isFullscreen}
-              onToggleFullscreen={toggleFullscreen}
-            />
-            <div
-              ref={bodyRef}
-              className={cn(
-                "flex flex-col flex-1 min-h-0 overflow-hidden bg-secondary/30",
-                isFullscreen && "bg-black",
-                // Pusatkan hanya pratinjau native (gambar/pdf bawaan).
-                // Aula Reader harus MEMENUHI layar penuh — dulu items-center
-                // menyusutkan lebar reader jadi file tampak kecil di layar penuh.
-                isFullscreen && mode !== "aula" && "items-center justify-center"
-              )}
-            >
-              {mode === "ask" ? (
-                <ModeChooser onPick={pickMode} />
-              ) : mode === "aula" ? (
-                <AulaReader
-                  key={file.storageKey}
-                  file={file}
-                  onOpenNative={() => setMode("native")}
-                />
-              ) : (
-                <PreviewBody
-                  key={file.storageKey}
-                  file={file}
-                  fullscreen={isFullscreen}
-                />
-              )}
-            </div>
-          </div>
-        ) : null}
-      </DialogContent>
-    </Dialog>
-  );
+  // Tidak ada DOM yang dirender adapter — semua UI ada di PreviewLayer.
+  return null;
 }
 
-function PreviewHeader({
+// Header dipakai oleh PreviewLayer (bukan lagi dialog Radix) → elemen
+// HTML biasa; DialogTitle/DialogDescription diganti h2/p dengan styling
+// sama persis.
+export function PreviewHeader({
   file,
   mode,
   onSetMode,
   onResetMode,
   isFullscreen,
   onToggleFullscreen,
+  onMinimize,
 }: {
   file: CloudFileItem;
   mode: PreviewMode;
@@ -201,6 +124,7 @@ function PreviewHeader({
   onResetMode: () => void;
   isFullscreen: boolean;
   onToggleFullscreen: () => void;
+  onMinimize: () => void;
 }) {
   const enqueueDownload = useTransferStore((s) => s.enqueueDownload);
   // File MEGA mentah (mount) butuh ?name= agar server tahu nama + mimetype.
@@ -215,13 +139,15 @@ function PreviewHeader({
       }`}
     >
       <div className="min-w-0 flex-1">
-        <DialogTitle
-          className={`truncate text-base ${isFullscreen ? "text-white" : ""}`}
+        <h2
+          className={`truncate text-base font-semibold leading-none tracking-tight ${
+            isFullscreen ? "text-white" : ""
+          }`}
           title={file.name}
         >
           {file.name}
-        </DialogTitle>
-        <DialogDescription className="flex items-center gap-2 flex-wrap mt-1">
+        </h2>
+        <p className="flex items-center gap-2 flex-wrap mt-1 text-sm text-muted-foreground">
           <Badge variant="outline" className="font-mono text-[10px]">
             {file.mimetype || "tidak diketahui"}
           </Badge>
@@ -233,7 +159,7 @@ function PreviewHeader({
               · oleh {file.uploader.name}
             </span>
           ) : null}
-        </DialogDescription>
+        </p>
       </div>
       <div className="flex items-center gap-1.5 shrink-0">
         {/* Pemilih mode pratinjau */}
@@ -289,6 +215,17 @@ function PreviewHeader({
             </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
+        {/* Minimize → kartu PiP mengambang (video/audio tetap berjalan) */}
+        <Button
+          size="sm"
+          variant="outline"
+          className="gap-1.5"
+          onClick={onMinimize}
+          title="Perkecil menjadi PiP mengambang"
+        >
+          <PictureInPicture2 className="size-4" />
+          <span className="hidden sm:inline">PiP</span>
+        </Button>
         <Button
           size="sm"
           variant="outline"
@@ -687,12 +624,18 @@ function XlsxView({
           </Tabs>
         </div>
       ) : null}
-      <ScrollArea className="flex-1">
-        <div
-          className="p-4 [&_table]:w-full [&_table]:text-xs [&_table]:border-collapse [&_td]:border [&_td]:border-border [&_td]:px-2 [&_td]:py-1 [&_th]:border [&_th]:border-border [&_th]:bg-secondary [&_th]:px-2 [&_th]:py-1"
-          dangerouslySetInnerHTML={{ __html: sheets[active]?.html ?? "" }}
-        />
-      </ScrollArea>
+      {/* wrapper flex-1 min-h-0 (definite dalam frame/window preview
+          yang tingginya pasti) + ScrollArea h-full → viewport
+          ter-constrain & daftar sheet bisa di-scroll. Jangan pakai
+          `absolute` — Radix Root punya inline position:relative. */}
+      <div className="flex-1 min-h-0">
+        <ScrollArea className="h-full">
+          <div
+            className="p-4 [&_table]:w-full [&_table]:text-xs [&_table]:border-collapse [&_td]:border [&_td]:border-border [&_td]:px-2 [&_td]:py-1 [&_th]:border [&_th]:border-border [&_th]:bg-secondary [&_th]:px-2 [&_th]:py-1"
+            dangerouslySetInnerHTML={{ __html: sheets[active]?.html ?? "" }}
+          />
+        </ScrollArea>
+      </div>
     </div>
   );
 }
@@ -1156,35 +1099,40 @@ function ArchivePreview({
           <Download className="size-4" /> Unduh
         </Button>
       </div>
-      <ScrollArea className="flex-1">
-        <div className="p-2">
-          {filtered.map((e) => (
-            <div
-              key={e.path}
-              className="flex items-center gap-2 px-2 py-1.5 rounded-md hover:bg-accent/60 text-sm"
-            >
-              <FileText className="size-3.5 text-muted-foreground shrink-0" />
-              <span className="flex-1 min-w-0 truncate font-mono text-xs">
-                {e.path}
-              </span>
-              <span className="text-[11px] text-muted-foreground tabular-nums shrink-0">
-                {formatBytes(e.size)}
-              </span>
-            </div>
-          ))}
-          {hiddenCount > 0 ? (
-            <p className="text-xs text-muted-foreground p-3 text-center">
-              … {hiddenCount} file lain tidak ditampilkan. Gunakan pencarian
-              atau unduh arsipnya.
-            </p>
-          ) : null}
-          {filtered.length === 0 ? (
-            <p className="text-xs text-muted-foreground p-6 text-center">
-              Tidak ada file yang cocok dengan pencarian.
-            </p>
-          ) : null}
-        </div>
-      </ScrollArea>
+      {/* wrapper flex-1 min-h-0 + ScrollArea h-full → daftar isi arsip
+          yang panjang selalu bisa di-scroll (Radix Root inline
+          position:relative — jangan pakai class absolute). */}
+      <div className="flex-1 min-h-0">
+        <ScrollArea className="h-full">
+          <div className="p-2">
+            {filtered.map((e) => (
+              <div
+                key={e.path}
+                className="flex items-center gap-2 px-2 py-1.5 rounded-md hover:bg-accent/60 text-sm"
+              >
+                <FileText className="size-3.5 text-muted-foreground shrink-0" />
+                <span className="flex-1 min-w-0 truncate font-mono text-xs">
+                  {e.path}
+                </span>
+                <span className="text-[11px] text-muted-foreground tabular-nums shrink-0">
+                  {formatBytes(e.size)}
+                </span>
+              </div>
+            ))}
+            {hiddenCount > 0 ? (
+              <p className="text-xs text-muted-foreground p-3 text-center">
+                … {hiddenCount} file lain tidak ditampilkan. Gunakan pencarian
+                atau unduh arsipnya.
+              </p>
+            ) : null}
+            {filtered.length === 0 ? (
+              <p className="text-xs text-muted-foreground p-6 text-center">
+                Tidak ada file yang cocok dengan pencarian.
+              </p>
+            ) : null}
+          </div>
+        </ScrollArea>
+      </div>
     </div>
   );
 }

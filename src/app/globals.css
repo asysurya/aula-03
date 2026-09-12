@@ -188,3 +188,39 @@
 .pdf-night .pdf-text-layer ::selection {
   background: oklch(0.72 0.17 152 / 0.5);
 }
+
+/* ────────── Kartu PiP pratinjau (preview-layer.tsx) ──────────
+   Konten pratinjau dipakai ulang apa adanya di kartu kecil — media
+   dipaksa pas (object-fit) agar video/gambar tetap terlihat bagus
+   tanpa scroll, teks panjang di dalam kartu sendiri yang men-scroll. */
+.pip-body video,
+.pip-body img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+.pip-body iframe {
+  width: 100%;
+  height: 100%;
+}
+.pip-body audio {
+  width: 100%;
+  margin: auto;
+}
+/* Kartu PiP tingginya kecil (±214px) — batalkan min-height berbasis vh
+   milik pratinjau (min-h-[60vh] dsb.) supaya konten tidak meluber
+   keluar kartu; konten men-scroll di dalam kartu. */
+.pip-body [data-slot="scroll-area"],
+.pip-body iframe,
+.pip-body video,
+.pip-body audio,
+.pip-body img,
+.pip-body > div,
+.pip-body > div > div {
+  min-height: 0 !important;
+}
+.pip-body [data-radix-scroll-area-viewport] {
+  /* Aula Reader / pratinjau office punya wrapper scroll sendiri —
+     biarkan viewport radix mengikuti kartu, bukan konten. */
+  height: 100%;
+}

@@ -25,7 +25,7 @@ import {
 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
-import { Textarea } from "@/components/ui/textarea";
+import { AutoTextarea } from "@/components/ui/auto-textarea";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { Card } from "@/components/ui/card";
@@ -686,11 +686,11 @@ function StudentSubmissionPanel({
 
       <div className="space-y-2">
         <Label htmlFor="sub-note">Catatan (opsional)</Label>
-        <Textarea
+        <AutoTextarea
           id="sub-note"
           value={note}
           onChange={(e) => setNote(e.target.value)}
-          rows={2}
+          maxHeight={160}
           placeholder="Pesan untuk pengajar…"
         />
       </div>

@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { PasswordInput } from "@/components/ui/password-input";
 import { Label } from "@/components/ui/label";
-import { Textarea } from "@/components/ui/textarea";
+import { AutoTextarea } from "@/components/ui/auto-textarea";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { UserAvatar } from "@/components/shared/user-avatar";
@@ -236,7 +236,7 @@ export function ProfileView({ me }: { me: MeResponse }) {
             </div>
             <div className="space-y-1.5">
               <Label>Bio</Label>
-              <Textarea
+              <AutoTextarea
                 value={bio}
                 onChange={(e) => setBio(e.target.value)}
                 maxLength={240}

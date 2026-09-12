@@ -76,9 +76,30 @@ const MATERIAL_SYSTEM_PROMPT = [
   "Output HANYA isi materi (markdown), tanpa penjelasan tambahan apa pun.",
 ].join("\n");
 
+const FLASHCARDS_SYSTEM_PROMPT = [
+  "Kamu pembuat flashcard belajar dari MATERI yang diberikan.",
+  "Aturan:",
+  "- Buat 8-15 kartu yang menutup konsep PENTING materi (bukan detail sepele).",
+  "- Sisi depan: pertanyaan/istilah spesifik dan bermakna sendiri (bukan \"Apa itu X?\" untuk semua kartu — variasikan: definisi, sebab-akibat, perbandingan, proses, contoh).",
+  "- Sisi belakang: jawaban 1-3 kalimat, padat dan lengkap, bisa berdiri sendiri.",
+  "- Bahasa Indonesia. Kartu harus akurat menurut MATERI (jangan menambah fakta luar).",
+  '- Output HANYA array JSON murni: [{"front":"...","back":"..."}] — TANPA penjelasan, TANPA code fence.',
+].join("\n");
+
+const QUIZ_SYSTEM_PROMPT = [
+  "Kamu pembuat kuis latihan dari MATERI yang diberikan.",
+  "Aturan:",
+  "- Buat 8-12 soal: mayoritas pilihan ganda, boleh 2-4 soal benar/salah.",
+  '- Pilihan ganda: 4 opsi "options" (jawaban benar ikut di dalamnya, urutan ACAK), "answer" = teks opsi yang benar PERSIS, plus "explanation" = pembahasan singkat 1-2 kalimat mengapa benar (merujuk materi).',
+  '- Benar/salah: "options" = ["Benar","Salah"], "answer" = "Benar" atau "Salah", plus "explanation" singkat.',
+  "- Soal harus jelas berdiri sendiri, menguji pemahaman (bukan hafalan kata persis), akurat menurut MATERI.",
+  "- Bahasa Indonesia.",
+  '- Output HANYA array JSON murni: [{"type":"mc","question":"...","options":["A","B","C","D"],"answer":"...","explanation":"..."}] — TANPA penjelasan, TANPA code fence.',
+].join("\n");
+
 const bodySchema = z.object({
   message: z.string().trim().min(1, "Pesan tidak boleh kosong").max(8000),
-  task: z.enum(["chat", "material"]).default("chat"),
+  task: z.enum(["chat", "material", "flashcards", "quiz"]).default("chat"),
   material: z.string().max(MATERIAL_LIMIT).optional(),
   history: z
     .array(
@@ -164,18 +185,34 @@ export async function POST(req: NextRequest) {
   let system: string;
   if (task === "material") {
     system = MATERIAL_SYSTEM_PROMPT;
+  } else if (task === "flashcards") {
+    if (!mat)
+      return NextResponse.json(
+        { error: "Materi belum diisi — tempel materi dulu di kolom materi." },
+        { status: 400 }
+      );
+    system = `${FLASHCARDS_SYSTEM_PROMPT}\n\n=== MATERI ===\n${mat}`;
+  } else if (task === "quiz") {
+    if (!mat)
+      return NextResponse.json(
+        { error: "Materi belum diisi — tempel materi dulu di kolom materi." },
+        { status: 400 }
+      );
+    system = `${QUIZ_SYSTEM_PROMPT}\n\n=== MATERI ===\n${mat}`;
   } else {
     system = mat
       ? `${CHAT_SYSTEM_PROMPT}\n\n=== MATERI ===\n${mat}`
       : CHAT_SYSTEM_PROMPT;
   }
   const messages: { role: string; content: string }[] = [{ role: "system", content: system }];
-  if (task !== "material" && history?.length) {
+  if (task === "chat" && history?.length) {
     for (const h of history.slice(-HISTORY_LIMIT)) {
       messages.push({ role: h.role, content: h.content });
     }
   }
   messages.push({ role: "user", content: message });
+  // Task JSON (flashcards/quiz) tidak butuh history & jawabannya hanya
+  // JSON — cukup satu turn, user message berisi instruksi singkat.
 
   // ── Panggil provider (kompatibel OpenAI chat completions, SSE) ──
   const controller = new AbortController();
@@ -206,7 +243,8 @@ export async function POST(req: NextRequest) {
         model: config.model,
         messages,
         stream: true,
-        max_tokens: task === "material" ? 4096 : 2048,
+        max_tokens:
+          task === "chat" ? 2048 : 4096,
       }),
     });
   } catch {

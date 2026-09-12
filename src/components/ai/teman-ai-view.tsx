@@ -26,7 +26,7 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { Textarea } from "@/components/ui/textarea";
+import { AutoTextarea } from "@/components/ui/auto-textarea";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -398,7 +398,7 @@ export function TemanAiView({ me }: { me: MeResponse }) {
       {/* Input */}
       <div className="border-t border-border px-4 md:px-6 py-3 shrink-0">
         <div className="max-w-3xl mx-auto flex items-end gap-2">
-          <Textarea
+          <AutoTextarea
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={onKeyDown}
@@ -407,7 +407,7 @@ export function TemanAiView({ me }: { me: MeResponse }) {
                 ? "Tulis pertanyaanmu… (Enter kirim, Shift+Enter baris baru)"
                 : "Pasang API key dulu di Pengaturan untuk mulai mengobrol…"
             }
-            rows={1}
+            maxHeight={160}
             className="max-h-40 min-h-[44px] resize-none"
           />
           {streaming ? (

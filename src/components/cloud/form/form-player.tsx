@@ -38,7 +38,7 @@ import {
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Textarea } from "@/components/ui/textarea";
+import { AutoTextarea } from "@/components/ui/auto-textarea";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { uploadSmart } from "@/lib/upload-client";
@@ -2014,10 +2014,10 @@ function QuestionCard({
       {q.type === "ESSAY" ? (
         <div className="space-y-1.5" {...handlers}>
           <Label>Jawaban esai</Label>
-          <Textarea
+          <AutoTextarea
             value={answer?.text ?? ""}
             onChange={(e) => onText(e.target.value)}
-            rows={6}
+            maxHeight={240}
             maxLength={8000}
             placeholder="Tulis jawabanmu di sini…"
           />

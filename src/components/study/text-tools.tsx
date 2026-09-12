@@ -26,6 +26,7 @@ import {
   Layers,
   ListChecks,
   ListTree,
+  Loader2,
   Pause,
   Play,
   RotateCcw,
@@ -47,11 +48,10 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card"
-import { Input } from "@/components/ui/input"
 import { Progress } from "@/components/ui/progress"
 import { Slider } from "@/components/ui/slider"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
-import { Textarea } from "@/components/ui/textarea"
+import { AutoTextarea } from "@/components/ui/auto-textarea"
 import { loadJSON, saveJSON } from "@/lib/study/store"
 import { useStudyMaterial } from "@/lib/study/use-study-material"
 import { MaterialAiDialog } from "@/components/study/material-ai-dialog"
@@ -72,14 +72,173 @@ import { cn } from "@/lib/utils"
 const QUIZ_LAST_KEY = "aula-study:quiz-last"
 
 // Tipe turunan dari fungsi analisis murni (tanpa duplikasi definisi).
-type FlashcardType = ReturnType<typeof generateFlashcards>[number]
-type QuizItemType = ReturnType<typeof generateQuiz>[number]
+type FlashcardType = { front: string; back: string }
 type OutlineNodeType = ReturnType<typeof buildOutline>[number]
 type QuizLastScore = { score: number; total: number; at: number }
+
+/** Satu soal kuis — mendukung 3 bentuk:
+ *  - "mc"   : pilihan ganda (AI) — options 4 pilihan + explanation
+ *  - "fill" : isian offline → dikonversi jadi pilihan ganda lokal
+ *  - "tf"   : benar / salah (+ explanation bila dari AI) */
+interface QuizItem {
+  type: "mc" | "fill" | "tf"
+  question: string
+  answer: string
+  options?: string[]
+  distractors?: string[]
+  explanation?: string
+}
 
 /** Pesan warning bila materi belum cukup panjang untuk diproses. */
 const TOO_SHORT_MESSAGE =
   "Materi terlalu pendek — tempel minimal beberapa paragraf (±200 karakter)."
+
+// ── AI helpers (route /api/ai/study, task flashcards/quiz) ──
+
+/** Panggil route study AI & kumpulkan seluruh jawaban streaming jadi string. */
+async function callStudyAi(
+  task: "flashcards" | "quiz",
+  material: string
+): Promise<string> {
+  const res = await fetch("/api/ai/study", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      message:
+        task === "flashcards"
+          ? "Buat flashcard dari MATERI di atas."
+          : "Buat kuis latihan dari MATERI di atas.",
+      task,
+      material,
+    }),
+  })
+  if (!res.ok) {
+    let msg = `Gagal memanggil AI (HTTP ${res.status}).`
+    try {
+      const j = (await res.json()) as { error?: string }
+      if (j.error) msg = j.error
+    } catch {
+      /* abaikan */
+    }
+    throw new Error(msg)
+  }
+  // NDJSON: kumpulkan chunk
+  const reader = res.body?.getReader()
+  if (!reader) throw new Error("Respons AI tidak bisa dibaca.")
+  const decoder = new TextDecoder()
+  let buf = ""
+  let full = ""
+  let errFromStream: string | null = null
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+    buf += decoder.decode(value, { stream: true })
+    const lines = buf.split("\n")
+    buf = lines.pop() ?? ""
+    for (const line of lines) {
+      const t = line.trim()
+      if (!t) continue
+      try {
+        const j = JSON.parse(t) as {
+          type?: string
+          text?: string
+          message?: string
+        }
+        if (j.type === "chunk" && j.text) full += j.text
+        else if (j.type === "error" && j.message) errFromStream = j.message
+      } catch {
+        /* baris rusak — abaikan */
+      }
+    }
+  }
+  if (errFromStream) throw new Error(errFromStream)
+  if (!full.trim()) throw new Error("AI tidak mengirim jawaban.")
+  return full
+}
+
+/** Ambil array JSON dari teks AI yang mungkin berisi fence/kalimat pengantar. */
+function extractJsonArray(text: string): unknown[] | null {
+  const stripped = text.replace(/```(?:json)?/gi, "")
+  const start = stripped.indexOf("[")
+  const end = stripped.lastIndexOf("]")
+  if (start === -1 || end <= start) return null
+  try {
+    const parsed = JSON.parse(stripped.slice(start, end + 1))
+    return Array.isArray(parsed) ? parsed : null
+  } catch {
+    return null
+  }
+}
+
+/** Validasi & normalisasi hasil flashcard AI. */
+function parseAiFlashcards(
+  raw: unknown[]
+): { front: string; back: string }[] | null {
+  const out: { front: string; back: string }[] = []
+  for (const r of raw) {
+    if (!r || typeof r !== "object") continue
+    const front = String((r as Record<string, unknown>).front ?? "").trim()
+    const back = String((r as Record<string, unknown>).back ?? "").trim()
+    if (front && back) out.push({ front, back })
+  }
+  return out.length >= 3 ? out : null
+}
+
+/** Validasi & normalisasi hasil kuis AI → bentuk pilihan ganda / tf. */
+function parseAiQuiz(raw: unknown[]): QuizItem[] | null {
+  const out: QuizItem[] = []
+  for (const r of raw) {
+    if (!r || typeof r !== "object") continue
+    const o = r as Record<string, unknown>
+    const question = String(o.question ?? "").trim()
+    const answer = String(o.answer ?? "").trim()
+    if (!question || !answer) continue
+    const explanation =
+      typeof o.explanation === "string" && o.explanation.trim()
+        ? o.explanation.trim()
+        : undefined
+    if (answer === "Benar" || answer === "Salah") {
+      out.push({ type: "tf", question, answer, explanation })
+      continue
+    }
+    const options = Array.isArray(o.options)
+      ? o.options.map((x) => String(x).trim()).filter(Boolean)
+      : []
+    // Jawaban harus persis salah satu opsi (AI kadang melenceng sedikit
+    // — coba cocokkan case-insensitive).
+    const match =
+      options.find((x) => x === answer) ??
+      options.find((x) => x.toLowerCase() === answer.toLowerCase())
+    if (options.length >= 2 && match) {
+      out.push({ type: "mc", question, answer: match, options, explanation })
+    }
+  }
+  return out.length >= 3 ? out : null
+}
+
+/** Acak urutan (Fisher-Yates) — dipakai untuk opsi jawaban offline. */
+function shuffled<T>(arr: T[]): T[] {
+  const a = [...arr]
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1))
+    ;[a[i], a[j]] = [a[j], a[i]]
+  }
+  return a
+}
+
+/** Kuis offline → opsi pilihan ganda (jawaban + distraktor lokal). */
+function offlineQuizToOptions(items: QuizItem[]): QuizItem[] {
+  return items.map((q) => {
+    if (q.type === "tf") return { ...q, options: ["Benar", "Salah"] }
+    const distractors = (q.distractors ?? []).filter(
+      (d) => d.toLowerCase() !== q.answer.toLowerCase()
+    )
+    return {
+      ...q,
+      options: shuffled([q.answer, ...distractors.slice(0, 3)]),
+    }
+  })
+}
 
 /** Kartu placeholder sebelum pengguna menekan tombol generate. */
 function TabHint({ text }: { text: string }) {
@@ -115,13 +274,20 @@ export function TextTools() {
 
   // ── Flashcard ──
   const [deck, setDeck] = React.useState<FlashcardType[] | null>(null)
+  const [deckSource, setDeckSource] = React.useState<"ai" | "offline" | null>(
+    null
+  )
+  const [deckLoading, setDeckLoading] = React.useState(false)
   const [cardIndex, setCardIndex] = React.useState(0)
   const [flipped, setFlipped] = React.useState(false)
 
   // ── Kuis ──
-  const [quiz, setQuiz] = React.useState<QuizItemType[] | null>(null)
+  const [quiz, setQuiz] = React.useState<QuizItem[] | null>(null)
+  const [quizSource, setQuizSource] = React.useState<"ai" | "offline" | null>(
+    null
+  )
+  const [quizLoading, setQuizLoading] = React.useState(false)
   const [quizIndex, setQuizIndex] = React.useState(0)
-  const [quizInput, setQuizInput] = React.useState("")
   const [quizResult, setQuizResult] = React.useState<boolean | null>(null)
   const [quizScore, setQuizScore] = React.useState(0)
   const [quizWrong, setQuizWrong] = React.useState(0)
@@ -366,11 +532,40 @@ export function TextTools() {
   }
 
   // ── FLASHCARD ──
-  const buildDeck = () => {
-    if (!requireEnoughMaterial()) return
-    setDeck(generateFlashcards(material))
+  const resetDeck = (cards: FlashcardType[], source: "ai" | "offline") => {
+    setDeck(cards)
+    setDeckSource(source)
     setCardIndex(0)
     setFlipped(false)
+  }
+
+  const buildDeckOffline = () => {
+    resetDeck(generateFlashcards(material), "offline")
+  }
+
+  const buildDeck = async () => {
+    if (!requireEnoughMaterial()) return
+    // Tanpa AI → langsung pembuat offline.
+    if (!aiActive) {
+      buildDeckOffline()
+      return
+    }
+    setDeckLoading(true)
+    try {
+      const raw = await callStudyAi("flashcards", material)
+      const parsed = parseAiFlashcards(extractJsonArray(raw) ?? [])
+      if (!parsed) throw new Error("Format jawaban AI tidak dikenali.")
+      resetDeck(parsed, "ai")
+      toast.success(`${parsed.length} kartu dibuat oleh AI dari materimu.`)
+    } catch (e) {
+      toast.warning(
+        `AI gagal (${e instanceof Error ? e.message : "tidak diketahui"}) — memakai pembuat offline.`,
+        { duration: 6000 }
+      )
+      buildDeckOffline()
+    } finally {
+      setDeckLoading(false)
+    }
   }
 
   const shuffleDeck = () => {
@@ -392,15 +587,42 @@ export function TextTools() {
   }
 
   // ── KUIS ──
-  const buildQuiz = () => {
-    if (!requireEnoughMaterial()) return
-    setQuiz(generateQuiz(material))
+  const resetQuiz = (items: QuizItem[], source: "ai" | "offline") => {
+    setQuiz(items)
+    setQuizSource(source)
     setQuizIndex(0)
-    setQuizInput("")
     setQuizResult(null)
     setQuizScore(0)
     setQuizWrong(0)
     setQuizFinished(false)
+  }
+
+  const buildQuizOffline = () => {
+    resetQuiz(offlineQuizToOptions(generateQuiz(material)), "offline")
+  }
+
+  const buildQuiz = async () => {
+    if (!requireEnoughMaterial()) return
+    if (!aiActive) {
+      buildQuizOffline()
+      return
+    }
+    setQuizLoading(true)
+    try {
+      const raw = await callStudyAi("quiz", material)
+      const parsed = parseAiQuiz(extractJsonArray(raw) ?? [])
+      if (!parsed) throw new Error("Format jawaban AI tidak dikenali.")
+      resetQuiz(parsed, "ai")
+      toast.success(`${parsed.length} soal disusun oleh AI dari materimu.`)
+    } catch (e) {
+      toast.warning(
+        `AI gagal (${e instanceof Error ? e.message : "tidak diketahui"}) — memakai pembuat offline.`,
+        { duration: 6000 }
+      )
+      buildQuizOffline()
+    } finally {
+      setQuizLoading(false)
+    }
   }
 
   const finishQuiz = () => {
@@ -416,33 +638,24 @@ export function TextTools() {
     saveJSON(QUIZ_LAST_KEY, last)
   }
 
-  const checkFillAnswer = () => {
+  const answerChoice = (choice: string) => {
     if (!quiz || quizResult !== null) return
     const item = quiz[quizIndex]
-    if (!item || item.type !== "fill") return
-    // Hanya jawaban asli yang diterima (lowercase + trim), distraktor tidak.
-    const correct =
-      quizInput.trim().toLowerCase() === item.answer.trim().toLowerCase()
-    setQuizResult(correct)
-    if (correct) setQuizScore((s) => s + 1)
-    else setQuizWrong((w) => w + 1)
-  }
-
-  const answerTrueFalse = (choice: "Benar" | "Salah") => {
-    if (!quiz || quizResult !== null) return
-    const item = quiz[quizIndex]
-    if (!item || item.type !== "tf") return
+    if (!item) return
     const correct = choice === item.answer
     setQuizResult(correct)
     if (correct) setQuizScore((s) => s + 1)
     else setQuizWrong((w) => w + 1)
   }
 
+  const answerTrueFalse = (choice: "Benar" | "Salah") => {
+    answerChoice(choice)
+  }
+
   const nextQuiz = () => {
     if (!quiz) return
     if (quizIndex + 1 < quiz.length) {
       setQuizIndex((i) => i + 1)
-      setQuizInput("")
       setQuizResult(null)
     } else {
       finishQuiz()
@@ -485,11 +698,11 @@ export function TextTools() {
       <CardContent className="flex flex-col gap-4">
         {/* ── 1. Textarea materi bersama ── */}
         <div className="flex flex-col gap-2">
-          <Textarea
+          <AutoTextarea
             value={material}
             onChange={(e) => setMaterial(e.target.value)}
             placeholder="Tempel atau tulis materi di sini… atau minta AI membuatnya — tersinkron dengan tab Teman AI (minimal ±200 karakter agar fitur aktif)"
-            className="min-h-36 resize-y text-sm leading-relaxed"
+            className="min-h-36 text-sm leading-relaxed" maxHeight={Math.round(window.innerHeight * 0.4)}
           />
           <div className="flex flex-wrap items-center justify-between gap-2">
             <p className="text-xs text-muted-foreground">
@@ -621,14 +834,47 @@ export function TextTools() {
           {/* ── TAB: FLASHCARD ── */}
           <TabsContent value="flashcard" className="flex flex-col gap-4">
             <div className="flex flex-col gap-3 rounded-lg border p-3 sm:flex-row sm:items-center sm:justify-between">
-              <p className="text-sm text-muted-foreground">
-                Kartu dibuat otomatis dari definisi, kata kunci tersamar, dan
-                istilah penting.
-              </p>
-              <Button onClick={buildDeck} type="button" className="shrink-0">
-                <Layers />
-                Buat Flashcard
-              </Button>
+              <div className="flex flex-col gap-0.5">
+                <p className="text-sm text-muted-foreground">
+                  {aiActive
+                    ? "AI menyusun kartu bermakna dari materi (fallback offline bila gagal)."
+                    : "Kartu dibuat otomatis di perangkat dari definisi & istilah penting."}
+                </p>
+                {deck && deckSource ? (
+                  <p className="text-xs text-muted-foreground">
+                    Deck aktif:{" "}
+                    <span className="font-medium text-foreground">
+                      {deck.length} kartu
+                    </span>{" "}
+                    · dibuat{" "}
+                    {deckSource === "ai" ? "oleh AI" : "offline di perangkat"}
+                  </p>
+                ) : null}
+              </div>
+              <div className="flex shrink-0 gap-2">
+                {aiActive ? (
+                  <Button variant="outline" onClick={buildDeckOffline} type="button">
+                    <Layers />
+                    Offline
+                  </Button>
+                ) : null}
+                <Button
+                  onClick={() => void buildDeck()}
+                  disabled={deckLoading}
+                  type="button"
+                >
+                  {deckLoading ? (
+                    <Loader2 className="animate-spin" />
+                  ) : (
+                    <Sparkles />
+                  )}
+                  {deckLoading
+                    ? "AI menyusun…"
+                    : aiActive
+                      ? "Buat dengan AI"
+                      : "Buat Flashcard"}
+                </Button>
+              </div>
             </div>
 
             {deck === null ? (
@@ -732,7 +978,9 @@ export function TextTools() {
             <div className="flex flex-col gap-3 rounded-lg border p-3 sm:flex-row sm:items-center sm:justify-between">
               <div className="flex flex-col gap-0.5">
                 <p className="text-sm text-muted-foreground">
-                  Soal isian & benar-salah dari isi materi.
+                  {aiActive
+                    ? "AI menyusun soal pilihan ganda + pembahasan dari materi."
+                    : "Soal pilihan ganda & benar-salah disusun di perangkat."}
                 </p>
                 {/* Ringkasan skor terakhir (persist aula-study:quiz-last) */}
                 {quizLast && (
@@ -751,11 +999,41 @@ export function TextTools() {
                     })}
                   </p>
                 )}
+                {quiz && quizSource ? (
+                  <p className="text-xs text-muted-foreground">
+                    Kuis aktif:{" "}
+                    <span className="font-medium text-foreground">
+                      {quiz.length} soal
+                    </span>{" "}
+                    · disusun{" "}
+                    {quizSource === "ai" ? "oleh AI" : "offline di perangkat"}
+                  </p>
+                ) : null}
               </div>
-              <Button onClick={buildQuiz} type="button" className="shrink-0">
-                <ListChecks />
-                Buat Kuis
-              </Button>
+              <div className="flex shrink-0 gap-2">
+                {aiActive ? (
+                  <Button variant="outline" onClick={buildQuizOffline} type="button">
+                    <ListChecks />
+                    Offline
+                  </Button>
+                ) : null}
+                <Button
+                  onClick={() => void buildQuiz()}
+                  disabled={quizLoading}
+                  type="button"
+                >
+                  {quizLoading ? (
+                    <Loader2 className="animate-spin" />
+                  ) : (
+                    <Sparkles />
+                  )}
+                  {quizLoading
+                    ? "AI menyusun…"
+                    : aiActive
+                      ? "Buat dengan AI"
+                      : "Buat Kuis"}
+                </Button>
+              </div>
             </div>
 
             {quiz === null ? (
@@ -799,58 +1077,71 @@ export function TextTools() {
 
                 <div className="flex flex-col gap-4 rounded-lg border p-4">
                   <Badge variant="secondary" className="w-fit">
-                    {currentQuizItem?.type === "fill"
-                      ? "Isian"
-                      : "Benar / Salah"}
+                    {currentQuizItem?.type === "tf"
+                      ? "Benar / Salah"
+                      : currentQuizItem?.type === "fill"
+                        ? "Isian — pilih jawaban"
+                        : "Pilihan Ganda"}
                   </Badge>
                   <p className="text-sm leading-relaxed font-medium">
                     {currentQuizItem?.question}
                   </p>
 
-                  {currentQuizItem?.type === "fill" ? (
-                    <form
-                      className="flex flex-col gap-2 sm:flex-row"
-                      onSubmit={(e) => {
-                        e.preventDefault()
-                        checkFillAnswer()
-                      }}
-                    >
-                      <Input
-                        value={quizInput}
-                        onChange={(e) => setQuizInput(e.target.value)}
-                        disabled={quizResult !== null}
-                        placeholder="Tulis jawabanmu…"
-                        className="flex-1"
-                        autoComplete="off"
-                      />
-                      <Button
-                        type="submit"
-                        size="sm"
-                        disabled={quizResult !== null || !quizInput.trim()}
-                      >
-                        Periksa
-                      </Button>
-                    </form>
-                  ) : (
-                    <div className="flex flex-wrap gap-2">
-                      <Button
-                        variant="outline"
-                        onClick={() => answerTrueFalse("Benar")}
-                        disabled={quizResult !== null}
-                        type="button"
-                      >
-                        Benar
-                      </Button>
-                      <Button
-                        variant="outline"
-                        onClick={() => answerTrueFalse("Salah")}
-                        disabled={quizResult !== null}
-                        type="button"
-                      >
-                        Salah
-                      </Button>
-                    </div>
-                  )}
+                  {/* Opsi jawaban — mc & fill sama-sama tombol pilihan
+                      (fill offline dikonversi jadi pilihan lokal), tf
+                      tombol Benar/Salah. */}
+                  <div className="flex flex-col gap-2">
+                    {(currentQuizItem?.type === "mc" ||
+                      currentQuizItem?.type === "fill") &&
+                      currentQuizItem.options?.map((opt) => {
+                        const isPicked = quizResult !== null
+                        const isRight = opt === currentQuizItem.answer
+                        return (
+                          <Button
+                            key={opt}
+                            variant="outline"
+                            className="h-auto justify-start whitespace-normal py-2.5 text-left"
+                            onClick={() => answerChoice(opt)}
+                            disabled={isPicked}
+                            type="button"
+                          >
+                            <span
+                              className={cn(
+                                "mr-1 inline-flex size-5 shrink-0 items-center justify-center rounded-full border text-[10px] font-semibold",
+                                isPicked && isRight
+                                  ? "border-emerald-500 bg-emerald-500 text-white"
+                                  : "text-muted-foreground"
+                              )}
+                            >
+                              {isPicked && isRight ? (
+                                <Check className="size-3" />
+                              ) : null}
+                            </span>
+                            {opt}
+                          </Button>
+                        )
+                      })}
+                    {currentQuizItem?.type === "tf" ? (
+                      <div className="flex flex-wrap gap-2">
+                        <Button
+                          variant="outline"
+                          onClick={() => answerTrueFalse("Benar")}
+                          disabled={quizResult !== null}
+                          type="button"
+                        >
+                          Benar
+                        </Button>
+                        <Button
+                          variant="outline"
+                          onClick={() => answerTrueFalse("Salah")}
+                          disabled={quizResult !== null}
+                          type="button"
+                        >
+                          Salah
+                        </Button>
+                      </div>
+                    ) : null}
+                  </div>
 
                   {/* Feedback setelah menjawab */}
                   {quizResult !== null && currentQuizItem && (
@@ -881,6 +1172,12 @@ export function TextTools() {
                           </span>
                         </p>
                       )}
+                      {currentQuizItem.explanation ? (
+                        <p className="leading-relaxed">
+                          <span className="font-medium">Pembahasan:</span>{" "}
+                          {currentQuizItem.explanation}
+                        </p>
+                      ) : null}
                       <Button
                         size="sm"
                         variant="outline"

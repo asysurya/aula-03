@@ -70,7 +70,7 @@ export function TransferManagerButton() {
           ) : null}
         </Button>
       </DialogTrigger>
-      <DialogContent className="sm:max-w-lg max-h-[85vh] flex flex-col p-0 gap-0 overflow-hidden">
+      <DialogContent className="sm:max-w-lg h-[85vh] flex flex-col p-0 gap-0 overflow-hidden">
         <DialogHeader className="px-4 py-3 border-b border-border">
           <DialogTitle className="flex items-center gap-2 text-base">
             <ArrowUpDown className="size-4" /> Manajer Transfer
@@ -132,24 +132,32 @@ function TransferList() {
         ) : null}
       </div>
 
-      <ScrollArea className="flex-1 min-h-0">
-        {filtered.length === 0 ? (
-          <div className="p-10 text-center">
-            <ArrowUpDown className="size-10 mx-auto text-muted-foreground/40 mb-3" />
-            <p className="text-sm font-medium">Tidak ada transfer</p>
-            <p className="text-xs text-muted-foreground mt-1">
-              Unggah file atau unduh dari pratinjau — prosesnya muncul di sini
-              dan berjalan di latar belakang.
-            </p>
-          </div>
-        ) : (
-          <div className="p-2 space-y-1.5">
-            {filtered.map((j) => (
-              <TransferRow key={j.id} job={j} />
-            ))}
-          </div>
-        )}
-      </ScrollArea>
+      {/* CATATAN FIX SCROLL: Radix ScrollArea Root punya inline style
+          `position: relative` bawaan — class `absolute inset-0` TIDAK
+          bisa menimpanya (inline selalu menang). Solusi yang benar:
+          wrapper `flex-1 min-h-0` (tinggi definite dari sisa ruang flex
+          saat dialog terbatas max-h) + ScrollArea `h-full` — viewport
+          (size-full) lalu ter-constrain dan daftar bisa di-scroll. */}
+      <div className="flex-1 min-h-0">
+        <ScrollArea className="h-full">
+          {filtered.length === 0 ? (
+            <div className="p-10 text-center">
+              <ArrowUpDown className="size-10 mx-auto text-muted-foreground/40 mb-3" />
+              <p className="text-sm font-medium">Tidak ada transfer</p>
+              <p className="text-xs text-muted-foreground mt-1">
+                Unggah file atau unduh dari pratinjau — prosesnya muncul di sini
+                dan berjalan di latar belakang.
+              </p>
+            </div>
+          ) : (
+            <div className="p-2 space-y-1.5">
+              {filtered.map((j) => (
+                <TransferRow key={j.id} job={j} />
+              ))}
+            </div>
+          )}
+        </ScrollArea>
+      </div>
     </div>
   );
 }
