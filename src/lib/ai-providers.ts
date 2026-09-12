@@ -181,6 +181,38 @@ export function maskKey(key: string | null | undefined): string | null {
   return `${key.slice(0, 3)}…${key.slice(-4)}`;
 }
 
+/**
+ * Pesan error provider dalam Bahasa Indonesia untuk status HTTP upstream —
+ * dipakai bersama oleh /api/ai/chat (Teman AI) dan /api/ai/study (Pusat
+ * Belajar) agar pengalamannya konsisten.
+ */
+export function providerErrorMessage(status: number, detailRaw: string | null): string {
+  const detail = cleanUpstreamDetail(detailRaw);
+  if (status === 401 || status === 403) {
+    return "API key tidak valid/ditolak provider. Periksa kunci API di pengaturan Teman AI" +
+      (detail ? ` (${detail.slice(0, 160)})` : "") +
+      ".";
+  }
+  if (status === 429) {
+    return (
+      "Model sedang kena limit (429) — API key kamu tidak bermasalah. " +
+      "Model berakhiran ‘:free’ berbagi kuota publik yang sering penuh; " +
+      "tunggu beberapa menit, atau ganti ke model lain di pengaturan (mis. tanpa ‘:free’)." +
+      (detail ? ` (${detail.slice(0, 160)})` : "")
+    );
+  }
+  if (status === 402) {
+    return "Kredit provider tidak cukup (402). Tambah kredit akun provider, atau pilih model gratis (:free) di pengaturan.";
+  }
+  if (status === 404) {
+    return "Endpoint/model tidak ditemukan di provider (404). Periksa Base URL dan nama model di pengaturan.";
+  }
+  if (detail && /location is not supported|blokir wilayah/i.test(detail)) {
+    return "Model ini menolak permintaan dari lokasi server (pembatasan wilayah provider). Ganti ke model lain di pengaturan — API key kamu tidak bermasalah.";
+  }
+  return `Provider AI menjawab error (HTTP ${status})${detail ? `: ${detail.slice(0, 160)}` : ""}.`;
+}
+
 /** Label Indonesia untuk id provider (aman utk id tak dikenal). */
 export function providerLabel(provider: string | null | undefined): string {
   if (!provider) return "—";

@@ -227,11 +227,15 @@ export function TemanAiView({ me }: { me: MeResponse }) {
 
   async function clearHistory() {
     setConfirmClear(false);
+    // Hentikan dulu jawaban yang masih mengalir — tanpa ini server akan
+    // menyimpan potongan jawaban SETELAH riwayat dihapus, sehingga pesan lama
+    // "muncul lagi" setelah dimuat ulang (ingatan seolah tidak terhapus).
+    abortRef.current?.abort();
     try {
       const res = await fetch("/api/ai/history", { method: "DELETE" });
       if (!res.ok) throw new Error();
       setMessages([]);
-      toast.success("Riwayat Teman AI dibersihkan.");
+      toast.success("Riwayat & ingatan Teman AI dihapus.");
     } catch {
       toast.error("Gagal membersihkan riwayat.");
     }
@@ -288,8 +292,8 @@ export function TemanAiView({ me }: { me: MeResponse }) {
           size="icon"
           className="h-8 w-8 text-muted-foreground hover:text-destructive"
           onClick={() => setConfirmClear(true)}
-          title="Bersihkan riwayat"
-          aria-label="Bersihkan riwayat"
+          title="Hapus riwayat & ingatan"
+          aria-label="Hapus riwayat & ingatan"
           disabled={messages.length === 0}
         >
           <Trash2 className="h-4 w-4" />
@@ -448,10 +452,11 @@ export function TemanAiView({ me }: { me: MeResponse }) {
       <AlertDialog open={confirmClear} onOpenChange={setConfirmClear}>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Bersihkan seluruh riwayat Teman AI?</AlertDialogTitle>
+            <AlertDialogTitle>Hapus riwayat & ingatan Teman AI?</AlertDialogTitle>
             <AlertDialogDescription>
-              Semua percakapanmu dengan Teman AI akan dihapus permanen.
-              Tindakan ini tidak bisa dibatalkan.
+              Seluruh percakapanmu dengan Teman AI akan dihapus permanen —
+              termasuk ingatannya tentang obrolanmu sebelumnya, sehingga AI
+              mulai benar-benar dari awal. Tindakan ini tidak bisa dibatalkan.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
@@ -461,7 +466,7 @@ export function TemanAiView({ me }: { me: MeResponse }) {
               className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
             >
               {streaming ? <Loader2 className="h-4 w-4 animate-spin mr-1.5" /> : null}
-              Bersihkan
+              Hapus permanen
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
