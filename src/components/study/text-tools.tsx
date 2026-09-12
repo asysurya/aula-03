@@ -33,6 +33,7 @@ import {
   Sparkles,
   Square,
   Volume2,
+  Wand2,
   X,
 } from "lucide-react"
 import { toast } from "sonner"
@@ -52,6 +53,9 @@ import { Slider } from "@/components/ui/slider"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Textarea } from "@/components/ui/textarea"
 import { loadJSON, saveJSON } from "@/lib/study/store"
+import { useStudyMaterial } from "@/lib/study/use-study-material"
+import { MaterialAiDialog } from "@/components/study/material-ai-dialog"
+import { fetchAiSettings } from "@/components/ai/ai-settings-dialog"
 import {
   buildOutline,
   extractKeywords,
@@ -63,7 +67,8 @@ import {
 import { cn } from "@/lib/utils"
 
 // ── Kunci penyimpanan lokal ──
-const MATERIAL_KEY = "aula-study:material"
+// (Materi kini SATU sumber bersama via useStudyMaterial — key
+// "aula-study:material" — sinkron dengan tab Teman AI.)
 const QUIZ_LAST_KEY = "aula-study:quiz-last"
 
 // Tipe turunan dari fungsi analisis murni (tanpa duplikasi definisi).
@@ -89,10 +94,17 @@ function TabHint({ text }: { text: string }) {
 // Komponen utama
 // ─────────────────────────────────────────────────────────────────────────────
 export function TextTools() {
-  // ── Materi bersama (dipakai semua tab) ──
-  const [material, setMaterial] = React.useState("")
-  const [loaded, setLoaded] = React.useState(false) // sudah load dari localStorage?
+  // ── Materi bersama (dipakai semua tab + Teman AI — SATU sumber) ──
+  const { material, setMaterial } = useStudyMaterial()
   const [tab, setTab] = React.useState("rangkum")
+
+  // ── AI tersedia? (untuk tombol "Buat dengan AI") ──
+  const [aiActive, setAiActive] = React.useState(false)
+  const [genOpen, setGenOpen] = React.useState(false)
+
+  React.useEffect(() => {
+    void fetchAiSettings().then((d) => setAiActive(!!d?.active))
+  }, [])
 
   // ── Rangkum ──
   const [summaryCount, setSummaryCount] = React.useState(5)
@@ -141,17 +153,8 @@ export function TextTools() {
 
   // ── Load data tersimpan (hanya di client, aman untuk SSR) ──
   React.useEffect(() => {
-    setMaterial(loadJSON<string>(MATERIAL_KEY, ""))
     setQuizLast(loadJSON<QuizLastScore | null>(QUIZ_LAST_KEY, null))
-    setLoaded(true)
   }, [])
-
-  // ── Autosave materi, debounce 500ms ──
-  React.useEffect(() => {
-    if (!loaded) return
-    const timer = setTimeout(() => saveJSON(MATERIAL_KEY, material), 500)
-    return () => clearTimeout(timer)
-  }, [material, loaded])
 
   // ── Statistik materi ──
   const stats = React.useMemo(() => {
@@ -183,7 +186,7 @@ export function TextTools() {
         toast.warning("Clipboard kosong — salin teks materi terlebih dulu.")
         return
       }
-      setMaterial((prev) => (prev.trim() ? `${prev}\n\n${text}` : text))
+      setMaterial(material.trim() ? `${material}\n\n${text}` : text)
       toast.success("Materi ditempel dari clipboard.")
     } catch {
       toast.error(
@@ -473,8 +476,9 @@ export function TextTools() {
           Alat Materi
         </CardTitle>
         <CardDescription>
-          Tempel materi pelajaran sekali — rangkuman, flashcard, kuis, peta
-          konsep, dan pembaca suara dibuat otomatis di perangkat Anda.
+          Satu materi untuk semua — kolom di bawah tersinkron dengan tab Teman
+          AI (dan sebaliknya). Rangkuman, flashcard, kuis, peta konsep, dan
+          pembaca suara dibuat otomatis di perangkat Anda.
         </CardDescription>
       </CardHeader>
 
@@ -484,15 +488,27 @@ export function TextTools() {
           <Textarea
             value={material}
             onChange={(e) => setMaterial(e.target.value)}
-            placeholder="Tempel atau tulis materi di sini… (minimal ±200 karakter agar fitur aktif)"
+            placeholder="Tempel atau tulis materi di sini… atau minta AI membuatnya — tersinkron dengan tab Teman AI (minimal ±200 karakter agar fitur aktif)"
             className="min-h-36 resize-y text-sm leading-relaxed"
           />
           <div className="flex flex-wrap items-center justify-between gap-2">
             <p className="text-xs text-muted-foreground">
               {stats.words} kata · {stats.sentences} kalimat ·{" "}
-              {stats.chars} karakter · tersimpan otomatis
+              {stats.chars} karakter · tersimpan otomatis ·{" "}
+              <span className="font-medium text-foreground">sync dengan Teman AI</span>
             </p>
             <div className="flex flex-wrap gap-2">
+              <Button
+                variant="default"
+                size="sm"
+                onClick={() => setGenOpen(true)}
+                disabled={!aiActive}
+                title={aiActive ? "Minta AI membuat materi" : "Belum ada AI terpasang — atur di tab Teman AI"}
+                type="button"
+              >
+                <Wand2 />
+                Buat dengan AI
+              </Button>
               <Button
                 variant="outline"
                 size="sm"
@@ -500,7 +516,7 @@ export function TextTools() {
                 type="button"
               >
                 <ClipboardPaste />
-                Tempel dari clipboard
+                Tempel
               </Button>
               <Button
                 variant="ghost"
@@ -1038,6 +1054,17 @@ export function TextTools() {
           </TabsContent>
         </Tabs>
       </CardContent>
+
+      {/* Buat materi dengan AI — hasilnya langsung masuk kolom materi
+          (tersinkron ke tab Teman AI). */}
+      <MaterialAiDialog
+        open={genOpen}
+        onOpenChange={setGenOpen}
+        hasExisting={material.trim().length > 0}
+        currentMaterial={material}
+        setMaterial={setMaterial}
+        disabled={!aiActive}
+      />
     </Card>
   )
 }

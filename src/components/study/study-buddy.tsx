@@ -2,95 +2,83 @@
 
 // src/components/study/study-buddy.tsx
 //
-// "Teman Belajar AI" — asisten tanya-jawab materi, satu layar.
+// "Teman Belajar AI" (tab Teman AI di Pusat Belajar) — tanya-jawab
+// materi dengan konteks MATERI bersama.
 //
-// Arsitektur anti-biaya (deploy di Vercel milik user, TIDAK ada server AI):
-//   1. MODE LOKAL (default): jawaban disusun mesin lokal di browser
-//      (src/lib/study/local-ai.ts) — gratis, tanpa limit, tanpa internet.
-//   2. BYOK (bring your own key): user menempel API key miliknya sendiri
-//      (Gemini / OpenAI-compatible seperti OpenRouter). Key HANYA disimpan di
-//      localStorage browser user, dan panggilan API dilakukan LANGSUNG dari
-//      browser ke provider — tidak melewati server aplikasi sama sekali.
-//   3. FALLBACK: bila provider eksternal error/timeout/non-OK, jawaban
-//      otomatis dialihkan ke mesin lokal (dengan prefix "(mode lokal)").
+// Perubahan arsitektur besar (menyusul masukan user):
+//   1. Provider AI kini SAMA dengan Teman AI di menu utama — diprokses
+//      server lewat /api/ai/study: kunci sendiri (BYOK, terenkripsi di
+//      server) → default admin → preset custom. Tidak ada lagi panggilan
+//      langsung dari browser dengan key di localStorage, dan tidak ada
+//      lagi "mode lokal" yang mengarang jawaban.
+//   2. Kolom materi memakai useStudyMaterial — SATU sumber bersama dengan
+//      tab Alat Materi (sinkron real-time dua arah), plus tombol "Buat
+//      dengan AI" yang hasilnya langsung masuk ke kolom materi.
 //
+// Persistensi chat: localStorage "aula-study:buddy-chat" (maks 100).
 // Kontrak ekspor: `export function StudyBuddy()` — dipanggil study-hub.tsx.
-// Persistensi via "@/lib/study/store" (loadJSON/saveJSON).
 
-import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import { toast } from "sonner";
 import {
+  AlertTriangle,
   BookOpenText,
   Copy,
   Eraser,
-  Loader2,
-  PlugZap,
-  Send,
+  KeyRound,
   Settings,
   Sparkles,
   Trash2,
+  Wand2,
+  Send,
+  Square,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
-import { answerLocally } from "@/lib/study/local-ai";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
+import { AiMarkdown } from "@/components/ai/ai-markdown";
+import {
+  AiSettingsDialog,
+  fetchAiSettings,
+  type AiSettingsData,
+} from "@/components/ai/ai-settings-dialog";
+import { MaterialAiDialog } from "@/components/study/material-ai-dialog";
 import { loadJSON, saveJSON } from "@/lib/study/store";
+import { useStudyMaterial } from "@/lib/study/use-study-material";
 import { cn } from "@/lib/utils";
 
 // ---------------------------------------------------------------------------
 // Tipe & konstanta
 // ---------------------------------------------------------------------------
 
-type ChatRole = "user" | "assistant";
-
 interface ChatMsg {
-  role: ChatRole;
+  role: "user" | "assistant";
   content: string;
   /** ISO string waktu pesan dibuat. */
   at: string;
+  /** True saat masih streaming (belum dikomit ke riwayat). */
+  streaming?: boolean;
+  /** True bila pesan ini pesan error (bukan jawaban AI). */
+  error?: boolean;
 }
 
-type AIProvider = "local" | "gemini" | "openai";
-
-interface AIConfig {
-  provider: AIProvider;
-  apiKey: string;
-  model: string;
-  baseUrl: string;
-}
-
-const MATERIAL_KEY = "aula-study:buddy-material";
 const CHAT_KEY = "aula-study:buddy-chat";
-const CONFIG_KEY = "aula-study:ai-config";
+/** Key config AI lama (arsitektur browser langsung) — sudah tidak dipakai. */
+const LEGACY_CONFIG_KEY = "aula-study:ai-config";
+/** Key materi lama milik panel ini — sudah dimigrasi useStudyMaterial. */
 
 const MAX_CHAT = 100; // maks pesan tersimpan
 const MAX_HISTORY = 12; // maks pesan dikirim sebagai konteks
-const MAX_MATERIAL_CONTEXT = 12_000; // potong materi untuk system prompt
-const FETCH_TIMEOUT_MS = 30_000;
-
-const DEFAULT_CONFIG: AIConfig = {
-  provider: "local",
-  apiKey: "",
-  model: "gemini-2.0-flash",
-  baseUrl: "https://api.openai.com/v1",
-};
 
 const QUICK_PROMPTS = [
   "Jelaskan materi ini seperti aku 12 tahun",
@@ -99,52 +87,9 @@ const QUICK_PROMPTS = [
   "Buat analogi sederhana untuk materi ini",
 ];
 
-const BASE_SYSTEM_PROMPT = [
-  'Kamu adalah "Teman Belajar" — asisten belajar yang sabar, hangat, dan memotivasi untuk siswa Indonesia.',
-  "- Menjelaskan bertahap dengan bahasa sederhana, memakai contoh dan analogi sehari-hari.",
-  "- Jika ada MATERI di bawah, utamakan menjawab dari materi itu dan kutip bagian yang relevan.",
-  "- Jika ditanya di luar materi, tetap bantu dengan hati-hati.",
-  "- Akui bila tidak yakin — jangan mengarang.",
-  "- Dorong siswa berpikir sendiri: beri satu pertanyaan pemantik kecil di akhir bila cocok.",
-  "Jawab ringkas dan terstruktur (poin-poin), dalam Bahasa Indonesia.",
-].join("\n");
-
-const PROVIDER_LABEL: Record<AIProvider, string> = {
-  local: "Mode lokal",
-  gemini: "Gemini",
-  openai: "OpenAI-compatible",
-};
-
-// Respons (hanya bentuk yang dipakai) — dipanggil langsung dari browser.
-interface GeminiResponse {
-  candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
-}
-interface OpenAIResponse {
-  choices?: Array<{ message?: { content?: string } }>;
-}
-
 // ---------------------------------------------------------------------------
 // Util
 // ---------------------------------------------------------------------------
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function sanitizeConfig(raw: unknown): AIConfig {
-  if (!raw || typeof raw !== "object") return { ...DEFAULT_CONFIG };
-  const c = raw as Partial<AIConfig>;
-  const provider: AIProvider =
-    c.provider === "gemini" || c.provider === "openai" ? c.provider : "local";
-  const fallbackModel = provider === "openai" ? "gpt-4o-mini" : DEFAULT_CONFIG.model;
-  return {
-    provider,
-    apiKey: typeof c.apiKey === "string" ? c.apiKey : "",
-    model: typeof c.model === "string" && c.model.trim() ? c.model : fallbackModel,
-    baseUrl:
-      typeof c.baseUrl === "string" && c.baseUrl.trim() ? c.baseUrl : DEFAULT_CONFIG.baseUrl,
-  };
-}
 
 function sanitizeChat(raw: unknown): ChatMsg[] {
   if (!Array.isArray(raw)) return [];
@@ -157,6 +102,7 @@ function sanitizeChat(raw: unknown): ChatMsg[] {
         typeof (m as ChatMsg).content === "string" &&
         typeof (m as ChatMsg).at === "string"
     )
+    .map((m) => ({ role: m.role, content: m.content, at: m.at }))
     .slice(-MAX_CHAT);
 }
 
@@ -164,6 +110,14 @@ function fmtTime(at: string): string {
   const d = new Date(at);
   if (Number.isNaN(d.getTime())) return "";
   return d.toLocaleTimeString("id-ID", { hour: "2-digit", minute: "2-digit" });
+}
+
+/** Index pesan streaming TERAKHIR dalam daftar chat (-1 bila tidak ada). */
+function lastStreamingIndex(chat: ChatMsg[]): number {
+  for (let i = chat.length - 1; i >= 0; i--) {
+    if (chat[i].streaming) return i;
+  }
+  return -1;
 }
 
 async function copyText(text: string): Promise<boolean> {
@@ -188,139 +142,103 @@ async function copyText(text: string): Promise<boolean> {
   }
 }
 
-/**
- * Satu pintu panggilan AI eksternal (dipakai ask() dan "Uji koneksi").
- * Fetch LANGSUNG dari browser ke provider dengan AbortController timeout.
- * Melempar Error dengan pesan Indonesia — pemanggil yang menangani fallback.
- */
-async function callProvider(
-  cfg: AIConfig,
-  system: string,
-  history: ChatMsg[],
-  timeoutMs: number = FETCH_TIMEOUT_MS
-): Promise<string> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
+/** Baca stream NDJSON /api/ai/study; onChunk dipanggil per potongan. */
+async function readStudyStream(
+  res: Response,
+  onChunk: (full: string, delta: string) => void
+): Promise<{ full: string; error: string | null }> {
+  const reader = res.body!.getReader();
+  const decoder = new TextDecoder();
+  let buf = "";
+  let got = "";
+  let errMsg: string | null = null;
+  let aborted = false;
   try {
-    if (cfg.provider === "gemini") {
-      const model = cfg.model.trim() || "gemini-2.0-flash";
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(
-        model
-      )}:generateContent?key=${encodeURIComponent(cfg.apiKey)}`;
-      const res = await fetch(url, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        signal: controller.signal,
-        body: JSON.stringify({
-          systemInstruction: { parts: [{ text: system }] },
-          contents: history.map((m) => ({
-            role: m.role === "assistant" ? "model" : "user",
-            parts: [{ text: m.content }],
-          })),
-        }),
-      });
-      if (!res.ok) {
-        if (res.status === 429) {
-          throw new Error(
-            "Kuota API Gemini habis sementara — coba lagi nanti atau pakai mode lokal"
-          );
+    readLoop: while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      const lines = buf.split("\n");
+      buf = lines.pop() ?? "";
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+        let ev: { type?: string; text?: string; message?: string };
+        try {
+          ev = JSON.parse(trimmed);
+        } catch {
+          continue;
         }
-        const detail = await res.text().catch(() => "");
-        throw new Error(`Gemini menjawab ${res.status}: ${detail.slice(0, 160)}`);
+        if (ev.type === "chunk" && ev.text) {
+          got += ev.text;
+          onChunk(got, ev.text);
+        } else if (ev.type === "error") {
+          errMsg = ev.message ?? "Terjadi error.";
+          break readLoop;
+        }
       }
-      const data = (await res.json()) as GeminiResponse;
-      const answer = (data.candidates?.[0]?.content?.parts ?? [])
-        .map((p) => p.text ?? "")
-        .join("")
-        .trim();
-      if (!answer) throw new Error("Gemini tidak mengirim jawaban (kosong)");
-      return answer;
     }
-
-    if (cfg.provider === "openai") {
-      const base = (cfg.baseUrl.trim() || "https://api.openai.com/v1").replace(/\/+$/, "");
-      const res = await fetch(`${base}/chat/completions`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${cfg.apiKey}`,
-        },
-        signal: controller.signal,
-        body: JSON.stringify({
-          model: cfg.model.trim() || "gpt-4o-mini",
-          messages: [
-            { role: "system", content: system },
-            ...history.map((m) => ({ role: m.role, content: m.content })),
-          ],
-        }),
-      });
-      if (!res.ok) {
-        const detail = await res.text().catch(() => "");
-        throw new Error(`Provider menjawab ${res.status}: ${detail.slice(0, 160)}`);
-      }
-      const data = (await res.json()) as OpenAIResponse;
-      const answer = data.choices?.[0]?.message?.content?.trim() ?? "";
-      if (!answer) throw new Error("Provider tidak mengirim jawaban (kosong)");
-      return answer;
-    }
-
-    throw new Error("Provider tidak dikenal");
-  } catch (err) {
-    if (err instanceof Error && err.name === "AbortError") {
-      throw new Error(
-        `Waktu tunggu ${Math.round(timeoutMs / 1000)} detik habis — koneksi terlalu lambat`
-      );
-    }
-    throw err;
-  } finally {
-    clearTimeout(timer);
+  } catch {
+    aborted = true; // koneksi terputus / dibatalkan
   }
+  return { full: got, error: errMsg ?? (aborted && !got ? "Koneksi terputus." : null) };
 }
 
 // ---------------------------------------------------------------------------
-// Komponen
+// Komponen utama
 // ---------------------------------------------------------------------------
 
 export function StudyBuddy() {
-  // --- state persist ---
-  const [material, setMaterial] = useState("");
+  // --- materi bersama (sinkron dengan Alat Materi) ---
+  const { material, setMaterial, loaded: materialLoaded } = useStudyMaterial();
+
+  // --- chat persist ---
   const [chat, setChat] = useState<ChatMsg[]>([]);
-  const [config, setConfig] = useState<AIConfig>({ ...DEFAULT_CONFIG });
+  const [chatLoaded, setChatLoaded] = useState(false);
 
   // --- state UI ---
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
-  const [configOpen, setConfigOpen] = useState(false);
-  const [draft, setDraft] = useState<AIConfig>({ ...DEFAULT_CONFIG });
-  const [testing, setTesting] = useState(false);
+  const [settings, setSettings] = useState<AiSettingsData | null>(null);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [confirmClear, setConfirmClear] = useState(false);
+  const [genOpen, setGenOpen] = useState(false);
 
   // --- refs ---
   const loadedRef = useRef(false);
   const stickRef = useRef(true); // user berada di dekat bawah?
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
-  const warnedFallbackRef = useRef(false); // toast.warning fallback cukup sekali
+  const abortRef = useRef<AbortController | null>(null);
+
+  const active = settings?.active ?? null;
+
+  const loadSettings = useCallback(async () => {
+    const d = await fetchAiSettings();
+    setSettings(d);
+    return d;
+  }, []);
 
   // --- muat data tersimpan (client only, aman dari SSR/hydration) ---
   useEffect(() => {
-    setMaterial(loadJSON<string>(MATERIAL_KEY, ""));
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- data client-only (localStorage): efek memang satu-satunya tempat aman load tanpa hydration mismatch (pola yang sama dengan komponen study lain).
     setChat(sanitizeChat(loadJSON<unknown>(CHAT_KEY, [])));
-    setConfig(sanitizeConfig(loadJSON<unknown>(CONFIG_KEY, null)));
+    setChatLoaded(true);
     loadedRef.current = true;
-  }, []);
-
-  // --- persist materi (debounce 500ms) ---
-  useEffect(() => {
-    if (!loadedRef.current) return;
-    const t = setTimeout(() => saveJSON(MATERIAL_KEY, material), 500);
-    return () => clearTimeout(t);
-  }, [material]);
+    // Config AI lama (key di localStorage) tidak dipakai lagi — bersihkan.
+    try {
+      window.localStorage.removeItem(LEGACY_CONFIG_KEY);
+    } catch {
+      /* abaikan */
+    }
+    void loadSettings();
+  }, [loadSettings]);
 
   // --- persist chat (maks 100 terakhir) ---
   useEffect(() => {
-    if (!loadedRef.current) return;
+    if (!chatLoaded) return;
     saveJSON(CHAT_KEY, chat.slice(-MAX_CHAT));
-  }, [chat]);
+  }, [chat, chatLoaded]);
 
   // --- auto-scroll ke bawah saat pesan baru (hanya bila user "menempel" di bawah) ---
   function onScrollList() {
@@ -343,25 +261,32 @@ export function StudyBuddy() {
     el.style.height = `${Math.min(el.scrollHeight, 160)}px`;
   }, [input]);
 
-  // --- system prompt: instruksi + materi (dipotong) ---
-  const systemPrompt = useMemo(() => {
-    const mat = material.trim();
-    return mat
-      ? `${BASE_SYSTEM_PROMPT}\n\n=== MATERI ===\n${mat.slice(0, MAX_MATERIAL_CONTEXT)}`
-      : BASE_SYSTEM_PROMPT;
-  }, [material]);
-
+  // --- badge provider (seperti Teman AI) ---
   const providerBadge = useMemo(() => {
-    if (config.provider === "local") return "Mode lokal · 0 biaya · 0 limit";
-    if (!config.apiKey.trim()) return `${PROVIDER_LABEL[config.provider]} — key belum diisi`;
-    return `${PROVIDER_LABEL[config.provider]} · API key sendiri`;
-  }, [config]);
+    if (!active) return "Belum ada AI terpasang";
+    return active.source === "user" ? "kunci sendiri" : "default admin";
+  }, [active]);
 
   // --- aksi chat ---
-  function pushAssistant(content: string) {
-    setChat((prev) =>
-      [...prev, { role: "assistant", content, at: new Date().toISOString() }].slice(-MAX_CHAT)
-    );
+  function patchStreaming(content: string, isError = false) {
+    setChat((prev) => {
+      // Ubah pesan streaming terakhir (selalu di akhir saat busy).
+      const idx = lastStreamingIndex(prev);
+      if (idx < 0) return prev;
+      const next = [...prev];
+      next[idx] = { ...next[idx], content, error: isError };
+      return next;
+    });
+  }
+
+  function commitStreaming(patch: Partial<ChatMsg>) {
+    setChat((prev) => {
+      const idx = lastStreamingIndex(prev);
+      if (idx < 0) return prev;
+      const next = [...prev];
+      next[idx] = { ...next[idx], streaming: false, ...patch };
+      return next;
+    });
   }
 
   async function ask(raw: string) {
@@ -369,39 +294,74 @@ export function StudyBuddy() {
     if (!question || busy) return;
 
     const userMsg: ChatMsg = { role: "user", content: question, at: new Date().toISOString() };
-    const history = [...chat, userMsg].slice(-MAX_HISTORY);
+    const history = [...chat, userMsg]
+      .slice(-MAX_HISTORY)
+      .map((m) => ({ role: m.role, content: m.content }));
 
-    setChat((prev) => [...prev, userMsg].slice(-MAX_CHAT));
+    setChat((prev) => [
+      ...prev,
+      userMsg,
+      {
+        role: "assistant",
+        content: "",
+        at: new Date().toISOString(),
+        streaming: true,
+      },
+    ]);
     setInput("");
     setBusy(true);
+    stickRef.current = true;
+
+    const ac = new AbortController();
+    abortRef.current = ac;
 
     try {
-      // Mode lokal: mesin di browser, tanpa internet.
-      if (config.provider === "local") {
-        await sleep(400 + Math.random() * 500); // jeda kecil biar terasa "menyusun"
-        pushAssistant(answerLocally(question, material));
-        return;
+      const res = await fetch("/api/ai/study", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          message: question,
+          task: "chat",
+          material: material.slice(0, 12_000),
+          history,
+        }),
+        signal: ac.signal,
+      });
+
+      if (!res.ok || !res.body) {
+        const json = await res.json().catch(() => null);
+        throw new Error(json?.error ?? `Gagal menghubungi server (HTTP ${res.status}).`);
       }
 
-      if (!config.apiKey.trim()) {
-        throw new Error("API key belum diisi — buka Pengaturan AI (ikon roda gigi)");
-      }
+      const { full, error } = await readStudyStream(res, (fullText) => {
+        patchStreaming(fullText);
+      });
 
-      const answer = await callProvider(config, systemPrompt, history);
-      pushAssistant(answer);
+      if (error && !full.trim()) {
+        commitStreaming({ content: error, error: true });
+      } else if (error) {
+        commitStreaming({ content: `${full}\n\n---\n\n⚠️ ${error}` });
+      } else if (full.trim()) {
+        commitStreaming({ content: full });
+      } else if (ac.signal.aborted) {
+        commitStreaming({ content: "_(dihentikan)_" });
+      } else {
+        commitStreaming({ content: "_(tidak ada jawaban)_" });
+      }
     } catch (err) {
-      // Fallback: AI eksternal gagal (error/timeout/non-OK) -> mode lokal.
-      const reason = err instanceof Error ? err.message : "Kesalahan tidak diketahui";
-      pushAssistant(`(mode lokal) ${answerLocally(question, material)}`);
-      if (!warnedFallbackRef.current) {
-        warnedFallbackRef.current = true;
-        toast.warning("AI eksternal tidak merespons — jawaban dari mode lokal", {
-          description: reason,
-        });
+      if (ac.signal.aborted) {
+        commitStreaming({ content: "_(dihentikan)_" });
+      } else {
+        commitStreaming({ content: (err as Error)?.message ?? "Koneksi gagal. Coba lagi.", error: true });
       }
     } finally {
       setBusy(false);
+      abortRef.current = null;
     }
+  }
+
+  function stop() {
+    abortRef.current?.abort();
   }
 
   function onKeyDown(e: KeyboardEvent<HTMLTextAreaElement>) {
@@ -412,9 +372,10 @@ export function StudyBuddy() {
   }
 
   function clearChat() {
+    setConfirmClear(false);
     if (!chat.length) return;
     setChat([]);
-    toast.success("Percakapan dibersihkan");
+    toast.success("Percakapan & ingatan AI dihapus");
   }
 
   function clearMaterial() {
@@ -429,77 +390,13 @@ export function StudyBuddy() {
     else toast.error("Gagal menyalin — coba pilih teksnya secara manual");
   }
 
-  // --- pengaturan AI ---
-  function openSettings() {
-    setDraft({ ...config });
-    setConfigOpen(true);
-  }
-
-  function changeProvider(value: string) {
-    const provider = value as AIProvider;
-    setDraft((d) => {
-      let model = d.model.trim();
-      if (provider === "gemini" && (!model || model === "gpt-4o-mini")) {
-        model = "gemini-2.0-flash";
-      }
-      if (provider === "openai" && (!model || model === "gemini-2.0-flash")) {
-        model = "gpt-4o-mini";
-      }
-      return { ...d, provider, model };
-    });
-  }
-
-  function saveConfig() {
-    const next = sanitizeConfig(draft);
-    if (next.provider === "openai" && !/^https?:\/\//i.test(next.baseUrl)) {
-      toast.error("Base URL harus diawali http(s):// — contoh: https://openrouter.ai/api/v1");
-      return;
-    }
-    setConfig(next);
-    saveJSON(CONFIG_KEY, next);
-    warnedFallbackRef.current = false; // beri kesempatan warning baru setelah config baru
-    setConfigOpen(false);
-    toast.success(
-      next.provider === "local"
-        ? "Tersimpan — mode lokal aktif (0 biaya, 0 limit)"
-        : `Tersimpan — mode ${PROVIDER_LABEL[next.provider]} dengan API key milikmu`
-    );
-  }
-
-  async function testConnection() {
-    if (draft.provider === "local") {
-      toast.success("Mode lokal aktif — tidak perlu koneksi internet, selalu siap.");
-      return;
-    }
-    if (!draft.apiKey.trim()) {
-      toast.error("Tempel dulu API key-mu di atas.");
-      return;
-    }
-    setTesting(true);
-    try {
-      const reply = await callProvider(
-        sanitizeConfig(draft),
-        "Balas HANYA dengan satu kata: pong",
-        [{ role: "user", content: "ping", at: new Date().toISOString() }],
-        15_000
-      );
-      toast.success(`Koneksi berhasil — balasan: "${reply.slice(0, 60)}"`);
-    } catch (err) {
-      toast.error("Koneksi gagal", {
-        description: err instanceof Error ? err.message : "Kesalahan tidak diketahui",
-      });
-    } finally {
-      setTesting(false);
-    }
-  }
-
   // -------------------------------------------------------------------------
   // Render
   // -------------------------------------------------------------------------
 
   return (
     <div className="flex h-full min-h-[560px] flex-col gap-3">
-      {/* ===== Panel materi (atas) ===== */}
+      {/* ===== Panel materi (atas) — SATU sumber dengan Alat Materi ===== */}
       <section className="rounded-xl border bg-card p-3 shadow-xs">
         <div className="flex items-center justify-between gap-2">
           <div className="flex min-w-0 items-center gap-2">
@@ -508,6 +405,9 @@ export function StudyBuddy() {
             <span className="hidden truncate text-xs text-muted-foreground sm:inline">
               — jadi konteks jawaban AI
             </span>
+            <Badge variant="outline" className="hidden shrink-0 gap-1 text-[10px] sm:inline-flex">
+              <Sparkles className="size-2.5" /> sync dengan Alat Materi
+            </Badge>
           </div>
           <div className="flex shrink-0 items-center gap-1.5">
             <span className="text-[11px] tabular-nums text-muted-foreground">
@@ -516,23 +416,37 @@ export function StudyBuddy() {
             <Button
               variant="ghost"
               size="sm"
+              onClick={() => setGenOpen(true)}
+              disabled={!active}
+              title={active ? "Buat materi dengan AI" : "Pasang AI dulu di pengaturan"}
+            >
+              <Wand2 />
+              <span className="hidden sm:inline">Buat dengan AI</span>
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
               onClick={clearMaterial}
               disabled={!material}
               title="Bersihkan materi"
             >
               <Eraser />
-              <span className="hidden sm:inline">Bersihkan</span>
+              <span className="hidden lg:inline">Bersihkan</span>
             </Button>
           </div>
         </div>
         <Textarea
           value={material}
           onChange={(e) => setMaterial(e.target.value)}
-          placeholder="Tempel materi pelajaranmu di sini…"
+          placeholder={
+            materialLoaded
+              ? "Tempel materi pelajaranmu di sini — atau minta AI membuatnya…"
+              : "Memuat…"
+          }
           className="mt-2 min-h-24 max-h-56 text-sm"
           aria-label="Materi pelajaran sebagai konteks AI"
         />
-        {material.length > MAX_MATERIAL_CONTEXT && (
+        {material.length > 12_000 && (
           <p className="mt-1 text-[11px] text-amber-600 dark:text-amber-400">
             Materi panjang — AI membaca maksimal 12.000 karakter pertama.
           </p>
@@ -546,34 +460,39 @@ export function StudyBuddy() {
           <div className="flex min-w-0 items-center gap-2">
             <Sparkles className="size-4 shrink-0 text-primary" />
             <p className="truncate text-sm font-semibold">Teman Belajar AI</p>
-            <Badge
-              variant="secondary"
-              className={cn(
-                "max-w-[240px] truncate",
-                config.provider !== "local" &&
-                  !config.apiKey.trim() &&
-                  "text-amber-600 dark:text-amber-400"
-              )}
-            >
-              {providerBadge}
-            </Badge>
+            {active ? (
+              <>
+                <Badge variant="secondary" className="max-w-[220px] truncate">
+                  {providerBadge} · {active.model || "model default"}
+                </Badge>
+                {active.source === "user" ? (
+                  <Badge className="hidden gap-1 sm:inline-flex">
+                    <KeyRound className="size-3" /> kunci sendiri
+                  </Badge>
+                ) : null}
+              </>
+            ) : (
+              <Badge variant="outline" className="text-amber-600 dark:text-amber-400">
+                belum ada AI
+              </Badge>
+            )}
           </div>
           <div className="flex shrink-0 items-center gap-1">
             <Button
               variant="ghost"
               size="sm"
-              onClick={clearChat}
+              onClick={() => setConfirmClear(true)}
               disabled={!chat.length}
-              title="Bersihkan percakapan"
+              title="Hapus percakapan & ingatan"
             >
               <Trash2 />
-              <span className="hidden sm:inline">Bersihkan percakapan</span>
+              <span className="hidden sm:inline">Hapus percakapan</span>
             </Button>
             <Button
               variant="outline"
               size="icon"
-              onClick={openSettings}
-              title="Pengaturan AI"
+              onClick={() => setSettingsOpen(true)}
+              title="Pengaturan AI (sama dengan Teman AI)"
               aria-label="Pengaturan AI"
             >
               <Settings />
@@ -597,23 +516,30 @@ export function StudyBuddy() {
               <div>
                 <p className="font-semibold">Tanya apa saja tentang materimu</p>
                 <p className="mx-auto mt-1 max-w-sm text-sm text-muted-foreground">
-                  Tempel materi pelajaranmu di panel atas, lalu ajukan pertanyaan — atau
-                  mulai dari salah satu pertanyaan cepat ini:
+                  {active
+                    ? "Tempel materi di panel atas (atau minta AI membuatnya), lalu ajukan pertanyaan — atau mulai dari pertanyaan cepat ini:"
+                    : "Pasang API key sendiri di Pengaturan, atau minta admin mengatur default — lalu ajukan pertanyaanmu:"}
                 </p>
               </div>
-              <div className="flex max-w-lg flex-wrap justify-center gap-2">
-                {QUICK_PROMPTS.map((p) => (
-                  <Button
-                    key={p}
-                    variant="outline"
-                    size="sm"
-                    className="rounded-full"
-                    onClick={() => ask(p)}
-                  >
-                    {p}
-                  </Button>
-                ))}
-              </div>
+              {active ? (
+                <div className="flex max-w-lg flex-wrap justify-center gap-2">
+                  {QUICK_PROMPTS.map((p) => (
+                    <Button
+                      key={p}
+                      variant="outline"
+                      size="sm"
+                      className="rounded-full"
+                      onClick={() => ask(p)}
+                    >
+                      {p}
+                    </Button>
+                  ))}
+                </div>
+              ) : (
+                <Button variant="outline" className="gap-1.5" onClick={() => setSettingsOpen(true)}>
+                  <KeyRound className="h-4 w-4" /> Pasang API key sendiri
+                </Button>
+              )}
             </div>
           ) : (
             chat.map((m, i) => (
@@ -625,16 +551,46 @@ export function StudyBuddy() {
                 )}
               >
                 <div
-                  onClick={m.role === "assistant" ? () => copyAnswer(m) : undefined}
-                  title={m.role === "assistant" ? "Klik untuk menyalin jawaban" : undefined}
+                  onClick={m.role === "assistant" && !m.streaming ? () => copyAnswer(m) : undefined}
+                  title={
+                    m.role === "assistant" && !m.streaming
+                      ? "Klik untuk menyalin jawaban"
+                      : undefined
+                  }
                   className={cn(
-                    "max-w-[85%] whitespace-pre-wrap break-words rounded-2xl px-3.5 py-2.5 text-sm md:max-w-[75%]",
+                    "max-w-[85%] break-words rounded-2xl px-3.5 py-2.5 text-sm md:max-w-[75%]",
                     m.role === "user"
-                      ? "rounded-br-sm bg-primary text-primary-foreground"
-                      : "cursor-pointer rounded-bl-sm bg-muted transition-colors hover:bg-muted/70"
+                      ? "whitespace-pre-wrap rounded-br-sm bg-primary text-primary-foreground"
+                      : m.error
+                        ? "cursor-pointer rounded-bl-sm border border-destructive/30 bg-destructive/10 text-destructive"
+                        : "cursor-pointer rounded-bl-sm bg-muted transition-colors hover:bg-muted/70"
                   )}
                 >
-                  {m.content}
+                  {m.role === "user" ? (
+                    m.content
+                  ) : m.error ? (
+                    <span className="flex items-start gap-2">
+                      <AlertTriangle className="mt-0.5 size-4 shrink-0" />
+                      <span>{m.content}</span>
+                    </span>
+                  ) : m.content ? (
+                    <div className="min-w-0 [&>*:first-child]:mt-0 [&>*:last-child]:mb-0">
+                      <AiMarkdown content={m.content} streaming={!!m.streaming} />
+                    </div>
+                  ) : (
+                    <span className="flex items-center gap-2 py-0.5 text-muted-foreground">
+                      <span className="text-sm">Menyusun jawaban</span>
+                      <span className="flex gap-1" aria-hidden="true">
+                        {[0, 150, 300].map((delay) => (
+                          <span
+                            key={delay}
+                            className="size-1.5 animate-bounce rounded-full bg-muted-foreground"
+                            style={{ animationDelay: `${delay}ms` }}
+                          />
+                        ))}
+                      </span>
+                    </span>
+                  )}
                 </div>
                 <div
                   className={cn(
@@ -643,7 +599,7 @@ export function StudyBuddy() {
                   )}
                 >
                   <span className="tabular-nums">{fmtTime(m.at)}</span>
-                  {m.role === "assistant" && (
+                  {m.role === "assistant" && !m.streaming && (
                     <button
                       type="button"
                       onClick={() => copyAnswer(m)}
@@ -657,27 +613,6 @@ export function StudyBuddy() {
               </div>
             ))
           )}
-
-          {/* Indikator "Menyusun jawaban…" */}
-          {busy && (
-            <div className="flex justify-start">
-              <div
-                className="flex items-center gap-2 rounded-2xl rounded-bl-sm bg-muted px-4 py-3"
-                aria-live="polite"
-              >
-                <span className="text-sm text-muted-foreground">Menyusun jawaban</span>
-                <span className="flex gap-1" aria-hidden="true">
-                  {[0, 150, 300].map((delay) => (
-                    <span
-                      key={delay}
-                      className="size-1.5 animate-bounce rounded-full bg-muted-foreground"
-                      style={{ animationDelay: `${delay}ms` }}
-                    />
-                  ))}
-                </span>
-              </div>
-            </div>
-          )}
         </div>
 
         {/* Input */}
@@ -690,19 +625,35 @@ export function StudyBuddy() {
               onKeyDown={onKeyDown}
               rows={1}
               disabled={busy}
-              placeholder="Tulis pertanyaanmu…"
+              placeholder={
+                active
+                  ? "Tulis pertanyaanmu…"
+                  : "Pasang API key dulu di Pengaturan (ikon roda gigi)…"
+              }
               aria-label="Tulis pertanyaan untuk Teman Belajar"
               className="max-h-40 min-h-[2.4rem] w-full resize-none rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-xs outline-none transition-[color,box-shadow] placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 disabled:cursor-not-allowed disabled:opacity-50"
             />
-            <Button
-              size="icon"
-              onClick={() => ask(input)}
-              disabled={busy || !input.trim()}
-              aria-label="Kirim pertanyaan"
-              className="h-[2.4rem] w-[2.4rem] shrink-0"
-            >
-              <Send />
-            </Button>
+            {busy ? (
+              <Button
+                variant="destructive"
+                size="icon"
+                onClick={stop}
+                aria-label="Hentikan jawaban"
+                className="h-[2.4rem] w-[2.4rem] shrink-0"
+              >
+                <Square />
+              </Button>
+            ) : (
+              <Button
+                size="icon"
+                onClick={() => ask(input)}
+                disabled={!input.trim()}
+                aria-label="Kirim pertanyaan"
+                className="h-[2.4rem] w-[2.4rem] shrink-0"
+              >
+                <Send />
+              </Button>
+            )}
           </div>
           <p className="mt-1 px-1 text-[11px] text-muted-foreground">
             Enter kirim · Shift+Enter baris baru — klik jawaban AI untuk menyalinnya.
@@ -710,126 +661,48 @@ export function StudyBuddy() {
         </div>
       </section>
 
-      {/* ===== Dialog pengaturan AI ===== */}
-      <Dialog open={configOpen} onOpenChange={setConfigOpen}>
-        <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-md">
-          <DialogHeader>
-            <DialogTitle>Pengaturan AI</DialogTitle>
-            <DialogDescription>
-              AI berjalan sepenuhnya di browsermu — tanpa server berbayar, tanpa limit.
-            </DialogDescription>
-          </DialogHeader>
+      {/* ===== Dialog: pengaturan AI (komponen sama dengan Teman AI) ===== */}
+      <AiSettingsDialog
+        open={settingsOpen}
+        onOpenChange={setSettingsOpen}
+        onSaved={() => {
+          void loadSettings();
+        }}
+      />
 
-          <div className="grid gap-4">
-            {/* Mode */}
-            <div className="grid gap-1.5">
-              <Label>Mode</Label>
-              <Select value={draft.provider} onValueChange={changeProvider}>
-                <SelectTrigger className="w-full">
-                  <SelectValue placeholder="Pilih mode AI" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="local">
-                    Lokal — tanpa internet (gratis, tanpa limit)
-                  </SelectItem>
-                  <SelectItem value="gemini">Gemini — API key sendiri</SelectItem>
-                  <SelectItem value="openai">
-                    OpenAI-compatible — API key sendiri
-                  </SelectItem>
-                </SelectContent>
-              </Select>
-              <p className="text-[11px] text-muted-foreground">
-                {draft.provider === "local"
-                  ? "Mesin lokal menganalisis materimu langsung di browser — tidak ada data yang keluar, selalu gratis."
-                  : "Panggilan dilakukan langsung dari browsermu ke provider, memakai key milikmu."}
-              </p>
-            </div>
+      {/* ===== Dialog: buat materi dengan AI ===== */}
+      <MaterialAiDialog
+        open={genOpen}
+        onOpenChange={setGenOpen}
+        hasExisting={material.trim().length > 0}
+        currentMaterial={material}
+        setMaterial={setMaterial}
+        disabled={!active}
+      />
 
-            {/* API key */}
-            {draft.provider !== "local" && (
-              <>
-                <div className="grid gap-1.5">
-                  <Label htmlFor="ai-key">API key</Label>
-                  <Input
-                    id="ai-key"
-                    type="password"
-                    autoComplete="off"
-                    placeholder="Tempel API key-mu…"
-                    value={draft.apiKey}
-                    onChange={(e) => setDraft((d) => ({ ...d, apiKey: e.target.value }))}
-                  />
-                  <p className="text-[11px] leading-relaxed text-muted-foreground">
-                    Key HANYA disimpan di browser ini (localStorage), bukan di server.
-                    Gratis daftar di{" "}
-                    <span className="font-medium text-foreground">aistudio.google.com</span>{" "}
-                    (Gemini) atau{" "}
-                    <span className="font-medium text-foreground">openrouter.ai</span>{" "}
-                    (OpenRouter punya model gratis).
-                  </p>
-                </div>
-
-                {/* Model */}
-                <div className="grid gap-1.5">
-                  <Label htmlFor="ai-model">Model</Label>
-                  <Input
-                    id="ai-model"
-                    placeholder={draft.provider === "gemini" ? "gemini-2.0-flash" : "gpt-4o-mini"}
-                    value={draft.model}
-                    onChange={(e) => setDraft((d) => ({ ...d, model: e.target.value }))}
-                  />
-                  <p className="text-[11px] text-muted-foreground">
-                    Default: {draft.provider === "gemini" ? "gemini-2.0-flash" : "gpt-4o-mini"}.
-                  </p>
-                </div>
-
-                {/* Base URL — khusus OpenAI-compatible */}
-                {draft.provider === "openai" && (
-                  <div className="grid gap-1.5">
-                    <Label htmlFor="ai-base">Base URL</Label>
-                    <Input
-                      id="ai-base"
-                      placeholder="https://openrouter.ai/api/v1"
-                      value={draft.baseUrl}
-                      onChange={(e) => setDraft((d) => ({ ...d, baseUrl: e.target.value }))}
-                    />
-                    <p className="text-[11px] text-muted-foreground">
-                      Default OpenAI: https://api.openai.com/v1 — untuk OpenRouter:
-                      https://openrouter.ai/api/v1
-                    </p>
-                  </div>
-                )}
-              </>
-            )}
-
-            {/* Uji koneksi */}
-            <div>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={testConnection}
-                disabled={testing}
-              >
-                {testing ? <Loader2 className="animate-spin" /> : <PlugZap />}
-                Uji koneksi
-              </Button>
-            </div>
-
-            {/* Catatan privasi */}
-            <p className="rounded-md border bg-muted/40 p-2 text-[11px] leading-relaxed text-muted-foreground">
-              Catatan privasi: API key, materi, dan percakapan hanya tersimpan di browser
-              ini. Untuk mode Gemini/OpenAI, permintaan dikirim langsung dari browsermu ke
-              provider — tidak melewati server aplikasi. Mode lokal 100% offline.
-            </p>
-          </div>
-
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setConfigOpen(false)}>
-              Batal
-            </Button>
-            <Button onClick={saveConfig}>Simpan</Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      {/* Konfirmasi hapus percakapan — localStorage ikut dikosongkan via
+          effect persist, jadi ingatan AI benar-benar terhapus. */}
+      <AlertDialog open={confirmClear} onOpenChange={setConfirmClear}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Hapus percakapan & ingatan AI?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Seluruh obrolan di panel ini akan dihapus permanen, termasuk
+              ingatan Teman Belajar tentang obrolanmu sebelumnya. Materi yang
+              kamu tempel tetap disimpan. Tindakan ini tidak bisa dibatalkan.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Batal</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={clearChat}
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+            >
+              Hapus permanen
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }
