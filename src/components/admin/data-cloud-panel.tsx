@@ -51,6 +51,7 @@ import {
   Copy,
   HardDrive,
   TriangleAlert,
+  UserCog,
 } from "lucide-react";
 import { toast } from "sonner";
 import { formatDistanceToNow, format } from "date-fns";
@@ -60,6 +61,10 @@ import {
   mountVisibleToLabel,
   mountModeLabel,
 } from "@/lib/mount-access";
+import {
+  MountUsersDialog,
+  type MountUsersTarget,
+} from "@/components/admin/mount-users-dialog";
 import { cn } from "@/lib/utils";
 
 // ────────────────────────────── Types ──────────────────────────────
@@ -113,6 +118,9 @@ interface CloudAccount {
   // Hak akses mount (file explorer akun cloud di halaman Cloud)
   mountVisibleTo?: "ADMIN" | "GURU" | "ALL";
   mountMode?: "READ" | "WRITE";
+  // Izin khusus per-orang (id user; grant lihat / grant tulis)
+  mountUserIds?: string[];
+  mountUserWriteIds?: string[];
   // S3-compatible
   endpoint: string | null;
   region: string | null;
@@ -1033,6 +1041,9 @@ function CloudAccountsSection() {
   const [testingId, setTestingId] = useState<string | null>(null);
   const [syncingId, setSyncingId] = useState<string | null>(null);
   const [syncingAll, setSyncingAll] = useState(false);
+  // Editor izin per-orang (mount MEGA) — target = akun yang sedang diatur.
+  const [mountUsersTarget, setMountUsersTarget] =
+    useState<MountUsersTarget | null>(null);
 
   const { data, isLoading } = useQuery<{ accounts: CloudAccount[] }>({
     queryKey: ["admin-cloud-accounts"],
@@ -1362,10 +1373,36 @@ function CloudAccountsSection() {
                             <SelectItem value="WRITE">Baca &amp; tulis</SelectItem>
                           </SelectContent>
                         </Select>
+                        {/* ── Izin khusus PER ORANG (tambahan di luar peran) ── */}
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          className="h-7 gap-1 text-xs"
+                          onClick={() => setMountUsersTarget(a)}
+                          title="Atur siapa saja (per orang, di luar peran) yang boleh membuka mount ini"
+                        >
+                          <UserCog className="size-3.5" />
+                          Per orang
+                          {(a.mountUserIds?.length ?? 0) > 0 ? (
+                            <Badge
+                              variant="secondary"
+                              className="ml-0.5 h-4 px-1 text-[9px]"
+                            >
+                              {a.mountUserIds!.length}
+                            </Badge>
+                          ) : null}
+                        </Button>
                       </div>
                       <p className="text-[10px] text-muted-foreground">
                         Bisa dibuka: {mountVisibleToLabel(a.mountVisibleTo)} ·
                         Hak: {mountModeLabel(a.mountMode)}
+                        {(a.mountUserIds?.length ?? 0) > 0
+                          ? ` · Per orang: ${a.mountUserIds!.length} diizinkan${
+                              (a.mountUserWriteIds?.length ?? 0) > 0
+                                ? ` (${a.mountUserWriteIds!.length} bisa menulis)`
+                                : ""
+                            }`
+                          : ""}
                       </p>
                     </div>
                   ) : null}
@@ -1497,6 +1534,18 @@ function CloudAccountsSection() {
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+
+      {/* ── Editor izin per-orang untuk mount (grant lihat/tulis khusus) ── */}
+      {mountUsersTarget ? (
+        <MountUsersDialog
+          account={mountUsersTarget}
+          onClose={() => setMountUsersTarget(null)}
+          onSaved={() => {
+            setMountUsersTarget(null);
+            qc.invalidateQueries({ queryKey: ["admin-cloud-accounts"] });
+          }}
+        />
+      ) : null}
     </div>
   );
 }

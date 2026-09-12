@@ -13,6 +13,9 @@ const patchSchema = z.object({
   // ── Hak akses mount (file explorer akun cloud) ──
   mountVisibleTo: z.enum(["ADMIN", "GURU", "ALL"]).optional(),
   mountMode: z.enum(["READ", "WRITE"]).optional(),
+  // ── Izin khusus PER ORANG (grant lihat / grant tulis) ──
+  mountUserIds: z.array(z.string().min(1).max(60)).max(200).optional(),
+  mountUserWriteIds: z.array(z.string().min(1).max(60)).max(200).optional(),
   // ── S3-compatible ──
   endpoint: z.string().max(300).optional().or(z.literal("")),
   region: z.string().max(60).optional().or(z.literal("")),
@@ -25,7 +28,9 @@ export async function GET(
   _req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
-  await requireAdmin();
+  if (!(await requireAdmin().catch(() => null))) {
+    return NextResponse.json({ error: "FORBIDDEN" }, { status: 403 });
+  }
   const { id } = await params;
   const row = await db.cloudAccount.findUnique({ where: { id } });
   if (!row) {
@@ -38,7 +43,9 @@ export async function PATCH(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
-  await requireAdmin();
+  if (!(await requireAdmin().catch(() => null))) {
+    return NextResponse.json({ error: "FORBIDDEN" }, { status: 403 });
+  }
   const { id } = await params;
   const body = await req.json();
   const parsed = patchSchema.safeParse(body);
@@ -74,6 +81,33 @@ export async function PATCH(
   // perubahan kredensial).
   if (d.mountVisibleTo !== undefined) data.mountVisibleTo = d.mountVisibleTo;
   if (d.mountMode !== undefined) data.mountMode = d.mountMode;
+
+  // Izin per-orang: dedupe + jaga invarian "yang boleh menulis ⊆ yang
+  // boleh membuka" (grant tulis otomatis ikut memberi akses lihat).
+  if (d.mountUserIds !== undefined || d.mountUserWriteIds !== undefined) {
+    const viewers = new Set([
+      ...(d.mountUserIds ?? []),
+      ...(d.mountUserWriteIds ?? []),
+    ]);
+    const writers = new Set(
+      [...(d.mountUserWriteIds ?? [])].filter((id) => viewers.has(id))
+    );
+    const allIds = [...new Set([...viewers, ...writers])];
+    // Pastikan semua user benar-benar ada (anti id karutan dari klien).
+    if (allIds.length > 0) {
+      const found = await db.user.count({
+        where: { id: { in: allIds } },
+      });
+      if (found !== allIds.length) {
+        return NextResponse.json(
+          { error: "USER_NOT_FOUND — ada id user yang tidak dikenal." },
+          { status: 400 }
+        );
+      }
+    }
+    data.mountUserIds = [...viewers];
+    data.mountUserWriteIds = [...writers];
+  }
 
   // S3 fields — string kosong berarti "hapus nilai".
   if (d.endpoint !== undefined) {
@@ -116,7 +150,9 @@ export async function DELETE(
   _req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
-  await requireAdmin();
+  if (!(await requireAdmin().catch(() => null))) {
+    return NextResponse.json({ error: "FORBIDDEN" }, { status: 403 });
+  }
   const { id } = await params;
   const row = await db.cloudAccount.findUnique({ where: { id } });
   if (!row) {

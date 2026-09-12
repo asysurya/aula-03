@@ -42,6 +42,7 @@ import { computeStreak, todayStudyMinutes } from "@/lib/study/store";
 import { PomodoroPanel } from "./pomodoro";
 import { StudyBuddy } from "./study-buddy";
 import { TextTools } from "./text-tools";
+import { AiBuilder } from "./ai-builder";
 import { Organizers } from "./organizers";
 import { ExamsPanel } from "./exams";
 import { StudyStats } from "./study-stats";
@@ -273,6 +274,9 @@ export function StudyHub({ me }: { me: MeResponse }) {
               <TabsTrigger value="buddy" className="px-3 py-1.5">
                 Teman AI
               </TabsTrigger>
+              <TabsTrigger value="builder" className="px-3 py-1.5">
+                AI Builder
+              </TabsTrigger>
               <TabsTrigger value="text-tools" className="px-3 py-1.5">
                 Alat Materi
               </TabsTrigger>
@@ -296,6 +300,9 @@ export function StudyHub({ me }: { me: MeResponse }) {
           </TabsContent>
           <TabsContent value="buddy">
             <StudyBuddy />
+          </TabsContent>
+          <TabsContent value="builder">
+            <AiBuilder />
           </TabsContent>
           <TabsContent value="text-tools">
             <TextTools />

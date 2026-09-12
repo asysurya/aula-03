@@ -3,7 +3,7 @@ import { z } from "zod";
 import { db } from "@/lib/db";
 import { requireUser } from "@/lib/session";
 import { fileCacheDelete } from "@/lib/file-cache";
-import { canWriteMount } from "@/lib/mount-access";
+import { canViewMount, canWriteMount } from "@/lib/mount-access";
 import {
   megaMkdir,
   megaRename,
@@ -75,8 +75,14 @@ const opsSchema = z.discriminatedUnion("action", [
   }),
 ]);
 
-/** Ambil akun + field hak akses mount (untuk pengececan mode baca/tulis). */
-async function pickAccountWithAccess(accountId?: string) {
+/** Ambil akun + field hak akses mount (peran + per-orang, untuk pengecekan
+ *  mode baca/tulis user INI — bukan hanya mode akun). Saat accountId tidak
+ *  dikirim, pilih akun pertama yang BOLEH DIBUKA user (bukan asal pertama). */
+async function pickAccountWithAccess(
+  accountId?: string,
+  role?: string | null,
+  userId?: string | null
+) {
   const select = {
     id: true,
     email: true,
@@ -84,22 +90,26 @@ async function pickAccountWithAccess(accountId?: string) {
     sessionData: true,
     mountVisibleTo: true,
     mountMode: true,
+    mountUserIds: true,
+    mountUserWriteIds: true,
   };
   return accountId
     ? db.cloudAccount.findFirst({
         where: { id: accountId, provider: "mega", email: { not: null } },
         select,
       })
-    : db.cloudAccount.findFirst({
-        where: {
-          provider: "mega",
-          active: true,
-          email: { not: null },
-          lastStatus: { not: "error" },
-        },
-        orderBy: { fileCount: "asc" },
-        select,
-      });
+    : (
+        await db.cloudAccount.findMany({
+          where: {
+            provider: "mega",
+            active: true,
+            email: { not: null },
+            lastStatus: { not: "error" },
+          },
+          orderBy: { fileCount: "asc" },
+          select,
+        })
+      ).find((a) => canViewMount(a, role, userId)) ?? null;
 }
 
 export async function POST(req: NextRequest) {
@@ -108,6 +118,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "UNAUTHORIZED" }, { status: 401 });
   }
   const role = (user as { role?: string }).role;
+  const userId = (user as { id?: string }).id ?? null;
 
   let body: unknown;
   try {
@@ -124,7 +135,9 @@ export async function POST(req: NextRequest) {
   const op = parsed.data;
 
   const account = await pickAccountWithAccess(
-    "accountId" in op ? op.accountId : undefined
+    "accountId" in op ? op.accountId : undefined,
+    role,
+    userId
   );
   if (!account || !account.email) {
     return NextResponse.json(
@@ -133,8 +146,9 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  // ── Hak akses mount: operasi tulis hanya untuk mode READ+WRITE ──
-  if (!canWriteMount(account, role)) {
+  // ── Hak akses mount: operasi tulis untuk user INI — lolos bila mode akun
+  //    WRITE, atau user diberi grant tulis khusus per-orang ──
+  if (!canWriteMount(account, role, userId)) {
     return NextResponse.json(
       {
         error:

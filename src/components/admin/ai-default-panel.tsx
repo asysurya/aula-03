@@ -1,9 +1,12 @@
 "use client";
 
 // ─────────────────────────────────────────────────────────────────────
-// Admin Panel → tab Teman AI: atur provider & API key DEFAULT untuk
-// semua user (disimpan terenkripsi di AppSetting "ai.default").
-// User tetap bisa memakai kunci sendiri di pengaturan Teman AI.
+// Admin Panel → tab Teman AI / AI Builder: atur provider & API key
+// DEFAULT (disimpan terenkripsi di AppSetting).
+// - variant "teman"   → endpoint /api/admin/ai  (key "ai.default")
+//   dipakai Teman AI + Pusat Belajar (Teman Belajar/Alat Materi).
+// - variant "builder" → endpoint /api/admin/ai-builder (key "ai.builder")
+//   dipakai AI Builder (Pusat Belajar) — provider DIPISAH dari Teman AI.
 // ─────────────────────────────────────────────────────────────────────
 
 import { useCallback, useEffect, useState } from "react";
@@ -32,7 +35,14 @@ interface AdminAiDefault {
   usable: boolean;
 }
 
-export function AiDefaultPanel() {
+export function AiDefaultPanel({ variant = "teman" }: { variant?: "teman" | "builder" }) {
+  const isBuilder = variant === "builder";
+  const endpoint = isBuilder ? "/api/admin/ai-builder" : "/api/admin/ai";
+  const featureName = isBuilder ? "AI Builder" : "Teman AI";
+  const loadErr = isBuilder ? "Gagal memuat default AI Builder." : "Gagal memuat default Teman AI.";
+  const savedToast = isBuilder
+    ? "Default AI Builder tersimpan — dipakai tab AI Builder di Pusat Belajar."
+    : "Default Teman AI tersimpan — dipakai user tanpa kunci sendiri.";
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [data, setData] = useState<AdminAiDefault | null>(null);
@@ -48,7 +58,7 @@ export function AiDefaultPanel() {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await fetch("/api/admin/ai", { cache: "no-store" });
+      const res = await fetch(endpoint, { cache: "no-store" });
       if (!res.ok) throw new Error();
       const json: AdminAiDefault = await res.json();
       setData(json);
@@ -58,11 +68,11 @@ export function AiDefaultPanel() {
       setApiKey("");
       setClearKey(false);
     } catch {
-      toast.error("Gagal memuat default Teman AI.");
+      toast.error(loadErr);
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [endpoint, loadErr]);
 
   useEffect(() => {
     void load();
@@ -95,14 +105,14 @@ export function AiDefaultPanel() {
           baseUrl: baseUrl.trim() || undefined,
           model: model.trim() || undefined,
           apiKey: apiKey.trim() || undefined,
-          scope: "admin",
+          scope: isBuilder ? "builder" : "admin",
         }),
       });
       const json = await res.json().catch(() => ({}));
       if (json?.ok) {
         const replyTxt = json.reply ? ` dan menjawab: “${json.reply}”` : "";
         setTestResult({ ok: true, text: `Tersambung! Model “${json.model ?? "?"}” berfungsi${replyTxt}.` });
-        toast.success("Sambungan default Teman AI OK");
+        toast.success(isBuilder ? "Sambungan default AI Builder OK" : "Sambungan default Teman AI OK");
       } else {
         setTestResult({ ok: false, text: json?.error ?? "Tes gagal — coba lagi." });
       }
@@ -129,7 +139,7 @@ export function AiDefaultPanel() {
     }
     setSaving(true);
     try {
-      const res = await fetch("/api/admin/ai", {
+      const res = await fetch(endpoint, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -145,7 +155,7 @@ export function AiDefaultPanel() {
         toast.error(json.error ?? "Gagal menyimpan default.");
         return;
       }
-      toast.success("Default Teman AI tersimpan — dipakai user tanpa kunci sendiri.");
+      toast.success(savedToast);
       setApiKey("");
       await load();
     } catch {
@@ -158,13 +168,17 @@ export function AiDefaultPanel() {
   async function disableDefault() {
     setSaving(true);
     try {
-      const res = await fetch("/api/admin/ai", {
+      const res = await fetch(endpoint, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ provider: "" }),
       });
       if (!res.ok) throw new Error();
-      toast.success("Default dimatikan — setiap user harus pasang kunci sendiri.");
+      toast.success(
+        isBuilder
+          ? "Default AI Builder dimatikan — tab AI Builder tidak bisa dipakai sampai diatur lagi."
+          : "Default dimatikan — setiap user harus pasang kunci sendiri."
+      );
       await load();
     } catch {
       toast.error("Gagal menonaktifkan default.");
@@ -181,10 +195,12 @@ export function AiDefaultPanel() {
         <div className="flex items-start justify-between gap-3">
           <div>
             <h3 className="font-semibold flex items-center gap-2">
-              <KeyRound className="h-4 w-4 text-primary" /> Default Teman AI
+              <KeyRound className="h-4 w-4 text-primary" /> Default {featureName}
             </h3>
             <p className="text-xs text-muted-foreground mt-0.5">
-              User tanpa pengaturan sendiri otomatis memakai provider & kunci ini.
+              {isBuilder
+                ? "Dipakai tab AI Builder di Pusat Belajar — dipisah dari provider Teman AI."
+                : "User tanpa pengaturan sendiri otomatis memakai provider & kunci ini."}
             </p>
           </div>
           {data ? (
@@ -209,9 +225,20 @@ export function AiDefaultPanel() {
             <div className="rounded-md border bg-muted/40 px-3 py-2 flex items-start gap-2">
               <Info className="h-4 w-4 mt-0.5 shrink-0 text-muted-foreground" />
               <p className="text-xs text-muted-foreground">
-                User bisa memakai <strong className="text-foreground">kunci sendiri</strong> di
-                pengaturan Teman AI (ChatGPT, DeepSeek, OpenRouter, Gemini, Ollama, atau base URL
-                kustom) — pengaturan per-user selalu menang atas default ini.
+                {isBuilder ? (
+                  <>
+                    Provider ini <strong className="text-foreground">dipisah dari Teman AI</strong> dan
+                    hanya dipakai tab <strong className="text-foreground">AI Builder</strong> di Pusat
+                    Belajar — tempat AI menulis kode HTML/CSS/JS untuk siswa. Pilih model yang kuat
+                    menulis kode (mis. deepseek-chat / gpt-4o-mini) agar hasilnya bagus.
+                  </>
+                ) : (
+                  <>
+                    User bisa memakai <strong className="text-foreground">kunci sendiri</strong> di
+                    pengaturan Teman AI (ChatGPT, DeepSeek, OpenRouter, Gemini, Ollama, atau base URL
+                    kustom) — pengaturan per-user selalu menang atas default ini.
+                  </>
+                )}
               </p>
             </div>
 
@@ -325,7 +352,9 @@ export function AiDefaultPanel() {
               <p className="text-sm text-muted-foreground">
                 Belum ada default aktif
                 {data?.provider === "" ? "" : ` (${providerLabel(data?.provider)})`}
-                . User harus memasang kunci sendiri untuk memakai Teman AI.
+                {isBuilder
+                  ? ". Tab AI Builder di Pusat Belajar tidak bisa dipakai sampai default ini diatur."
+                  : ". User harus memasang kunci sendiri untuk memakai Teman AI."}
               </p>
             )}
 

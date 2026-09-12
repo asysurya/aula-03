@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Users, School, Shield, Database, UsersRound, Bot } from "lucide-react";
+import { Users, School, Shield, Database, UsersRound, Bot, Hammer } from "lucide-react";
 import { UsersPanel } from "@/components/admin/users-panel";
 import { ClassroomsPanel } from "@/components/admin/classrooms-panel";
 import { DataCloudPanel } from "@/components/admin/data-cloud-panel";
@@ -41,6 +41,9 @@ export function AdminView() {
             <TabsTrigger value="temanai" className="gap-1.5">
               <Bot className="h-4 w-4" /> Teman AI
             </TabsTrigger>
+            <TabsTrigger value="aibuilder" className="gap-1.5">
+              <Hammer className="h-4 w-4" /> AI Builder
+            </TabsTrigger>
           </TabsList>
           <TabsContent value="users" className="mt-0">
             <UsersPanel />
@@ -56,6 +59,9 @@ export function AdminView() {
           </TabsContent>
           <TabsContent value="temanai" className="mt-0">
             <AiDefaultPanel />
+          </TabsContent>
+          <TabsContent value="aibuilder" className="mt-0">
+            <AiDefaultPanel variant="builder" />
           </TabsContent>
         </Tabs>
       </div>

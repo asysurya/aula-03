@@ -166,7 +166,7 @@ export function FileBrowser({
   const [clipboard, setClipboard] = useState<Clipboard>(null);
   const [previewFile, setPreviewFile] = useState<CloudFileItem | null>(null);
   // Mount MEGA Cloud (guru/admin) — browse isi akun MEGA langsung.
-  const [megaOpen, setMegaOpen] = useState(false);
+  const [megaOpen, setMegaOpen] = useState<string | null>(null); // id akun mount yang dibuka
 
   // Single-item action dialogs.
   const [renameTarget, setRenameTarget] = useState<
@@ -209,14 +209,22 @@ export function FileBrowser({
     },
   });
 
-  // Hak akses mount MEGA (diatur admin per-akun): kartu MEGA di root hanya
-  // tampil bagi user yang diizinkan (admin saja / guru+admin / semua user).
+  // Hak akses mount MEGA (diatur admin per-akun: per PERAN dan PER ORANG):
+  // kartu MEGA di root hanya tampil bagi user yang diizinkan, dan
+  // `accounts` berisi SEMUA akun yang boleh dibuka (untuk switch akun).
   const { data: megaAccess } = useQuery<{
     visible: boolean;
     accountId?: string;
     accountName?: string;
     canWrite?: boolean;
     reason?: string | null;
+    accounts?: {
+      id: string;
+      name: string;
+      email: string | null;
+      status: string | null;
+      canWrite: boolean;
+    }[];
   }>({
     queryKey: ["mega-access"],
     queryFn: async () => {
@@ -226,6 +234,7 @@ export function FileBrowser({
     },
     staleTime: 30_000,
   });
+  const megaAccounts = megaAccess?.accounts ?? [];
 
   function invalidateAll() {
     // Invalidate the current folder + classroom root + (best-effort) others.
@@ -249,14 +258,17 @@ export function FileBrowser({
     setSelectedFolders(new Set());
     setSelectedFiles(new Set());
     // Pindah folder/classroom otomatis menutup mount MEGA.
-    setMegaOpen(false);
+    setMegaOpen(null);
   }
 
-  // ── Mount MEGA Cloud (guru/admin) — early return ──
-  if (megaOpen) {
+  // ── Mount MEGA Cloud (sesuai hak akses) — early return ──
+  if (megaOpen !== null) {
     return (
       <div className="h-full">
-        <MegaMountView onExit={() => setMegaOpen(false)} />
+        <MegaMountView
+          initialAccountId={megaOpen}
+          onExit={() => setMegaOpen(null)}
+        />
       </div>
     );
   }
@@ -280,8 +292,12 @@ export function FileBrowser({
   const ancestors = data?.ancestors ?? [];
 
   // Kartu mount MEGA hanya di root & bagi user yang diizinkan (hak akses
-  // per-akun dari Admin Panel — bisa admin saja / guru+admin / semua user).
+  // per-akun dari Admin Panel — bisa admin saja / guru+admin / semua user /
+  // per-orang). Bila user boleh membuka beberapa akun, kartu menampilkan
+  // jumlah akun + membuka akun pertama (bisa ganti dari dalam mount).
   const showMegaCard = !folderId && (megaAccess?.visible ?? false);
+  const megaCardReadOnly =
+    megaAccounts.length > 0 && megaAccounts.every((a) => !a.canWrite);
 
   const totalSelected = selectedFolders.size + selectedFiles.size;
 
@@ -788,8 +804,9 @@ export function FileBrowser({
                 >
                   {showMegaCard ? (
                     <MegaMountCard
-                      onClick={() => setMegaOpen(true)}
-                      readOnly={megaAccess ? !megaAccess.canWrite : false}
+                      onClick={() => setMegaOpen(megaAccounts[0]?.id ?? null)}
+                      readOnly={megaCardReadOnly}
+                      accountCount={megaAccounts.length}
                     />
                   ) : null}
                 {folders.map((f) => (
@@ -1007,9 +1024,12 @@ export function FileBrowser({
 function MegaMountCard({
   onClick,
   readOnly,
+  accountCount = 1,
 }: {
   onClick: () => void;
   readOnly?: boolean;
+  /** Jumlah akun cloud yang boleh dibuka user ini (>1 → badge + bisa switch). */
+  accountCount?: number;
 }) {
   return (
     <Card
@@ -1036,13 +1056,21 @@ function MegaMountCard({
             <Badge className="bg-red-500 text-white border-transparent">
               Mount
             </Badge>
+            {accountCount > 1 ? (
+              <Badge
+                className="bg-primary/10 text-primary border-transparent"
+                title="Kamu punya akses ke beberapa akun cloud — buka mount lalu pakai tombol Ganti Akun"
+              >
+                {accountCount} akun
+              </Badge>
+            ) : null}
             {readOnly ? (
               <Badge className="bg-amber-500/15 text-amber-600 dark:text-amber-400 border-transparent">
                 Baca-saja
               </Badge>
             ) : null}
             <span className="text-[11px] text-muted-foreground">
-              Storage awan kelas
+              {accountCount > 1 ? "Ganti akun dari dalam mount" : "Storage awan kelas"}
             </span>
           </div>
         </div>
@@ -1349,7 +1377,7 @@ function FileRow({
                       className="size-8"
                       onClick={(e) => {
                         e.stopPropagation();
-                        void toggleFavorite();
+                        void toggleFavorite(file.id);
                       }}
                       title={isFav ? "Hapus dari favorit" : "Tambahkan ke favorit"}
                     >

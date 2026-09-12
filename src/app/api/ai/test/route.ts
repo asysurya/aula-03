@@ -75,7 +75,8 @@ const testSchema = z.object({
   apiKey: z.string().max(400).optional().nullable(),
   model: z.string().trim().max(200).optional().nullable(),
   // "admin" = tes default admin (panel Admin) — fallback kunci dari ai.default.
-  scope: z.enum(["user", "admin"]).optional(),
+  // "builder" = tes default AI Builder — fallback kunci dari ai.builder.
+  scope: z.enum(["user", "admin", "builder"]).optional(),
 });
 
 function testErrorMessage(status: number, detailRaw: string | null): string {
@@ -134,19 +135,22 @@ export async function POST(req: NextRequest) {
       null
     );
     // ApiKey kosong di form → fallback ke kunci TERSIMPAN sesuai scope:
-    // user → AiUserSetting; admin → AppSetting "ai.default".
-    // ⚠ scope "admin" = membaca kunci default admin → hanya ADMIN boleh.
-    // (Dulu: user biasa bisa mengarahkan kunci admin ke baseUrl attackernya
-    // dan mencegatnya — eksfiltrasi kunci.)
+    // user → AiUserSetting; admin → AppSetting "ai.default";
+    // builder → AppSetting "ai.builder".
+    // ⚠ scope "admin"/"builder" = membaca kunci default admin → hanya ADMIN
+    // boleh. (Dulu: user biasa bisa mengarahkan kunci admin ke baseUrl
+    // attackernya dan mencegatnya — eksfiltrasi kunci.)
     if (!d.apiKey) {
-      if (d.scope === "admin") {
+      const adminScopeKey =
+        d.scope === "admin" ? "ai.default" : d.scope === "builder" ? "ai.builder" : null;
+      if (adminScopeKey) {
         if (user.role !== "ADMIN") {
           return NextResponse.json(
             { ok: false, error: "Hanya admin yang boleh menguji default admin." },
             { status: 403 }
           );
         }
-        const adminRow = await db.appSetting.findUnique({ where: { key: "ai.default" } });
+        const adminRow = await db.appSetting.findUnique({ where: { key: adminScopeKey } });
         if (adminRow) {
           try {
             const raw = JSON.parse(adminRow.value) as {

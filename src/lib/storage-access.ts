@@ -72,9 +72,15 @@ export async function checkStorageAccess(
     if (!mega) return { ok: false, status: 404, body: "Not found" };
     const mountAccount = await db.cloudAccount.findUnique({
       where: { id: mega.accountId },
-      select: { id: true, mountVisibleTo: true, mountMode: true },
+      select: {
+        id: true,
+        mountVisibleTo: true,
+        mountMode: true,
+        mountUserIds: true,
+        mountUserWriteIds: true,
+      },
     });
-    if (!mountAccount || !canViewMount(mountAccount, sessionUser.role)) {
+    if (!mountAccount || !canViewMount(mountAccount, sessionUser.role, sessionUser.id)) {
       return { ok: false, status: 404, body: "Not found" };
     }
     return { ok: true, kind: "mega-raw", accountId: mega.accountId };

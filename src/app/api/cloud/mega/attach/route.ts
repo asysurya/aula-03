@@ -35,6 +35,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "UNAUTHORIZED" }, { status: 401 });
   }
   const role = (user as { role?: string }).role;
+  const userId = (user as { id?: string }).id ?? null;
 
   const body = await req.json().catch(() => null);
   const accountId = typeof body?.accountId === "string" ? body.accountId : null;
@@ -52,29 +53,33 @@ export async function POST(req: NextRequest) {
     sessionData: true,
     mountVisibleTo: true,
     mountMode: true,
+    mountUserIds: true,
+    mountUserWriteIds: true,
   };
   const account = accountId
     ? await db.cloudAccount.findFirst({
         where: { id: accountId, provider: "mega", email: { not: null } },
         select,
       })
-    : await db.cloudAccount.findFirst({
-        where: {
-          provider: "mega",
-          active: true,
-          email: { not: null },
-          lastStatus: { not: "error" },
-        },
-        orderBy: { fileCount: "asc" },
-        select,
-      });
+    : (
+        await db.cloudAccount.findMany({
+          where: {
+            provider: "mega",
+            active: true,
+            email: { not: null },
+            lastStatus: { not: "error" },
+          },
+          orderBy: { fileCount: "asc" },
+          select,
+        })
+      ).find((a) => canViewMount(a, role, userId)) ?? null;
   if (!account || !account.email) {
     return NextResponse.json(
       { error: "Belum ada akun MEGA aktif." },
       { status: 404 }
     );
   }
-  if (!canViewMount(account, role)) {
+  if (!canViewMount(account, role, userId)) {
     return NextResponse.json(
       {
         error:

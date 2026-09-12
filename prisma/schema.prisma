@@ -48,6 +48,7 @@ model User {
   aiSetting            AiUserSetting?
   aiMessages           AiMessage[]
   readerDocs           ReaderDoc[]
+  builderProjects      BuilderProject[]
 }
 
 enum Role {
@@ -394,6 +395,15 @@ model CloudAccount {
   mountVisibleTo String @default("GURU")
   mountMode      String @default("WRITE")
 
+  // ── Izin khusus PER ORANG (di luar peran di atas; sifatnya TAMBAHAN —
+  //    tidak pernah memangkas hak yang sudah diberikan peran) ──
+  // mountUserIds: user yang boleh MEMBUKA mount walau perannya tidak
+  //   termasuk mountVisibleTo (grant lihat).
+  // mountUserWriteIds: user yang boleh MENULIS (unggah/edit/hapus) walau
+  //   mountMode READ — otomatis boleh membuka juga (grant tulis).
+  mountUserIds      String[] @default([])
+  mountUserWriteIds String[] @default([])
+
   active        Boolean   @default(true)
   lastStatus    String    @default("unknown")
   lastCheckedAt DateTime?
@@ -707,4 +717,23 @@ model ReaderDoc {
 
   @@unique([userId, storageKey])
   @@index([userId])
+}
+
+// ───────────────── AI Builder (Pusat Belajar): proyek web buatan siswa ─────────────────
+// Hasil generate AI Builder — SATU dokumen HTML mandiri (CSS di <style>, JS
+// di <script> di dalam dokumen) supaya bisa langsung dijalankan di iframe
+// sandbox, diunduh sebagai satu file .html, dan mudah diedit AI lagi.
+// Provider AI Builder DIPISAH dari Teman AI (AppSetting "ai.builder").
+model BuilderProject {
+  id          String   @id @default(cuid()) @map("_id")
+  userId      String
+  title       String
+  description String?
+  html        String
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+
+  @@index([userId, updatedAt])
 }

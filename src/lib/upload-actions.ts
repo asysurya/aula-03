@@ -274,27 +274,32 @@ export async function uploadMegaFileAction(
     sessionData: true,
     mountVisibleTo: true,
     mountMode: true,
+    mountUserIds: true,
+    mountUserWriteIds: true,
   };
   const account = params.accountId
     ? await db.cloudAccount.findFirst({
         where: { id: params.accountId, provider: "mega", email: { not: null } },
         select,
       })
-    : await db.cloudAccount.findFirst({
-        where: {
-          provider: "mega",
-          active: true,
-          email: { not: null },
-          lastStatus: { not: "error" },
-        },
-        orderBy: { fileCount: "asc" },
-        select,
-      });
+    : (
+        await db.cloudAccount.findMany({
+          where: {
+            provider: "mega",
+            active: true,
+            email: { not: null },
+            lastStatus: { not: "error" },
+          },
+          orderBy: { fileCount: "asc" },
+          select,
+        })
+      ).find((a) => canWriteMount(a, user.role, user.id)) ?? null;
   if (!account || !account.email) {
     return fail("Belum ada akun MEGA aktif.", 404);
   }
-  // ── Hak akses mount: unggah = operasi TULIS ──
-  if (!canWriteMount(account, user.role)) {
+  // ── Hak akses mount: unggah = operasi TULIS (mode akun WRITE, atau user
+  //    diberi grant tulis khusus per-orang oleh admin) ──
+  if (!canWriteMount(account, user.role, user.id)) {
     return fail(
       "Mount ini baca-saja untukmu (hak akses diatur admin di Admin Panel → Data & Cloud).",
       403

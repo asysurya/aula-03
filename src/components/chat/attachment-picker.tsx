@@ -36,6 +36,13 @@ import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import {
   Dialog,
   DialogContent,
   DialogDescription,
@@ -112,6 +119,9 @@ export function AttachmentPicker({
   const [megaNodeId, setMegaNodeId] = useState<string | null>(null);
   const [megaSelected, setMegaSelected] = useState<MegaEntry[]>([]);
   const [registering, setRegistering] = useState(false);
+  // Akun mount yang dipilih (null = default dari server — akun pertama
+  // yang boleh dibuka user). Bisa diganti bila user punya akses >1 akun.
+  const [megaAccountId, setMegaAccountId] = useState<string | null>(null);
 
   // Debounce pencarian.
   useEffect(() => {
@@ -127,6 +137,7 @@ export function AttachmentPicker({
       setSearch("");
       setTab("cloud");
       setMegaNodeId(null);
+      setMegaAccountId(null);
     }
   }, [open]);
 
@@ -151,11 +162,35 @@ export function AttachmentPicker({
     enabled: open && tab === "cloud",
   });
 
+  // ── Daftar akun mount yang boleh dibuka (untuk switch akun) ──
+  // Izin diperiksa server-side per-akun (per PERAN + PER ORANG).
+  const megaAccessQuery = useQuery<{
+    visible: boolean;
+    accounts?: {
+      id: string;
+      name: string;
+      email: string | null;
+      status: string | null;
+      canWrite: boolean;
+    }[];
+  }>({
+    queryKey: ["mega-access"],
+    queryFn: async () => {
+      const res = await fetch("/api/cloud/mega/access", { cache: "no-store" });
+      if (!res.ok) return { visible: false };
+      return res.json();
+    },
+    staleTime: 30_000,
+    enabled: open && tab === "mega",
+  });
+  const megaAccounts = megaAccessQuery.data?.accounts ?? [];
+
   // ── Query: tree mount MEGA (tab mega) ──
   const megaQuery = useQuery<MegaTreeResponse>({
-    queryKey: ["mega-attach-tree", megaNodeId ?? "root"],
+    queryKey: ["mega-attach-tree", megaAccountId ?? "auto", megaNodeId ?? "root"],
     queryFn: async () => {
       const params = new URLSearchParams();
+      if (megaAccountId) params.set("accountId", megaAccountId);
       if (megaNodeId) params.set("nodeId", megaNodeId);
       const res = await fetch(
         `/api/cloud/mega/tree?${params.toString()}`,
@@ -167,6 +202,14 @@ export function AttachmentPicker({
     },
     enabled: open && tab === "mega",
   });
+
+  /** Ganti akun mount di picker — reset folder & pilihan. */
+  function switchMegaAccount(id: string) {
+    if (id === (megaAccountId ?? megaAccounts[0]?.id)) return;
+    setMegaAccountId(id);
+    setMegaNodeId(null);
+    setMegaSelected([]);
+  }
 
   const alreadyPending = new Set(pendingFileIds);
   const totalSelected = selected.length + megaSelected.length;
@@ -303,7 +346,6 @@ export function AttachmentPicker({
   }
 
   const busy = uploading || registering;
-  const megaAccountId = megaQuery.data?.account.id ?? "";
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -387,6 +429,27 @@ export function AttachmentPicker({
             </>
           ) : null}
         </div>
+
+        {/* ── Pemilih akun mount (hanya bila >1 akun boleh dibuka) ── */}
+        {tab === "mega" && megaAccounts.length > 1 ? (
+          <Select
+            value={megaAccountId ?? megaAccounts[0]?.id}
+            onValueChange={switchMegaAccount}
+          >
+            <SelectTrigger className="h-9 text-sm">
+              <span className="text-muted-foreground text-xs">Akun:</span>
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {megaAccounts.map((a) => (
+                <SelectItem key={a.id} value={a.id}>
+                  {a.name}
+                  {a.canWrite ? "" : " (baca-saja)"}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        ) : null}
 
         {/* ── Breadcrumb mount MEGA ── */}
         {tab === "mega" && megaQuery.data ? (

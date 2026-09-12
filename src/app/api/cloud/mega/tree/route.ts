@@ -3,6 +3,7 @@ import { db } from "@/lib/db";
 import { requireUser } from "@/lib/session";
 import {
   canViewMount,
+  canWriteMount,
   normalizeMountMode,
   normalizeVisibleTo,
 } from "@/lib/mount-access";
@@ -32,12 +33,15 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: "UNAUTHORIZED" }, { status: 401 });
   }
   const role = (user as { role?: string }).role;
+  const userId = (user as { id?: string }).id ?? null;
 
   const url = new URL(req.url);
   const accountIdParam = url.searchParams.get("accountId");
   const nodeId = url.searchParams.get("nodeId");
 
-  // Pilih akun: eksplisit via param, atau akun aktif pertama.
+  // Pilih akun: eksplisit via param, atau akun aktif pertama yang
+  // BOLEH DIBUKA user ini (peran + grant per-orang) — jadi user yang
+  // hanya punya akses ke akun kedua tetap bisa memakai mount tanpa 403.
   const account = accountIdParam
     ? await db.cloudAccount.findFirst({
         where: {
@@ -47,16 +51,18 @@ export async function GET(req: NextRequest) {
         },
         select: selectAccount(),
       })
-    : await db.cloudAccount.findFirst({
-        where: {
-          provider: "mega",
-          active: true,
-          email: { not: null },
-          lastStatus: { not: "error" },
-        },
-        orderBy: { fileCount: "asc" },
-        select: selectAccount(),
-      });
+    : (
+        await db.cloudAccount.findMany({
+          where: {
+            provider: "mega",
+            active: true,
+            email: { not: null },
+            lastStatus: { not: "error" },
+          },
+          orderBy: { fileCount: "asc" },
+          select: selectAccount(),
+        })
+      ).find((a) => canViewMount(a, role, userId)) ?? null;
 
   if (!account || !account.email) {
     return NextResponse.json(
@@ -68,8 +74,9 @@ export async function GET(req: NextRequest) {
     );
   }
 
-  // ── Hak akses mount (diatur per-akun di Admin Panel) ──
-  if (!canViewMount(account, role)) {
+  // ── Hak akses mount (diatur per-akun di Admin Panel: per PERAN dan
+  //    per ORANG — grant per-orang tetap lolos walau peran tak termasuk) ──
+  if (!canViewMount(account, role, userId)) {
     return NextResponse.json(
       {
         error:
@@ -102,11 +109,12 @@ export async function GET(req: NextRequest) {
         spaceTotal: quota?.spaceTotal ?? null,
         spaceUsedLabel: quota ? formatBytes(quota.spaceUsed) : null,
         spaceTotalLabel: quota ? formatBytes(quota.spaceTotal) : null,
-        // Hak akses efektif untuk user ini (mount read-only? dsb.)
+        // Hak akses efektif untuk user ini (per PERAN + PER ORANG):
+        // mount baca-saja untuk peran bisa tetap bisa ditulis orang yang
+        // diberi grant tulis khusus, dan sebaliknya.
         mountMode: normalizeMountMode(account.mountMode),
         mountVisibleTo: normalizeVisibleTo(account.mountVisibleTo),
-        canWrite:
-          normalizeMountMode(account.mountMode) === "WRITE",
+        canWrite: canWriteMount(account, role, userId),
       },
       nodeId: listing.nodeId,
       path: listing.path,
@@ -151,5 +159,7 @@ function selectAccount() {
     active: true,
     mountVisibleTo: true,
     mountMode: true,
+    mountUserIds: true,
+    mountUserWriteIds: true,
   };
 }

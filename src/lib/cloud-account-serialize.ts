@@ -21,6 +21,9 @@ export interface SerializedCloudAccount {
   // Hak akses mount
   mountVisibleTo: string;
   mountMode: string;
+  // Izin khusus per-orang (id user; dipakai editor Admin Panel)
+  mountUserIds: string[];
+  mountUserWriteIds: string[];
   // S3-compatible
   endpoint: string | null;
   region: string | null;
@@ -47,6 +50,8 @@ export function serializeCloudAccount(r: {
   updatedAt: Date;
   mountVisibleTo?: string | null;
   mountMode?: string | null;
+  mountUserIds?: string[] | null;
+  mountUserWriteIds?: string[] | null;
   endpoint: string | null;
   region: string | null;
   bucket: string | null;
@@ -72,6 +77,8 @@ export function serializeCloudAccount(r: {
     updatedAt: r.updatedAt,
     mountVisibleTo: r.mountVisibleTo === "ADMIN" || r.mountVisibleTo === "ALL" ? r.mountVisibleTo : "GURU",
     mountMode: r.mountMode === "READ" ? "READ" : "WRITE",
+    mountUserIds: Array.isArray(r.mountUserIds) ? r.mountUserIds : [],
+    mountUserWriteIds: Array.isArray(r.mountUserWriteIds) ? r.mountUserWriteIds : [],
     endpoint: r.endpoint,
     region: r.region,
     bucket: r.bucket,

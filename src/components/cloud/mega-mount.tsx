@@ -8,6 +8,7 @@ import { toast } from "sonner";
 import {
   AlertTriangle,
   CheckSquare,
+  ChevronDown,
   ChevronRight,
   ClipboardPaste,
   Copy,
@@ -125,6 +126,15 @@ interface MegaClipboard {
   entries: MegaEntry[];
 }
 
+/** Ringkasan akun mount yang boleh dibuka user (dari /api/cloud/mega/access). */
+interface MegaMountAccount {
+  id: string;
+  name: string;
+  email: string | null;
+  status: string | null;
+  canWrite: boolean;
+}
+
 // ───────────────────────── Component ─────────────────────────
 
 /**
@@ -133,15 +143,27 @@ interface MegaClipboard {
  * checkbox / Ctrl+A); copy/potong/tempel, rename, pindah, hapus permanen,
  * unggah (chunked utk file besar), unduh, pratinjau all-format + layar
  * penuh, context menu klik-kanan, shortcut keyboard, dan drag-and-drop.
- * Hak akses (siapa boleh membuka + baca-saja) diatur admin per-akun.
+ * Hak akses (siapa boleh membuka + baca-saja) diatur admin per-akun
+ * (per PERAN dan PER ORANG).
+ *
+ * Bila user boleh membuka lebih dari satu akun (mis. beberapa MEGA), header
+ * menampilkan tombol "Ganti Akun" untuk berpindah antar mount — tree,
+ * breadcrumb, seleksi, clipboard, dan pratinjau di-reset saat berpindah.
  */
 export function MegaMountView({
   onExit,
+  initialAccountId = null,
 }: {
   onExit: () => void;
+  /** Akun yang dibuka pertama kali (null = akun default dari server). */
+  initialAccountId?: string | null;
 }) {
   const [nodeId, setNodeId] = useState<string | null>(null);
   const [previewFile, setPreviewFile] = useState<CloudFileItem | null>(null);
+  // Akun yang sedang dibuka (id; null = biarkan server memilih default).
+  const [activeAccountId, setActiveAccountId] = useState<string | null>(
+    initialAccountId
+  );
 
   // ── Explorer state ──
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -156,9 +178,10 @@ export function MegaMountView({
 
   const { data, isLoading, error, refetch, isFetching } =
     useQuery<MegaTreeResponse>({
-      queryKey: ["mega-tree", nodeId ?? "root"],
+      queryKey: ["mega-tree", activeAccountId ?? "auto", nodeId ?? "root"],
       queryFn: async () => {
         const params = new URLSearchParams();
+        if (activeAccountId) params.set("accountId", activeAccountId);
         if (nodeId) params.set("nodeId", nodeId);
         const res = await fetch(
           `/api/cloud/mega/tree?${params.toString()}`,
@@ -173,6 +196,45 @@ export function MegaMountView({
         return json as MegaTreeResponse;
       },
     });
+
+  // ── Daftar akun yang boleh dibuka user ini (untuk tombol Ganti Akun) ──
+  // Diambil dari /api/cloud/mega/access — izin diperiksa DI SERVER per
+  // akun (per PERAN + PER ORANG), jadi daftar ini hanya berisi akun yang
+  // benar-benar boleh dipakai user ini.
+  const { data: mountAccountsData } = useQuery<{
+    visible: boolean;
+    accounts?: MegaMountAccount[];
+  }>({
+    queryKey: ["mega-access"],
+    queryFn: async () => {
+      const res = await fetch("/api/cloud/mega/access", { cache: "no-store" });
+      if (!res.ok) return { visible: false };
+      return res.json();
+    },
+    staleTime: 30_000,
+  });
+  const switchableAccounts = mountAccountsData?.accounts ?? [];
+  // Nama akun aktif untuk label tombol (tree response = sumber paling akurat).
+  const activeAccountName =
+    data?.account.name ??
+    switchableAccounts.find((a) => a.id === activeAccountId)?.name ??
+    null;
+
+  /** Pindah ke akun mount lain — reset navigasi/seleksi/clipboard/pratinjau. */
+  function switchAccount(accountId: string) {
+    if (accountId === activeAccountId) return;
+    setActiveAccountId(accountId);
+    setNodeId(null);
+    setSelected(new Set());
+    setAnchorId(null);
+    setClipboard(null);
+    setPreviewFile(null);
+    toast.info(
+      `Beralih ke akun "${
+        switchableAccounts.find((a) => a.id === accountId)?.name ?? "cloud"
+      }".`
+    );
+  }
 
   const accountId = data?.account.id;
   const entries = data?.entries ?? [];
@@ -525,6 +587,72 @@ export function MegaMountView({
         ) : null}
 
         <div className="ml-auto sm:ml-0 flex items-center gap-1">
+          {/* ── Tombol Ganti Akun — hanya tampil bila user boleh membuka
+              lebih dari satu akun cloud (izin diperiksa server di
+              /api/cloud/mega/access: per PERAN + PER ORANG) ── */}
+          {switchableAccounts.length > 1 ? (
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="gap-1.5 max-w-[240px]"
+                  title="Pindah ke akun cloud lain yang kamu punya aksesnya"
+                >
+                  <span className="truncate max-w-[150px] font-normal text-muted-foreground">
+                    {activeAccountName ?? "Akun"}
+                  </span>
+                  <span className="hidden sm:inline">· Ganti Akun</span>
+                  <ChevronDown className="size-3.5 shrink-0" />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" className="w-72">
+                <p className="px-2 py-1.5 text-[11px] font-medium text-muted-foreground">
+                  Akun cloud yang bisa kamu buka ({switchableAccounts.length})
+                </p>
+                {switchableAccounts.map((acc) => {
+                  const isActive =
+                    acc.id === (activeAccountId ?? data?.account.id);
+                  return (
+                    <DropdownMenuItem
+                      key={acc.id}
+                      disabled={isActive}
+                      onClick={() => switchAccount(acc.id)}
+                      className="gap-2 items-start"
+                    >
+                      <div className="min-w-0 flex-1">
+                        <p className="text-sm font-medium truncate flex items-center gap-1.5">
+                          <span className="truncate">{acc.name}</span>
+                          {isActive ? (
+                            <Badge className="bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 border-0 text-[9px] shrink-0">
+                              aktif
+                            </Badge>
+                          ) : null}
+                        </p>
+                        <p className="text-[11px] text-muted-foreground truncate">
+                          {acc.email ?? "—"}
+                        </p>
+                      </div>
+                      <Badge
+                        className={
+                          acc.canWrite
+                            ? "bg-primary/10 text-primary border-0 text-[9px] shrink-0"
+                            : "bg-amber-500/15 text-amber-600 dark:text-amber-400 border-0 text-[9px] shrink-0"
+                        }
+                        title={
+                          acc.canWrite
+                            ? "Kamu bisa mengunggah & mengubah isi akun ini"
+                            : "Baca-saja untukmu — hanya pratinjau & unduh"
+                        }
+                      >
+                        {acc.canWrite ? "tulis" : "baca"}
+                      </Badge>
+                    </DropdownMenuItem>
+                  );
+                })}
+              </DropdownMenuContent>
+            </DropdownMenu>
+          ) : null}
           <TransferManagerButton />
           <Button
             size="sm"
