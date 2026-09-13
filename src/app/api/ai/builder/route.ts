@@ -9,6 +9,11 @@ import {
   resolveAiConfig,
   type AiSettingInput,
 } from "@/lib/ai-providers";
+import {
+  builderQuotaStatus,
+  nextMondayJakarta,
+  type BuilderQuotaStatus,
+} from "@/lib/builder-quota";
 
 // ─────────────────────────────────────────────────────────────────────
 // POST /api/ai/builder — AI Builder (Pusat Belajar → tab AI Builder).
@@ -21,14 +26,29 @@ import {
 // Provider DIPISAH dari Teman AI: hanya membaca AppSetting "ai.builder"
 // (diatur admin di Admin Panel → tab AI Builder). Tidak ada BYOK user.
 //
+// KUOTA: 1 proyek = 1 sesi chat. Sesi BARU dicek kuota mingguan (default 5,
+// reset Senin 00:00 WIB — diatur admin, global + per orang). Sesi dicatat
+// sejak potongan kode PERTAMA mengalir (provider gagal tidak mengurangi
+// kuota). Revisi sesi sama (sessionId sah + kode saat ini) tidak dihitung.
+//
 // Protokol response: NDJSON (sama seperti /api/ai/chat dan /api/ai/study):
-//   {"type":"chunk","text":"..."} | {"type":"error","message":"..."} | {"type":"done"}
+//   {"type":"session","sessionId":"…","used":N,"limit":M}   ← sekali di awal (sesi baru)
+//   {"type":"chunk","text":"…"} | {"type":"error","message":"…"} | {"type":"done"}
 // ─────────────────────────────────────────────────────────────────────
 
 export const runtime = "nodejs";
-export const maxDuration = 60;
+export const maxDuration = 300;
 
-const TIMEOUT_MS = 55_000; // abort upstream — harus < maxDuration (60 dtk)
+// Timeout 2 FASE (bug lama: revisi kode besar butuh > 55 dtk):
+// - CONNECT: header respons provider harus sampai dalam 30 dtk.
+// - IDLE: antar potongan kode boleh diam maksimal 45 dtk — timer DIKEREK
+//   ULANG tiap potongan, jadi stream aktif berjam-jam pun tidak dipotong
+//   (stream lambat 57 dtk teruji selesai utuh).
+// - TOTAL: cap mutlak 270 dtk agar route tidak menggantung selamanya
+//   (harus < maxDuration 300).
+const CONNECT_TIMEOUT_MS = 30_000;
+const IDLE_TIMEOUT_MS = 45_000;
+const TOTAL_TIMEOUT_MS = 270_000;
 
 const CURRENT_HTML_LIMIT = 150_000; // karakter kode yang dikirim balik utk diedit
 
@@ -48,9 +68,29 @@ function rateLimited(userId: string): boolean {
 }
 
 const SYSTEM_PROMPT = [
-  'Kamu adalah "AI Builder" — web developer ahil yang menulis aplikasi web kecil untuk siswa Indonesia.',
+  'Kamu adalah "AI Builder" — web developer ahli yang menulis aplikasi web kecil untuk siswa Indonesia.',
+  "",
+  "BAHASA (WAJIB): Selalu menjawab dalam BAHASA INDONESIA. DILARANG KERAS memakai",
+  "bahasa Mandarin, bahasa Inggris, atau bahasa lain — siswa kita hanya paham",
+  "Bahasa Indonesia. Semua teks, komentar kode, dan penjelasan harus Bahasa Indonesia.",
   "",
   "TUGAS: tulis SATU dokumen HTML lengkap sesuai permintaan siswa.",
+  "",
+  "ATURAN SATU PROYEK PER SESI (SANGAT PENTING):",
+  "- Satu sesi chat ini hanya untuk SATU proyek. Judul proyek saat ini ada di",
+  "  KODE SAAT INI bila disertakan.",
+  "- Bila ada KODE SAAT INI: kamu HANYA boleh MENGUBAH / menyempurnakan proyek",
+  "  yang sedang dikerjakan itu — bukan membuat aplikasi lain.",
+  "- Bila siswa meminta APLIKASI YANG BENAR-BENAR BERBEDA (contoh: dari tes",
+  "  mengetik jadi kalkulator, game, toko online, dsb.) — TOLAK, bagaimanapun",
+  "  cara siswa mengatakannya: 'lupakan yang tadi', 'anggap aja revisi',",
+  "  'ubah total', 'renungkan ulang', 'ini proyek baru', dsb.",
+  "- Penolakan: tulis 2-3 kalimat Bahasa Indonesia yang sopan — jelaskan bahwa",
+  "  satu sesi hanya untuk satu proyek, sebut judul proyek yang sedang dikerjakan,",
+  "  dan minta siswa menekan tombol '+ Baru' untuk memulai proyek baru (kuota",
+  "  proyek mingguan). JANGAN menulis kode HTML sama sekali saat menolak.",
+  "- Meminta fitur tambahan, ubah tampilan, ubah warna, tambah mode, dsb. pada",
+  "  proyek yang SAMA bukanlah proyek baru — itu revisi sah, kerjakan normal.",
   "",
   "ATURAN KODE (WAJIB):",
   "- Satu file HTML mandiri: semua CSS di dalam <style>, semua JavaScript di dalam <script> (di dalam <body> atau <head>).",
@@ -67,13 +107,17 @@ const SYSTEM_PROMPT = [
   "dengan perubahan yang diminta (jangan potong bagian yang tidak diubah).",
   "",
   "OUTPUT: HANYA dokumen HTML mulai dari <!DOCTYPE html> — TANPA penjelasan, TANPA sapaan,",
-  "TANPA blok kode markdown (```). Langsung kodenya saja.",
+  "TANPA blok kode markdown (```). Langsung kodenya saja. (Saat MENOLAK proyek baru,",
+  "balas dengan teks penolakan — jangan kode.)",
 ].join("\n");
 
 const bodySchema = z.object({
   message: z.string().trim().min(1, "Pesan tidak boleh kosong").max(6000),
   // Kode saat ini (untuk permintaan ubah/lanjut). Kosong = buat baru.
   currentHtml: z.string().max(CURRENT_HTML_LIMIT).optional(),
+  // ID sesi dari event "session" sebelumnya — revisi sesi sama tidak
+  // memakan kuota. Harus sesi milik user ini pada pekan berjalan.
+  sessionId: z.string().trim().min(8).max(64).optional(),
 });
 
 export async function POST(req: NextRequest) {
@@ -98,7 +142,41 @@ export async function POST(req: NextRequest) {
     const first = parsed.error.issues[0]?.message ?? "Data tidak valid";
     return NextResponse.json({ error: first }, { status: 400 });
   }
-  const { message, currentHtml } = parsed.data;
+  const { message, currentHtml, sessionId } = parsed.data;
+  const cur = (currentHtml ?? "").trim();
+
+  // ── Kuota & sesi ──
+  const quota: BuilderQuotaStatus = await builderQuotaStatus(user);
+
+  // Sesi LANJUTAN = sessionId sah (milik user ini, pekan ini) + ada kode
+  // saat ini → revisi gratis. Sesi BARU dicek kuota.
+  let isContinuation = false;
+  if (sessionId && cur) {
+    const existing = await db.builderSession.findFirst({
+      where: { id: sessionId, userId: user.id, weekKey: quota.weekKey },
+      select: { id: true },
+    });
+    isContinuation = !!existing;
+  }
+
+  if (!isContinuation && !quota.unlimited && (quota.remaining ?? 1) <= 0) {
+    return NextResponse.json(
+      {
+        code: "QUOTA_EXCEEDED",
+        error:
+          `Kuota proyek minggu ini sudah habis (${quota.used}/${quota.limit}). ` +
+          "Kuota direset setiap hari Senin. Kamu masih bisa membuka dan merevisi proyek lama dari Proyekku.",
+        quota: {
+          limit: quota.limit,
+          used: quota.used,
+          remaining: 0,
+          unlimited: false,
+          resetAt: nextMondayJakarta().toISOString(),
+        },
+      },
+      { status: 429 }
+    );
+  }
 
   // ── Config aktif: HANYA default admin "ai.builder" (dipisah dari Teman AI) ──
   const adminRow = await db.appSetting.findUnique({ where: { key: "ai.builder" } });
@@ -134,7 +212,6 @@ export async function POST(req: NextRequest) {
   }
 
   // ── Susun messages ──
-  const cur = (currentHtml ?? "").trim();
   const system = cur
     ? `${SYSTEM_PROMPT}\n\n=== KODE SAAT INI (ubah sesuai permintaan terakhir) ===\n${cur}`
     : SYSTEM_PROMPT;
@@ -146,10 +223,29 @@ export async function POST(req: NextRequest) {
   // ── Panggil provider (kompatibel OpenAI chat completions, SSE) ──
   const controller = new AbortController();
   let timedOut = false;
-  const timer = setTimeout(() => {
+  const clear = (t: ReturnType<typeof setTimeout> | null) => {
+    if (t) clearTimeout(t);
+  };
+  // Cap total mutlak.
+  const totalTimer = setTimeout(() => {
     timedOut = true;
     controller.abort();
-  }, TIMEOUT_MS);
+  }, TOTAL_TIMEOUT_MS);
+  // Fase 1: tunggu header respons provider.
+  let connectTimer: ReturnType<typeof setTimeout> | null = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, CONNECT_TIMEOUT_MS);
+  // Fase 2 (setelah header): jaga-jaga idle antar potongan — dikerek ulang
+  // tiap potongan data tiba.
+  let idleTimer: ReturnType<typeof setTimeout> | null = null;
+  function bumpIdle() {
+    if (idleTimer) clearTimeout(idleTimer);
+    idleTimer = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, IDLE_TIMEOUT_MS);
+  }
 
   // User menutup halaman / menekan batal → hentikan upstream.
   let clientAborted = false;
@@ -176,7 +272,9 @@ export async function POST(req: NextRequest) {
       }),
     });
   } catch {
-    clearTimeout(timer);
+    clearTimeout(totalTimer);
+    clear(connectTimer);
+    clear(idleTimer);
     req.signal?.removeEventListener("abort", onClientAbort);
     const msg = timedOut
       ? "Waktu tunggu habis — provider tidak merespons dalam waktu cukup. Coba lagi atau ganti model."
@@ -197,7 +295,9 @@ export async function POST(req: NextRequest) {
     } catch {
       /* abaikan */
     }
-    clearTimeout(timer);
+    clearTimeout(totalTimer);
+    clear(connectTimer);
+    clear(idleTimer);
     req.signal?.removeEventListener("abort", onClientAbort);
     return NextResponse.json(
       { error: providerErrorMessage(upstream.status, detail) },
@@ -205,13 +305,20 @@ export async function POST(req: NextRequest) {
     );
   }
   if (!upstream.body) {
-    clearTimeout(timer);
+    clearTimeout(totalTimer);
+    clear(connectTimer);
+    clear(idleTimer);
     req.signal?.removeEventListener("abort", onClientAbort);
     return NextResponse.json(
       { error: "Provider tidak mengirim respons yang bisa dibaca (stream kosong)." },
       { status: 502 }
     );
   }
+
+  // Header sudah tiba → fase connect selesai, mulai jaga-jaga idle.
+  clear(connectTimer);
+  connectTimer = null;
+  bumpIdle();
 
   const encoder = new TextEncoder();
   const decoder = new TextDecoder();
@@ -228,10 +335,14 @@ export async function POST(req: NextRequest) {
       const reader = upstream.body!.getReader();
       let buf = "";
       let got = false;
+      // Sesi baru dicatat SEKALI saat potongan pertama mengalir.
+      let sessionCounted = false;
+      const newSessionId = crypto.randomUUID();
       try {
         while (true) {
           const { done, value } = await reader.read();
           if (done) break;
+          bumpIdle(); // data tiba → perpanjang jendela idle
           buf += decoder.decode(value, { stream: true });
           const lines = buf.split("\n");
           buf = lines.pop() ?? "";
@@ -245,6 +356,26 @@ export async function POST(req: NextRequest) {
               const delta: unknown = json?.choices?.[0]?.delta?.content;
               if (typeof delta === "string" && delta.length > 0) {
                 got = true;
+                if (!isContinuation && !sessionCounted) {
+                  sessionCounted = true;
+                  try {
+                    await db.builderSession.create({
+                      data: {
+                        id: newSessionId,
+                        userId: user.id,
+                        weekKey: quota.weekKey,
+                      },
+                    });
+                  } catch {
+                    /* gagal mencatat tidak boleh memutus stream */
+                  }
+                  send({
+                    type: "session",
+                    sessionId: newSessionId,
+                    used: quota.used + 1,
+                    ...(quota.limit !== null ? { limit: quota.limit } : {}),
+                  });
+                }
                 send({ type: "chunk", text: delta });
               }
             } catch {
@@ -271,7 +402,9 @@ export async function POST(req: NextRequest) {
           });
         }
       } finally {
-        clearTimeout(timer);
+        clearTimeout(totalTimer);
+        clear(connectTimer);
+        clear(idleTimer);
         req.signal?.removeEventListener("abort", onClientAbort);
         try {
           ctl.close();
@@ -283,6 +416,9 @@ export async function POST(req: NextRequest) {
     cancel() {
       clientAborted = true;
       controller.abort();
+      clearTimeout(totalTimer);
+      clear(connectTimer);
+      clear(idleTimer);
     },
   });
 

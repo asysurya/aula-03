@@ -219,8 +219,16 @@ export function MountUsersDialog({
           </div>
         </div>
 
-        {/* Daftar user */}
-        <div className="flex-1 min-h-0">
+        {/* Daftar user.
+            PERBAIKAN: ScrollArea Radix menyetel INLINE position:relative pada
+            Root-nya, dan tinggi persentase tidak mengecil mengikuti flex-item
+            yang di-shrink — akibatnya daftar pernah meluber ±210px MENUTUPI
+            tombol Batal/Simpan di bawah. Solusi: pembungkus dengan tinggi
+            definit h-[46vh] + min-h-0 shrink (boleh menyusut bila dialog
+            sempit) sebagai flex-child, lalu ScrollArea di-absolute-kan
+            absolute! inset-0 (Tailwind v4: trailing-bang menang atas inline
+            style Radix) sehingga SELALU persis seukuran pembungkus. */}
+        <div className="relative h-[46vh] min-h-0 shrink rounded-lg border border-border">
           {usersQuery.isLoading ? (
             <div className="py-8 text-center text-sm text-muted-foreground">
               <Loader2 className="size-4 animate-spin inline mr-2" />
@@ -234,7 +242,7 @@ export function MountUsersDialog({
               </Button>
             </div>
           ) : (
-            <ScrollArea className="h-[46vh] rounded-lg border border-border">
+            <ScrollArea className="absolute! inset-0">
               <div className="divide-y divide-border">
                 {rows.granted.length > 0 ? (
                   <div className="px-2 py-1.5 bg-muted/50">

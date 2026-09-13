@@ -49,6 +49,11 @@ model User {
   aiMessages           AiMessage[]
   readerDocs           ReaderDoc[]
   builderProjects      BuilderProject[]
+  builderSessions      BuilderSession[]
+
+  // Batas proyek AI Builder mingguan KHUSUS utk user ini (null = ikut
+  // batas global admin). Hanya berlaku utk non-admin — admin selalu bebas.
+  builderWeeklyLimit   Int?
 }
 
 enum Role {
@@ -736,4 +741,22 @@ model BuilderProject {
   user User @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: Cascade)
 
   @@index([userId, updatedAt])
+}
+
+// ───────────────── AI Builder: sesi proyek per minggu (kuota) ─────────────────
+// SATU baris = SATU sesi chat proyek baru (1 sesi = 1 proyek). Sesi dihitung
+// SEJAK potongan kode pertama mengalir — jadi walau siswa tidak menekan
+// "Simpan", proyek tetap tercatat; tapi bila provider gagal total, kuota
+// tidak berkurang. weekKey = tanggal Senin WIB pekan berjalan (YYYY-MM-DD)
+// sehingga kuota direset otomatis tiap Senin 00:00 WIB — baris pekan lama
+// tidak dihitung lagi dan boleh dibersihkan berkala.
+model BuilderSession {
+  id        String   @id @default(cuid()) @map("_id")
+  userId    String
+  weekKey   String
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+
+  @@index([userId, weekKey])
 }

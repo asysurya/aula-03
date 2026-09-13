@@ -8,6 +8,7 @@ import { ClassroomsPanel } from "@/components/admin/classrooms-panel";
 import { DataCloudPanel } from "@/components/admin/data-cloud-panel";
 import { GroupsPanel } from "@/components/admin/groups-panel";
 import { AiDefaultPanel } from "@/components/admin/ai-default-panel";
+import { BuilderLimitsPanel } from "@/components/admin/builder-limits-panel";
 
 export function AdminView() {
   const [tab, setTab] = useState("users");
@@ -61,7 +62,10 @@ export function AdminView() {
             <AiDefaultPanel />
           </TabsContent>
           <TabsContent value="aibuilder" className="mt-0">
-            <AiDefaultPanel variant="builder" />
+            <div className="space-y-4">
+              <AiDefaultPanel variant="builder" />
+              <BuilderLimitsPanel />
+            </div>
           </TabsContent>
         </Tabs>
       </div>

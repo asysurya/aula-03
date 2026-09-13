@@ -34,6 +34,8 @@ import {
   Sparkles,
   Code2,
   Eye,
+  CalendarClock,
+  Lock,
 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -69,6 +71,14 @@ interface ProjectRow {
   description: string | null;
   htmlLength: number;
   updatedAt: string;
+}
+
+/** Status kuota proyek mingguan dari /api/ai/builder/session. */
+interface QuotaInfo {
+  used: number;
+  limit: number | null; // null = bebas (admin)
+  remaining: number | null;
+  unlimited: boolean;
 }
 
 const EXAMPLES = [
@@ -129,10 +139,14 @@ function slugTitle(t: string): string {
   );
 }
 
-/** Baca stream NDJSON /api/ai/builder; onChunk dipanggil per potongan. */
+/** Baca stream NDJSON /api/ai/builder; onChunk dipanggil per potongan,
+ *  onSession dipanggil sekali di awal saat sesi baru tercatat. */
 async function readBuilderStream(
   res: Response,
-  onChunk: (full: string, delta: string) => void
+  handlers: {
+    onChunk: (full: string, delta: string) => void;
+    onSession?: (ev: { sessionId: string; used: number; limit?: number }) => void;
+  }
 ): Promise<{ full: string; error: string | null }> {
   const reader = res.body!.getReader();
   const decoder = new TextDecoder();
@@ -150,15 +164,28 @@ async function readBuilderStream(
       for (const line of lines) {
         const trimmed = line.trim();
         if (!trimmed) continue;
-        let ev: { type?: string; text?: string; message?: string };
+        let ev: {
+          type?: string;
+          text?: string;
+          message?: string;
+          sessionId?: string;
+          used?: number;
+          limit?: number;
+        };
         try {
           ev = JSON.parse(trimmed);
         } catch {
           continue;
         }
-        if (ev.type === "chunk" && ev.text) {
+        if (ev.type === "session" && ev.sessionId) {
+          handlers.onSession?.({
+            sessionId: ev.sessionId,
+            used: ev.used ?? 0,
+            limit: ev.limit,
+          });
+        } else if (ev.type === "chunk" && ev.text) {
           got += ev.text;
-          onChunk(got, ev.text);
+          handlers.onChunk(got, ev.text);
         } else if (ev.type === "error") {
           errMsg = ev.message ?? "Terjadi error.";
           break readLoop;
@@ -186,9 +213,61 @@ export function AiBuilder() {
   const chatEndRef = useRef<HTMLDivElement | null>(null);
   const stickRef = useRef(true);
 
+  // ID sesi proyek aktif (dari event "session") — revisi sesi sama
+  // tidak memakan kuota mingguan.
+  const sessionIdRef = useRef<string | null>(null);
+
+  // ── kuota proyek mingguan ──
+  const [quota, setQuota] = useState<QuotaInfo | null>(null);
+  useEffect(() => {
+    let alive = true;
+    fetch("/api/ai/builder/session", { cache: "no-store" })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((j: QuotaInfo | null) => {
+        if (alive && j) setQuota(j);
+      })
+      .catch(() => {
+        /* kuota opsional — biarkan UI tetap jalan */
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  // Terkunci hanya bila kuota habis DAN belum ada sesi berjalan
+  // (revisi proyek yang sedang jalan tetap boleh).
+  const quotaBlocked = !!(
+    quota &&
+    !quota.unlimited &&
+    (quota.remaining ?? 1) <= 0 &&
+    !sessionIdRef.current &&
+    !html
+  );
+
   // ── panel kanan ──
   const [rightTab, setRightTab] = useState<"preview" | "code">("preview");
   const [fullscreen, setFullscreen] = useState(false);
+
+  // ── pembagian panel (drag pemisah) ──
+  const [split, setSplit] = useState(40); // % lebar panel chat
+  const wrapRef = useRef<HTMLDivElement | null>(null);
+
+  function onSepPointerDown(e: React.PointerEvent<HTMLDivElement>) {
+    if (e.button !== 0) return;
+    const wrap = wrapRef.current;
+    if (!wrap) return;
+    const rect = wrap.getBoundingClientRect();
+    const move = (ev: PointerEvent) => {
+      const pct = ((ev.clientX - rect.left) / rect.width) * 100;
+      setSplit(Math.min(75, Math.max(20, pct)));
+    };
+    const up = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+  }
 
   // ── proyek tersimpan ──
   const [projects, setProjects] = useState<ProjectRow[]>([]);
@@ -248,6 +327,10 @@ export function AiBuilder() {
   async function ask(raw: string) {
     const message = raw.trim();
     if (!message || busy) return;
+    if (quotaBlocked) {
+      toast.error("Kuota proyek minggu ini sudah habis — direset setiap hari Senin.");
+      return;
+    }
 
     const userMsg: ChatMsg = { role: "user", content: message, at: new Date().toISOString() };
     setChat((prev) => [
@@ -269,6 +352,7 @@ export function AiBuilder() {
         body: JSON.stringify({
           message,
           currentHtml: html || undefined,
+          sessionId: sessionIdRef.current ?? undefined,
         }),
         signal: ac.signal,
       });
@@ -278,8 +362,24 @@ export function AiBuilder() {
         throw new Error(json?.error ?? `Gagal menghubungi server (HTTP ${res.status}).`);
       }
 
-      const { full, error } = await readBuilderStream(res, (fullText) => {
-        patchStreaming(fullText);
+      const { full, error } = await readBuilderStream(res, {
+        onChunk: (fullText) => patchStreaming(fullText),
+        onSession: (ev) => {
+          sessionIdRef.current = ev.sessionId;
+          setQuota((prev) =>
+            prev
+              ? {
+                  ...prev,
+                  used: ev.used,
+                  limit: ev.limit ?? prev.limit,
+                  remaining:
+                    (ev.limit ?? prev.limit) == null
+                      ? null
+                      : Math.max(0, (ev.limit ?? prev.limit ?? 0) - ev.used),
+                }
+              : prev
+          );
+        },
       });
 
       const doc = extractHtml(full);
@@ -382,6 +482,9 @@ export function AiBuilder() {
       setSaveTitle(p.title);
       setRightTab("preview");
       setProjectsOpen(false);
+      // Membuka proyek lama = sesi chat baru (minta perubahan berikutnya
+      // dihitung sebagai proyek baru oleh kuota).
+      sessionIdRef.current = null;
       setChat((prev) => [
         ...prev,
         {
@@ -414,10 +517,17 @@ export function AiBuilder() {
   }
 
   function newProject() {
+    if (quotaBlocked) {
+      toast.error(
+        "Kuota proyek minggu ini habis — direset setiap hari Senin. Kamu masih bisa membuka proyek lama dari Proyekku."
+      );
+      return;
+    }
     setHtml("");
     setCurrentProjectId(null);
     setSaveTitle("");
     setChat([]);
+    sessionIdRef.current = null;
     setRightTab("preview");
   }
 
@@ -426,9 +536,13 @@ export function AiBuilder() {
   // -------------------------------------------------------------------------
 
   return (
-    <div className="flex h-full min-h-[600px] flex-col gap-3 lg:flex-row">
+    <div
+      ref={wrapRef}
+      style={{ "--split": `${split}%` } as React.CSSProperties}
+      className="flex flex-col gap-3 lg:h-[min(80dvh,720px)] lg:flex-row lg:gap-2"
+    >
       {/* ===== KIRI: percakapan ===== */}
-      <section className="flex min-h-[420px] flex-1 flex-col rounded-xl border bg-card shadow-xs">
+      <section className="flex min-h-[420px] flex-col rounded-xl border bg-card shadow-xs lg:min-h-0 lg:w-[var(--split)] lg:flex-none">
         <header className="flex items-center gap-2 border-b border-border px-3 py-2.5">
           <div className="flex size-8 items-center justify-center rounded-lg bg-primary/10 text-primary">
             <Bot className="size-4" />
@@ -439,6 +553,15 @@ export function AiBuilder() {
               Minta AI menulis aplikasi web (HTML/CSS/JS) — langsung bisa dijalankan.
             </p>
           </div>
+          {quota && !quota.unlimited && quota.limit !== null ? (
+            <span
+              title="Kuota proyek minggu ini — direset setiap hari Senin."
+              className="inline-flex shrink-0 items-center gap-1 rounded-full border border-border bg-muted/50 px-2 py-0.5 text-[11px] font-medium tabular-nums text-muted-foreground"
+            >
+              <CalendarClock className="size-3" />
+              {quota.used}/{quota.limit}
+            </span>
+          ) : null}
           <Button variant="ghost" size="sm" className="h-7 px-2 text-[11px]" onClick={newProject} title="Mulai proyek baru (kosongkan chat & kode)">
             + Baru
           </Button>
@@ -446,7 +569,22 @@ export function AiBuilder() {
 
         <ScrollArea className="flex-1 min-h-0">
           <div className="space-y-3 p-3">
-            {chat.length === 0 ? (
+            {quotaBlocked ? (
+              <div className="space-y-3 py-6 text-center">
+                <div className="mx-auto flex size-12 items-center justify-center rounded-full bg-muted">
+                  <Lock className="size-5 text-muted-foreground" />
+                </div>
+                <p className="text-sm font-medium">Kuota proyek minggu ini sudah habis</p>
+                <p className="mx-auto max-w-xs text-xs leading-relaxed text-muted-foreground">
+                  Kamu sudah membuat {quota?.used} dari {quota?.limit} proyek minggu ini —
+                  walau tidak disimpan tetap dihitung. Kuota direset setiap hari Senin.
+                  Sementara itu kamu masih bisa membuka proyek lama untuk dilihat atau direvisi.
+                </p>
+                <Button variant="outline" size="sm" onClick={openProjects}>
+                  <FolderOpen className="size-3.5" /> Buka Proyekku
+                </Button>
+              </div>
+            ) : chat.length === 0 ? (
               <div className="space-y-3 py-6 text-center">
                 <div className="mx-auto flex size-12 items-center justify-center rounded-full bg-primary/10">
                   <Sparkles className="size-5 text-primary" />
@@ -485,11 +623,13 @@ export function AiBuilder() {
               onKeyDown={onKeyDown}
               rows={2}
               maxLength={6000}
-              disabled={busy}
+              disabled={busy || quotaBlocked}
               placeholder={
-                html
-                  ? "Mau diubah apa? mis. tambah fitur skor tertinggi…"
-                  : "mis. Bikin platform tes kecepatan mengetik…"
+                quotaBlocked
+                  ? "Kuota proyek minggu ini habis — kembali Senin depan."
+                  : html
+                    ? "Mau diubah apa? mis. tambah fitur skor tertinggi…"
+                    : "mis. Bikin platform tes kecepatan mengetik…"
               }
               className="max-h-32 min-h-[44px] flex-1 resize-none rounded-lg border border-input bg-background px-3 py-2.5 text-sm outline-none placeholder:text-muted-foreground focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-60"
             />
@@ -498,7 +638,7 @@ export function AiBuilder() {
                 <Square className="size-4" />
               </Button>
             ) : (
-              <Button size="icon" onClick={() => ask(input)} disabled={!input.trim()} title="Kirim">
+              <Button size="icon" onClick={() => ask(input)} disabled={!input.trim() || quotaBlocked} title="Kirim">
                 <Send className="size-4" />
               </Button>
             )}
@@ -506,8 +646,22 @@ export function AiBuilder() {
         </div>
       </section>
 
+      {/* ===== PEMISAH: geser utk ubah pembagian panel (klik 2x = reset) ===== */}
+      <div
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="Geser untuk mengubah lebar panel"
+        tabIndex={0}
+        onPointerDown={onSepPointerDown}
+        onDoubleClick={() => setSplit(40)}
+        title="Geser untuk mengatur lebar panel (klik dua kali = kembali 40%)"
+        className="hidden w-2 shrink-0 cursor-col-resize items-center justify-center rounded-full outline-none transition-colors hover:bg-accent focus-visible:ring-1 focus-visible:ring-ring lg:flex"
+      >
+        <div className="h-12 w-1 rounded-full bg-border" />
+      </div>
+
       {/* ===== KANAN: pratinjau & kode ===== */}
-      <section className="flex min-h-[420px] flex-1 flex-col rounded-xl border bg-card shadow-xs">
+      <section className="flex min-h-[420px] flex-1 flex-col rounded-xl border bg-card shadow-xs lg:min-h-0">
         <header className="flex flex-wrap items-center gap-1.5 border-b border-border px-3 py-2">
           <Tabs value={rightTab} onValueChange={(v) => setRightTab(v as "preview" | "code")}>
             <TabsList className="h-8">
