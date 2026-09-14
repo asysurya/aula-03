@@ -52,6 +52,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { cn } from "@/lib/utils";
+import { AiMarkdown } from "@/components/ai/ai-markdown";
 
 // ---------------------------------------------------------------------------
 // Tipe & util
@@ -63,6 +64,9 @@ interface ChatMsg {
   at: string;
   streaming?: boolean;
   error?: boolean;
+  // Penjelasan AI (markdown) setelah pemisah ===PENJELASAN=== — hanya
+  // diisi bila AI menulis kode + penjelasan.
+  explanation?: string;
 }
 
 interface ProjectRow {
@@ -383,6 +387,9 @@ export function AiBuilder() {
       });
 
       const doc = extractHtml(full);
+      // Penjelasan kaya dari AI (markdown setelah pemisah ===PENJELASAN===).
+      const mIdx = full.indexOf("===PENJELASAN===");
+      const explanation = mIdx >= 0 ? full.slice(mIdx + "===PENJELASAN===".length).trim() : "";
       if (doc && /<html|<!doctype/i.test(doc)) {
         setHtml(doc);
         setPreviewKey((k) => k + 1);
@@ -391,7 +398,7 @@ export function AiBuilder() {
           const t = titleFromHtml(doc);
           if (t) setSaveTitle(t);
         }
-        commitStreaming({ content: doc });
+        commitStreaming({ content: doc, explanation: explanation || undefined });
       } else if (error) {
         commitStreaming({ content: error, error: true });
       } else if (ac.signal.aborted) {
@@ -870,15 +877,24 @@ function ChatBubble({ msg }: { msg: ChatMsg }) {
         ) : msg.streaming ? (
           <span className="flex items-center gap-2 text-muted-foreground">
             <Loader2 className="size-3.5 animate-spin" />
-            Menulis kode… {msg.content ? `${msg.content.split("\n").length} baris` : ""}
+            {msg.content.includes("===PENJELASAN===")
+              ? "Menulis penjelasan…"
+              : `Menulis kode… ${msg.content ? `${msg.content.split("\n").length} baris` : ""}`}
           </span>
         ) : isCode ? (
-          <span>
-            Kode selesai — <strong>{lines} baris</strong> HTML/CSS/JS.{" "}
-            <span className="text-muted-foreground">
-              Cek Pratinjau di sebelah kanan, atau minta perubahan lagi di bawah.
+          <div className="min-w-0 space-y-1">
+            <span>
+              Kode selesai — <strong>{lines} baris</strong> HTML/CSS/JS.{" "}
+              <span className="text-muted-foreground">
+                Cek Pratinjau di sebelah kanan, atau minta perubahan lagi di bawah.
+              </span>
             </span>
-          </span>
+            {msg.explanation ? (
+              <div className="mt-1.5 min-w-0 border-t border-border/70 pt-2">
+                <AiMarkdown content={msg.explanation} />
+              </div>
+            ) : null}
+          </div>
         ) : (
           msg.content
         )}

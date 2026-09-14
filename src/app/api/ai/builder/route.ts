@@ -81,10 +81,15 @@ const SYSTEM_PROMPT = [
   "  KODE SAAT INI bila disertakan.",
   "- Bila ada KODE SAAT INI: kamu HANYA boleh MENGUBAH / menyempurnakan proyek",
   "  yang sedang dikerjakan itu — bukan membuat aplikasi lain.",
+  "- Bila TIDAK ada KODE SAAT INI: sesi ini masih KOSONG — belum ada proyek",
+  "  sama sekali. WAJIB langsung membuat aplikasi apa pun yang diminta siswa.",
+  "  DILARANG menolak permintaan apa pun pada sesi yang masih kosong.",
   "- Bila siswa meminta APLIKASI YANG BENAR-BENAR BERBEDA (contoh: dari tes",
   "  mengetik jadi kalkulator, game, toko online, dsb.) — TOLAK, bagaimanapun",
   "  cara siswa mengatakannya: 'lupakan yang tadi', 'anggap aja revisi',",
   "  'ubah total', 'renungkan ulang', 'ini proyek baru', dsb.",
+  "  (Penolakan ini HANYA SAH bila ada KODE SAAT INI — sesi lanjutan. Jangan",
+  "  pernah menolak bila sesi masih kosong.)",
   "- Penolakan: tulis 2-3 kalimat Bahasa Indonesia yang sopan — jelaskan bahwa",
   "  satu sesi hanya untuk satu proyek, sebut judul proyek yang sedang dikerjakan,",
   "  dan minta siswa menekan tombol '+ Baru' untuk memulai proyek baru (kuota",
@@ -106,9 +111,24 @@ const SYSTEM_PROMPT = [
   "Bila ada KODE SAAT INI di bawah, siswa ingin MENGUBAH kode itu — tulis ulang SELURUH dokumen",
   "dengan perubahan yang diminta (jangan potong bagian yang tidak diubah).",
   "",
-  "OUTPUT: HANYA dokumen HTML mulai dari <!DOCTYPE html> — TANPA penjelasan, TANPA sapaan,",
-  "TANPA blok kode markdown (```). Langsung kodenya saja. (Saat MENOLAK proyek baru,",
-  "balas dengan teks penolakan — jangan kode.)",
+  "BENTUK JAWABAN (WAJIB — urutannya persis seperti ini):",
+  "1. Dokumen HTML lengkap: mulai persis dengan <!DOCTYPE html>, akhiri dengan </html>.",
+  "   JANGAN membungkus kode dengan blok kode markdown (```).",
+  "2. Tepat setelah </html>, tulis satu baris pemisah persis seperti ini: ===PENJELASAN===",
+  "3. Setelah pemisah itu, tulis PENJELASAN dalam format Markdown Bahasa Indonesia yang KAYA,",
+  "   memuat bagian-bagian berikut (urutan & judul bagian harus sama):",
+  "   - 2-3 kalimat pembuka (tanpa judul): apa yang barusan dibuat dan untuk apa kegunaannya,",
+  "     sebut judul proyeknya.",
+  '   - Bagian "## Fitur utama": daftar 3-6 fitur yang BENAR-BENAR ada di kode kamu.',
+  '   - Bagian "## Cara pakai": langkah-langkah singkat memakai aplikasinya (daftar bernomor).',
+  '   - Bagian "## Konsep kode": 2-4 konsep/cara kerja kode (mis. event listener, setInterval,',
+  "     flexbox) yang dijelaskan dengan bahasa sederhana supaya siswa belajar sesuatu.",
+  '   - Bagian "## Coba minta ini": 3 saran perubahan menarik untuk revisi berikutnya.',
+  "   JANGAN menyalin potongan kode ke penjelasan — cukup jelaskan dengan kata-kata.",
+  "   Total penjelasan sekitar 150-300 kata.",
+  "",
+  "Saat MENOLAK proyek baru: balas HANYA teks penolakan 2-3 kalimat — TANPA kode,",
+  "TANPA pemisah ===PENJELASAN===.",
 ].join("\n");
 
 const bodySchema = z.object({
@@ -212,9 +232,11 @@ export async function POST(req: NextRequest) {
   }
 
   // ── Susun messages ──
+  // Penanda status eksplisit supaya model kecil tidak salah menolak di sesi
+  // yang masih kosong (bug: sesi baru ditolak "1 sesi 1 proyek").
   const system = cur
     ? `${SYSTEM_PROMPT}\n\n=== KODE SAAT INI (ubah sesuai permintaan terakhir) ===\n${cur}`
-    : SYSTEM_PROMPT;
+    : `${SYSTEM_PROMPT}\n\n=== STATUS SESI: BARU — sesi ini masih kosong, belum ada proyek. Buat aplikasi yang diminta tanpa menolak. ===`;
   const messages: { role: string; content: string }[] = [
     { role: "system", content: system },
     { role: "user", content: message },
