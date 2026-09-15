@@ -549,6 +549,153 @@ function OfficePreview({
 
 // ───────── docx (docx-preview → layout halaman seperti Word; fallback mammoth) ─────────
 
+/**
+ * PAGINASI ECHT: docx-preview hanya memecah halaman pada page-break EKSPLISIT
+ * (w:br type=page / lastRenderedPageBreak / ganti section) — konten yang
+ * MENGALIR melewati satu halaman dirender jadi SATU section panjang.
+ * Fungsi ini memecahnya jadi halaman-halaman sungguhan:
+ * - ukuran halaman & margin dibaca dari gaya inline section (pt → px);
+ * - blok (paragraf/tabel/gambar) ditumpuk sampai penuh lalu halaman BARU
+ *   dibuat (section klon dengan gaya sama, header/footer disalin);
+ * - TABEL yang lebih tinggi dari halaman dipecah PER BARIS (ala Word);
+ * - menunggu font & gambar selesai dimuat dulu (tinggi blok berubah
+ *   setelahnya → paginasi salah bila diukur terlalu cepat).
+ * Dipanggil setelah renderAsync, sebelum konten ditampilkan.
+ */
+async function paginateDocxPages(host: HTMLElement) {
+  // Stabilkan ukuran: font & gambar memengaruhi tinggi blok.
+  try {
+    await document.fonts?.ready;
+  } catch {
+    /* abaikan */
+  }
+  const imgs = Array.from(host.querySelectorAll("img"));
+  await Promise.all(
+    imgs.map((im) =>
+      im.complete
+        ? Promise.resolve()
+        : new Promise<void>((r) => {
+            im.addEventListener("load", () => r(), { once: true });
+            im.addEventListener("error", () => r(), { once: true });
+          })
+    )
+  );
+
+  const wrapper = host.querySelector<HTMLElement>(".docx-wrapper");
+  if (!wrapper) return;
+  const sections = Array.from(wrapper.children).filter(
+    (el) => el.tagName === "SECTION"
+  ) as HTMLElement[];
+
+  for (const sec of sections) {
+    // Halaman boleh dipaginasi hanya bila strukturnya sederhana: tepat SATU
+    // article (multi-article = ganti pengaturan kolom di tengah halaman —
+    // dibiarkan apa adanya agar tidak salah memindah konten).
+    const articles = Array.from(sec.children).filter(
+      (el) => el.tagName === "ARTICLE"
+    ) as HTMLElement[];
+    if (articles.length !== 1) continue;
+    const art = articles[0];
+
+    const cs = getComputedStyle(sec);
+    // min-height inline docx-preview = tinggi 1 halaman (mis. "841.9pt").
+    const pageH =
+      parseFloat(cs.minHeight) ||
+      parseFloat(cs.height) ||
+      sec.clientHeight ||
+      0;
+    const padT = parseFloat(cs.paddingTop) || 0;
+    const padB = parseFloat(cs.paddingBottom) || 0;
+    // Header/footer mengalir di dalam kolom section (flex column) →
+    // mengurangi ruang artikel.
+    let extra = 0;
+    for (const ch of Array.from(sec.children)) {
+      if (ch.tagName === "HEADER" || ch.tagName === "FOOTER") {
+        const s = getComputedStyle(ch);
+        extra +=
+          (ch as HTMLElement).offsetHeight +
+          parseFloat(s.marginTop) +
+          parseFloat(s.marginBottom);
+      }
+    }
+    const availH = pageH - padT - padB - extra;
+    if (!(availH > 60)) continue; // ukuran halaman tak diketahui → jangan coba
+    if (art.scrollHeight <= availH + 4) continue; // muat satu halaman
+
+    // ── Pecah konten article → beberapa article (tiap article = 1 halaman).
+    // Halaman baru = klon section (gaya/ukuran sama) + article kosong +
+    // salinan header/footer.
+    const makePage = () => {
+      const s = sec.cloneNode(false) as HTMLElement;
+      const a = art.cloneNode(false) as HTMLElement;
+      s.appendChild(a);
+      for (const ch of Array.from(sec.children)) {
+        if (ch.tagName === "HEADER" || ch.tagName === "FOOTER") {
+          s.appendChild(ch.cloneNode(true));
+        }
+      }
+      return { section: s, article: a };
+    };
+
+    const blockH = (el: HTMLElement) => {
+      const s = getComputedStyle(el);
+      return (
+        el.offsetHeight +
+        (parseFloat(s.marginTop) || 0) +
+        (parseFloat(s.marginBottom) || 0)
+      );
+    };
+
+    const blocks = Array.from(art.children) as HTMLElement[];
+    if (blocks.length === 0) continue;
+
+    const pages: { section: HTMLElement; article: HTMLElement }[] = [makePage()];
+    let cur = pages[0];
+    let used = 0;
+
+    for (const b of blocks) {
+      const h = blockH(b);
+      if (b.tagName === "TABLE") {
+        // Tabel tinggi → pecah PER BARIS: tiap halaman dapat tabel baru
+        // (shell klon: kelas/gaya sama) berisi baris yang muat.
+        const rows = Array.from((b as HTMLTableElement).rows);
+        if (rows.length > 0) {
+          let shell: HTMLTableElement | null = null;
+          for (const r of rows) {
+            const rh = r.offsetHeight;
+            if (shell && used + rh > availH) {
+              pages.push((cur = makePage()));
+              used = 0;
+              shell = null;
+            } else if (!shell && used > 0 && used + rh > availH) {
+              pages.push((cur = makePage()));
+              used = 0;
+            }
+            if (!shell) {
+              shell = b.cloneNode(false) as HTMLTableElement;
+              cur.article.appendChild(shell);
+            }
+            shell.appendChild(r); // memindahkan baris dari tabel lama
+            used += rh;
+          }
+          continue;
+        }
+      }
+      // Blok biasa: pindah halaman bila tak muat.
+      if (used > 0 && used + h > availH) {
+        pages.push((cur = makePage()));
+        used = 0;
+      }
+      cur.article.appendChild(b); // memindahkan node
+      used += h;
+    }
+
+    // Ganti section asli dengan urutan halaman baru (blok sudah dipindah
+    // ke article klon — section asli tak lagi memuat konten).
+    sec.replaceWith(...pages.map((p) => p.section));
+  }
+}
+
 function DocxView({
   file,
   entry,
@@ -566,9 +713,11 @@ function DocxView({
   const [flatHtml, setFlatHtml] = useState<string | null>(
     docxHtmlCache.get(file.storageKey) ?? null
   );
+  const [pageCount, setPageCount] = useState(0);
 
   // Render halaman pertama via docx-preview (DOKUMEN ASLI Word: halaman
-  // per bagian, margin, header/footer, tabel & gambar terformat).
+  // per bagian, margin, header/footer, tabel & gambar terformat), lalu
+  // PAGINASI konten yang mengalir melebihi satu halaman.
   useEffect(() => {
     if (mode !== "loading") return;
     let cancelled = false;
@@ -591,6 +740,14 @@ function DocxView({
           debug: false,
         });
         if (cancelled) return;
+        // Konten > 1 halaman → pecah jadi halaman terpisah (seperti Word).
+        try {
+          await paginateDocxPages(host);
+        } catch {
+          /* paginasi gagal → tampilan lama tetap benar, hanya panjang */
+        }
+        if (cancelled) return;
+        setPageCount(host.querySelectorAll("section").length);
         setMode("pages");
       } catch {
         if (cancelled) return;
@@ -653,6 +810,14 @@ function DocxView({
   return (
     <div className="docx-viewer relative h-full min-h-[60vh] overflow-auto bg-neutral-200 dark:bg-neutral-900/70">
       <div ref={hostRef} className={mode === "pages" ? "" : "invisible"} />
+      {mode === "pages" && pageCount > 1 ? (
+        <span
+          className="absolute bottom-3 right-4 z-10 rounded-full bg-background/85 px-3 py-1 text-xs tabular-nums text-muted-foreground shadow-sm border border-border/60"
+          aria-label={`Jumlah halaman dokumen: ${pageCount}`}
+        >
+          {pageCount} halaman
+        </span>
+      ) : null}
       {mode === "loading" ? (
         <div className="absolute inset-0 flex items-center justify-center text-sm text-muted-foreground bg-neutral-200/60 dark:bg-neutral-900/60">
           <Loader2 className="size-4 animate-spin mr-2" /> Membuka dokumen…

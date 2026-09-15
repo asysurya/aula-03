@@ -23,6 +23,7 @@ import {
   ArrowLeftRight,
   Focus,
   Columns2,
+  Check,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -40,6 +41,13 @@ import {
 import { AnnotationLayer } from "./annotation-layer";
 import { useSelectionMenu, SelectionToolbar } from "./selection-actions";
 import { useReaderUiStore } from "@/stores/reader-ui-store";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import type { PDFDocumentProxy } from "pdfjs-dist";
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -78,8 +86,9 @@ const VM_KEY = "aula.reader.viewmode";
 const FOCUS_KEY = "aula.reader.focus";
 const PERVIEW_KEY = "aula.reader.perview";
 
-/** Jumlah halaman per layar: 1, atau 2 berdampingan (mode buku). */
-type PerView = 1 | 2;
+/** Jumlah halaman per layar: 1..5. 2 = mode buku; 3-5 = banyak
+ *  halaman berdampingan (mode horizontal / grid vertikal). */
+type PerView = 1 | 2 | 3 | 4 | 5;
 
 function loadBoolPref(key: string): boolean {
   try {
@@ -89,9 +98,14 @@ function loadBoolPref(key: string): boolean {
   }
 }
 
+function clampPerView(v: number): PerView {
+  const n = Math.round(v);
+  return n === 2 || n === 3 || n === 4 || n === 5 ? n : 1;
+}
+
 function loadPerView(): PerView {
   try {
-    return localStorage.getItem(PERVIEW_KEY) === "2" ? 2 : 1;
+    return clampPerView(parseInt(localStorage.getItem(PERVIEW_KEY) ?? "1", 10));
   } catch {
     return 1;
   }
@@ -223,6 +237,11 @@ export function PdfReader({
   }, [entry.buffer, file.storageKey]);
 
   // ── Ukuran container (responsive; TV besar → halaman besar) ──
+  // PENTING: deps [doc] — area halaman baru ter-mount SETELAH dokumen siap
+  // (sebelumnya deps []: effect jalan saat container belum ada → ukuran
+  // terkunci 0×0 selamanya → mode buku jatuh ke lebar minimum 120px dan
+  // zoom tampak mati). Dengan [doc], observer terpasang saat container
+  // benar-benar ada dan mengikuti tiap perubahan ukuran jendela.
   useEffect(() => {
     const el = containerRef.current;
     if (!el) return;
@@ -236,7 +255,7 @@ export function PdfReader({
     setContainerW(el.clientWidth);
     setContainerH(el.clientHeight);
     return () => ro.disconnect();
-  }, []);
+  }, [doc]);
 
   // ── Dimensi halaman (lazy: halaman pertama dulu, sisanya on-demand) ──
   useEffect(() => {
@@ -271,28 +290,74 @@ export function PdfReader({
     [dims]
   );
 
+  /** Mode horizontal multi-halaman: kelompokkan halaman per spread.
+   *  Mode BUKU (2) ala AnyFlip: sampul sendiri dulu ([1]), lalu pasangan
+   *  [2,3], [4,5], … seperti buku fisik. 3-5: kelompok berurutan. */
+  const spreads = useMemo(() => {
+    if (viewMode !== "horizontal" || perView < 2) return null;
+    const arr: number[][] = [];
+    if (perView === 2) {
+      if (numPages === 1) return [[1]];
+      arr.push([1]);
+      for (let i = 2; i <= numPages; i += 2) {
+        arr.push([i, Math.min(i + 1, numPages)]);
+      }
+    } else {
+      for (let i = 1; i <= numPages; i += perView) {
+        arr.push(
+          Array.from(
+            { length: Math.min(perView, numPages - i + 1) },
+            (_, j) => i + j
+          )
+        );
+      }
+    }
+    return arr;
+  }, [viewMode, perView, numPages]);
+
+  /** Peta halaman → { si (indeks spread), k (jumlah halaman di spread) } —
+ *  dipakai pageWidthOf & gotoPage; kosong saat tak ada spread. */
+  const spreadInfo = useMemo(() => {
+    const m = new Map<number, { si: number; k: number }>();
+    if (spreads) {
+      spreads.forEach((sp, si) => {
+        for (const p of sp) m.set(p, { si, k: sp.length });
+      });
+    }
+    return m;
+  }, [spreads]);
+
   // ── Lebar halaman per mode ──
   // Vertikal: pas-lebar (w). Horizontal: pas-TINGGI (h) → lebar = h/rasio.
-  // Mode buku (perView 2): juga dibatasi lebar agar 2 halaman muat bersebelah.
+  // Banyak halaman per layar: tiap halaman dibatasi (W - padding - gap)/k,
+  // lalu dikalikan zoom — zoom SELALU memperbesar (dulu di mode buku
+  // lebar terkunci cap sehingga zoom tidak berefek sama sekali).
   const pageWidthOf = useCallback(
     (i: number) => {
       const GAP = 16; // gap-4 antar halaman
       if (viewMode === "horizontal") {
-        const h = containerH > 100 ? (containerH - 32) * zoom : 360;
-        let w = h / ratioOf(i);
-        if (perView === 2) {
-          const wBySpread = (containerW - 24 - GAP) / 2;
-          w = Math.min(w, wBySpread);
-        }
-        return Math.max(120, w);
+        const hFit = containerH > 100 ? containerH - 32 : 360;
+        // Jumlah halaman efektif penentu lebar kolom: halaman dalam spread
+        // berisi k halaman; sampul tunggal pada mode buku dihitung k=2 agar
+        // ukurannya sama dengan halaman buku lainnya (ala AnyFlip).
+        const k = spreadInfo.get(i)?.k ?? perView;
+        const eff = perView === 2 && k === 1 ? 2 : k;
+        const base = Math.min(
+          hFit / ratioOf(i),
+          (containerW - 24 - (eff - 1) * GAP) / eff
+        );
+        return Math.max(120, base * zoom);
       }
-      if (perView === 2) {
-        // Vertikal 2 kolom: tiap halaman separuh lebar wadah.
-        return Math.max(120, (containerW - 24 - GAP) / 2) * zoom;
+      if (perView >= 2) {
+        // Vertikal multi-kolom: tiap halaman selebar 1/perView wadah.
+        return (
+          Math.max(120, (containerW - 24 - (perView - 1) * GAP) / perView) *
+          zoom
+        );
       }
       return Math.max(280, containerW - 32) * zoom;
     },
-    [viewMode, containerW, containerH, zoom, ratioOf, perView]
+    [viewMode, containerW, containerH, zoom, ratioOf, perView, spreadInfo]
   );
 
   // ── Laporkan halaman aktif → tersimpan di MongoDB (lanjut baca lain
@@ -364,7 +429,7 @@ export function PdfReader({
     setPage((prev) => (prev === cur ? prev : cur));
   }, [numPages, viewMode, focus]);
 
-  // ── Jump ke halaman (sadar-mode-buku: lompat ke spread berisi halaman) ──
+  // ── Jump ke halaman (sadar-spread: lompat ke spread berisi halaman) ──
   const spreadRefs = useRef<Map<number, HTMLDivElement>>(new Map());
   const registerSpread = useCallback((si: number, el: HTMLDivElement | null) => {
     if (el) spreadRefs.current.set(si, el);
@@ -374,9 +439,10 @@ export function PdfReader({
   const gotoPage = useCallback(
     (n: number) => {
       const target = Math.min(Math.max(1, n), numPages || 1);
+      const si = spreadInfo.get(target)?.si;
       const spreadNode =
-        viewMode === "horizontal" && perView === 2
-          ? spreadRefs.current.get(Math.floor((target - 1) / 2))
+        viewMode === "horizontal" && perView >= 2 && si != null
+          ? spreadRefs.current.get(si)
           : null;
       if (spreadNode) {
         spreadNode.scrollIntoView({
@@ -396,7 +462,7 @@ export function PdfReader({
       }
       setPage(target);
     },
-    [numPages, viewMode, perView]
+    [numPages, viewMode, perView, spreadInfo]
   );
 
   // ── Zoom ──
@@ -505,20 +571,21 @@ export function PdfReader({
     setToolbarVisible(true);
   }, []);
 
-  const togglePerView = useCallback(() => {
-    setPerView((v) => {
-      const next: PerView = v === 1 ? 2 : 1;
+  const togglePerView = useCallback((n: PerView) => {
+    setPerView(() => {
       try {
-        localStorage.setItem(PERVIEW_KEY, String(next));
+        localStorage.setItem(PERVIEW_KEY, String(n));
       } catch {
         /* abaikan */
       }
       toast.success(
-        next === 2
-          ? "2 halaman per layar — mode buku"
-          : "1 halaman per layar"
+        n === 2
+          ? "2 halaman per layar — mode buku (sampul + pasangan)"
+          : n === 1
+            ? "1 halaman per layar"
+            : `${n} halaman per layar`
       );
-      return next;
+      return n;
     });
   }, []);
 
@@ -684,12 +751,12 @@ export function PdfReader({
       if (e.shiftKey) return;
       if (e.key === "PageDown" || e.key === "ArrowRight") {
         e.preventDefault();
-        // Mode buku horizontal: panah membalik per SPREAD (2 halaman).
-        const step = viewMode === "horizontal" && perView === 2 ? perView : 1;
+        // Horizontal multi-halaman: panah membalik satu SPREAD penuh.
+        const step = viewMode === "horizontal" && perView >= 2 ? perView : 1;
         gotoPage(page + step);
       } else if (e.key === "PageUp" || e.key === "ArrowLeft") {
         e.preventDefault();
-        const step = viewMode === "horizontal" && perView === 2 ? perView : 1;
+        const step = viewMode === "horizontal" && perView >= 2 ? perView : 1;
         gotoPage(page - step);
       } else if (e.key === "Home") {
         e.preventDefault();
@@ -717,16 +784,6 @@ export function PdfReader({
     for (let i = 1; i <= numPages; i++) arr.push(i);
     return arr;
   }, [numPages]);
-
-  /** Mode buku horizontal: kelompokkan halaman per spread (2 berdampingan). */
-  const spreads = useMemo(() => {
-    if (viewMode !== "horizontal" || perView !== 2) return null;
-    const arr: number[][] = [];
-    for (let i = 1; i <= numPages; i += 2) {
-      arr.push([i, Math.min(i + 1, numPages)]);
-    }
-    return arr;
-  }, [viewMode, perView, numPages]);
 
   // Callback stabil supaya PageView (React.memo) tidak re-render ketika
   // parent ganti state yang tak terkait. (Dulu: onVisible & registerRef
@@ -911,26 +968,50 @@ export function PdfReader({
               <ArrowLeftRight className="size-4" />
             )}
           </Button>
-          {/* Halaman per layar: 1 / 2 (mode buku) */}
-          <Button
-            variant={perView === 2 ? "secondary" : "outline"}
-            size="icon"
-            className="h-9 w-9"
-            onClick={togglePerView}
-            disabled={numPages < 2}
-            title={
-              perView === 2
-                ? "Satu halaman per layar"
-                : "Dua halaman per layar (mode buku)"
-            }
-            aria-label={
-              perView === 2
-                ? "Satu halaman per layar"
-                : "Dua halaman per layar, mode buku"
-            }
-          >
-            <Columns2 className="size-4" />
-          </Button>
+          {/* Halaman per layar: 1-5 (2 = mode buku ala AnyFlip) */}
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button
+                variant="outline"
+                size="icon"
+                className="h-9 w-9 relative"
+                disabled={numPages < 2}
+                title="Halaman per layar (1-5)"
+                aria-label={`Halaman per layar: ${perView}`}
+              >
+                <Columns2 className="size-4" />
+                <span className="absolute -top-1 -right-1 grid place-items-center size-4 rounded-full bg-primary text-primary-foreground text-[10px] font-semibold leading-none">
+                  {perView}
+                </span>
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="start">
+              <DropdownMenuLabel>Halaman per layar</DropdownMenuLabel>
+              {([1, 2, 3, 4, 5] as PerView[]).map((n) => (
+                <DropdownMenuItem
+                  key={n}
+                  onClick={() => togglePerView(n)}
+                  aria-label={
+                    n === 2
+                      ? "Dua halaman per layar, mode buku"
+                      : n === 1
+                        ? "Satu halaman per layar"
+                        : `${n} halaman per layar`
+                  }
+                  className="gap-2"
+                >
+                  <span className="size-4 grid place-items-center">
+                    {perView === n ? <Check className="size-4" /> : null}
+                  </span>
+                  {n === 1
+                    ? "1 halaman"
+                    : n === 2
+                      ? "2 halaman (buku)"
+                      : `${n} halaman`}
+                </DropdownMenuItem>
+              ))}
+            </DropdownMenuContent>
+          </DropdownMenu>
           {/* Mode fokus: bilah alat auto-hide, halaman memenuhi layar */}
           <Button
             variant={focus ? "secondary" : "outline"}
@@ -1142,12 +1223,18 @@ export function PdfReader({
         )}
       >
         <div
+          style={
+            viewMode === "vertical" && perView >= 2
+              ? { gridTemplateColumns: `repeat(${perView}, minmax(0, 1fr))` }
+              : undefined
+          }
           className={cn(
             viewMode === "vertical"
-              ? perView === 2
-                ? "grid grid-cols-2 justify-items-center gap-4 py-4 px-3"
-                : "flex flex-col items-center gap-4 py-4 px-3"
-              : "flex flex-row items-stretch h-full w-max gap-4 px-3 py-4"
+              ? "grid justify-items-center gap-4 py-4 px-3"
+              // Horizontal: min-h-full (bukan h-full!) — saat zoom > 1 wadah
+              // ikut MEMANJANG mengikuti halaman, sehingga bagian atas tetap
+              // bisa digulir (dulu h-full: atas halaman tak terjangkau).
+              : "flex flex-row items-stretch min-h-full w-max gap-4 px-3 py-4"
           )}
         >
           {spreads
@@ -1156,7 +1243,7 @@ export function PdfReader({
                   key={si}
                   ref={(el) => registerSpread(si, el)}
                   data-spread={si}
-                  className="flex items-center h-full gap-4 snap-center shrink-0"
+                  className="flex items-center gap-4 snap-center shrink-0"
                 >
                   {sp.map((i) => (
                     <PageView
