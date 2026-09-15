@@ -76,6 +76,10 @@ function toQuestionDTO(
     order: q.order,
     options: ordered,
     correct: includeCorrect ? parseJsonArray<string>(q.correct) : null,
+    // Penilaian: bukan rahasia (berbeda dari kunci) — boleh dikirim ke
+    // siswa supaya ketahuan "salah dikurangi X%" sebelum mengerjakan.
+    partialScoring: q.partialScoring ?? null,
+    penaltyPercent: q.penaltyPercent ?? null,
     imageFile: q.imageFile,
   };
 }
@@ -322,6 +326,38 @@ export async function PUT(
     if (!Number.isFinite(points) || points < 0 || points > 1000)
       return errorResponse(`Q${i + 1}: poin tidak valid`, 400);
 
+    // Penalti jawaban salah (%) — hanya untuk soal yang dinilai otomatis.
+    const autoTypes = ["PG", "MULTI_PG", "SHORT"];
+    let penaltyPercent: number | null = null;
+    if (autoTypes.includes(type) && q.penaltyPercent != null) {
+      const p = Number(q.penaltyPercent);
+      if (!Number.isFinite(p) || p < 0 || p > 100)
+        return errorResponse(
+          `Q${i + 1}: penalti harus 0–100 persen`,
+          400
+        );
+      penaltyPercent = Math.round(p);
+      if (penaltyPercent === 0) penaltyPercent = null;
+    }
+
+    // Nilai parsial hanya untuk PG multi-jawaban.
+    const partialScoring =
+      type === "MULTI_PG" ? q.partialScoring === true : null;
+
+    // Kunci isian SHORT: daftar jawaban yang diterima (maks 5).
+    if (type === "SHORT") {
+      const keys = (Array.isArray(q.correct) ? q.correct : [])
+        .map((k: unknown) => String(k ?? "").trim())
+        .filter(Boolean);
+      if (keys.length > 5)
+        return errorResponse(
+          `Q${i + 1}: maksimal 5 variasi kunci isian`,
+          400
+        );
+      if (keys.some((k: string) => k.length > 200))
+        return errorResponse(`Q${i + 1}: kunci isian terlalu panjang`, 400);
+    }
+
     if (type === "PG" || type === "MULTI_PG") {
       const opts = Array.isArray(q.options) ? q.options : [];
       if (opts.length < 2)
@@ -409,27 +445,47 @@ export async function PUT(
   // Full-replace questions
   await db.formQuestion.deleteMany({ where: { formId: form.id } });
   await db.formQuestion.createMany({
-    data: questions.map((q: Record<string, unknown>, i: number) => ({
-      formId: form.id,
-      type: String(q.type),
-      text: String(q.text).trim(),
-      points: Math.round(Number(q.points ?? 1)),
-      required: q.required !== false,
-      order: i,
-      options: JSON.stringify(
-        (Array.isArray(q.options) ? q.options : []).map(
-          (o: { id?: string; label?: string }) => ({
-            id: String(o.id ?? ""),
-            label: String(o.label ?? ""),
-          })
-        )
-      ),
-      correct:
-        q.type === "PG" || q.type === "MULTI_PG"
-          ? JSON.stringify((Array.isArray(q.correct) ? q.correct : []).map(String))
-          : null,
-      imageFileId: q.imageFileId ? String(q.imageFileId) : null,
-    })),
+    data: questions.map((q: Record<string, unknown>, i: number) => {
+      const qType = String(q.type);
+      // Penalti: hanya untuk soal yang dinilai otomatis (divalidasi di atas).
+      const pRaw = Number(q.penaltyPercent ?? 0);
+      const penalty =
+        (qType === "PG" || qType === "MULTI_PG" || qType === "SHORT") &&
+        Number.isFinite(pRaw) &&
+        pRaw > 0
+          ? Math.round(Math.min(100, pRaw))
+          : null;
+      return {
+        formId: form.id,
+        type: qType,
+        text: String(q.text).trim(),
+        points: Math.round(Number(q.points ?? 1)),
+        required: q.required !== false,
+        order: i,
+        partialScoring: qType === "MULTI_PG" ? q.partialScoring === true : null,
+        penaltyPercent: penalty,
+        options: JSON.stringify(
+          (Array.isArray(q.options) ? q.options : []).map(
+            (o: { id?: string; label?: string }) => ({
+              id: String(o.id ?? ""),
+              label: String(o.label ?? ""),
+            })
+          )
+        ),
+        correct:
+          qType === "PG" || qType === "MULTI_PG"
+            ? JSON.stringify((Array.isArray(q.correct) ? q.correct : []).map(String))
+            : qType === "SHORT"
+              ? JSON.stringify(
+                  (Array.isArray(q.correct) ? q.correct : [])
+                    .map((k: unknown) => String(k ?? "").trim())
+                    .filter(Boolean)
+                    .slice(0, 5)
+                )
+              : null,
+        imageFileId: q.imageFileId ? String(q.imageFileId) : null,
+      };
+    }),
   });
 
   return Response.json({ ok: true, formId: form.id });

@@ -193,6 +193,9 @@ export function FileBrowser({
     files: CloudFileItem[];
     folders: CloudFolderItem[];
   } | null>(null);
+  /** Doc Aula yang akan dihapus (tombol hapus di kartu dokumen). */
+  const [deleteDoc, setDeleteDoc] = useState<CloudDocItem | null>(null);
+  const [deletingDoc, setDeletingDoc] = useState(false);
 
   const queryKey = ["cloud", "folder", classroomId, folderId ?? "root"];
   const { data, isLoading, error, refetch } = useQuery<FoldersListResponse>({
@@ -845,6 +848,11 @@ export function FileBrowser({
                       key={d.id}
                       doc={d}
                       onClick={() => openCloudDoc(d.id)}
+                      canDelete={
+                        canManage(me, classroomId, d.createdBy) ||
+                        isTeacher(me, classroomId)
+                      }
+                      onDelete={() => setDeleteDoc(d)}
                     />
                   ))}
                 </div>
@@ -1014,6 +1022,53 @@ export function FileBrowser({
           }}
         />
       ) : null}
+
+      {/* Konfirmasi hapus Doc Aula (kartu dokumen) — tombol terlihat di
+          HP & desktop; dulu doc TIDAK BISA dihapus dari mana pun. */}
+      <Dialog open={!!deleteDoc} onOpenChange={(o) => !o && setDeleteDoc(null)}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>Hapus dokumen “{deleteDoc?.title}”?</DialogTitle>
+            <DialogDescription>
+              Dokumen bersama ini beserta seluruh isinya akan dihapus
+              permanen dan tidak bisa dikembalikan.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setDeleteDoc(null)}>
+              Batal
+            </Button>
+            <Button
+              className="bg-destructive hover:bg-destructive/90"
+              disabled={deletingDoc}
+              onClick={() => {
+                if (!deleteDoc) return;
+                setDeletingDoc(true);
+                fetch(`/api/cloud/docs/${deleteDoc.id}`, { method: "DELETE" })
+                  .then(async (r) => {
+                    const j = await r.json().catch(() => ({}));
+                    if (!r.ok) {
+                      toast.error(j?.error || "Gagal menghapus dokumen");
+                      return;
+                    }
+                    toast.success("Dokumen dihapus");
+                    setDeleteDoc(null);
+                    invalidateAll();
+                  })
+                  .catch(() => toast.error("Gagal menghapus dokumen"))
+                  .finally(() => setDeletingDoc(false));
+              }}
+            >
+              {deletingDoc ? (
+                <Loader2 className="size-4 animate-spin mr-1" />
+              ) : (
+                <Trash2 className="size-4 mr-1" />
+              )}
+              Hapus
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
@@ -1219,7 +1274,17 @@ function FolderCard({
 
 // ───────────────────────── Doc card ─────────────────────────
 
-function DocCard({ doc, onClick }: { doc: CloudDocItem; onClick: () => void }) {
+function DocCard({
+  doc,
+  onClick,
+  canDelete,
+  onDelete,
+}: {
+  doc: CloudDocItem;
+  onClick: () => void;
+  canDelete?: boolean;
+  onDelete?: () => void;
+}) {
   return (
     <Card
       role="button"
@@ -1231,7 +1296,7 @@ function DocCard({ doc, onClick }: { doc: CloudDocItem; onClick: () => void }) {
           onClick();
         }
       }}
-      className="p-4 gap-2 hover:bg-accent/40 hover:border-primary/40 transition-colors cursor-pointer"
+      className="group relative p-4 gap-2 hover:bg-accent/40 hover:border-primary/40 transition-colors cursor-pointer"
     >
       <div className="flex items-start gap-3">
         <div className="rounded-md bg-amber-500/15 p-2 text-amber-700 dark:text-amber-300">
@@ -1250,6 +1315,23 @@ function DocCard({ doc, onClick }: { doc: CloudDocItem; onClick: () => void }) {
         </div>
         <ChevronRight className="size-4 text-muted-foreground opacity-50" />
       </div>
+      {/* Tombol hapus — SELALU TERLIHAT (HP tidak punya klik-kanan).
+          Dulu: doc tidak bisa dihapus dari mana pun. */}
+      {canDelete && onDelete ? (
+        <Button
+          size="icon"
+          variant="ghost"
+          className="absolute right-1.5 top-1.5 size-7 opacity-60 hover:opacity-100 hover:text-destructive"
+          title="Hapus dokumen"
+          aria-label={`Hapus dokumen ${doc.title}`}
+          onClick={(e) => {
+            e.stopPropagation();
+            onDelete();
+          }}
+        >
+          <Trash2 className="size-3.5" />
+        </Button>
+      ) : null}
     </Card>
   );
 }

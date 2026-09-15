@@ -43,6 +43,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { FilePreview } from "@/components/cloud/file-preview";
 import type { CloudFileItem } from "@/lib/cloud-format";
 import { cn } from "@/lib/utils";
@@ -81,6 +82,10 @@ interface ReviewQuestion {
   order: number;
   options: { id: string; label: string }[];
   correct: string[];
+  /** MULTI_PG: nilai parsial per jawaban benar. */
+  partialScoring?: boolean | null;
+  /** % poin dikurangi untuk jawaban salah. */
+  penaltyPercent?: number | null;
   imageFileId: string | null;
 }
 
@@ -351,69 +356,454 @@ export function FormReview({ folderId }: { folderId: string }) {
         </Button>
       </div>
 
-      {/* Distribusi nilai */}
-      {scores.length > 0 ? (
-        <Card className="p-4 space-y-2">
-          <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground flex items-center gap-1.5">
-            <BarChart3 className="size-3.5" /> Distribusi nilai (n={
-              scores.length
-            })
-          </p>
-          <div className="flex items-end gap-3 h-24 px-1">
-            {bins.map((b) => (
-              <div
-                key={b.label}
-                className="flex-1 flex flex-col items-center gap-1"
-                title={`${b.count} siswa (${
-                  scores.length > 0
-                    ? Math.round((b.count / scores.length) * 100)
-                    : 0
-                }%)`}
-              >
-                <span className="text-[10px] font-semibold tabular-nums">
-                  {b.count}
-                </span>
-                <div
-                  className="w-full rounded-t bg-primary/70 transition-all"
-                  style={{
-                    height: `${Math.max(
-                      b.count > 0 ? 8 : 2,
-                      (b.count / maxBin) * 64
-                    )}px`,
-                  }}
-                />
-                <span className="text-[10px] text-muted-foreground">
-                  {b.label}
-                </span>
-              </div>
-            ))}
-          </div>
-        </Card>
-      ) : null}
+      <Tabs defaultValue="siswa">
+        <TabsList>
+          <TabsTrigger value="siswa" className="gap-1.5">
+            <Users className="size-3.5" /> Per Siswa
+          </TabsTrigger>
+          <TabsTrigger value="analisis" className="gap-1.5">
+            <BarChart3 className="size-3.5" /> Analisis Soal
+          </TabsTrigger>
+        </TabsList>
 
-      {/* Attempts list */}
-      <div className="space-y-3">
-        {data.attempts.map((a) => (
-          <AttemptCard
-            key={a.id}
-            folderId={folderId}
-            attempt={a}
-            questions={data.questions}
-            archives={archivesByUser.get(a.user.id) ?? []}
-            onGraded={() =>
-              qc.invalidateQueries({
-                queryKey: ["cloud", "form-review", folderId],
-              })
-            }
-          />
-        ))}
-        {data.attempts.length === 0 ? (
-          <p className="text-sm text-muted-foreground text-center py-6">
-            Belum ada siswa yang membuka tugas ini.
-          </p>
+        <TabsContent value="siswa" className="mt-4 space-y-4 focus-visible:outline-none">
+          {/* Distribusi nilai */}
+          {scores.length > 0 ? (
+            <Card className="p-4 space-y-2">
+              <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground flex items-center gap-1.5">
+                <BarChart3 className="size-3.5" /> Distribusi nilai (n={
+                  scores.length
+                })
+              </p>
+              <div className="flex items-end gap-3 h-24 px-1">
+                {bins.map((b) => (
+                  <div
+                    key={b.label}
+                    className="flex-1 flex flex-col items-center gap-1"
+                    title={`${b.count} siswa (${
+                      scores.length > 0
+                        ? Math.round((b.count / scores.length) * 100)
+                        : 0
+                    }%)`}
+                  >
+                    <span className="text-[10px] font-semibold tabular-nums">
+                      {b.count}
+                    </span>
+                    <div
+                      className="w-full rounded-t bg-primary/70 transition-all"
+                      style={{
+                        height: `${Math.max(
+                          b.count > 0 ? 8 : 2,
+                          (b.count / maxBin) * 64
+                        )}px`,
+                      }}
+                    />
+                    <span className="text-[10px] text-muted-foreground">
+                      {b.label}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </Card>
+          ) : null}
+
+          {/* Attempts list */}
+          <div className="space-y-3">
+            {data.attempts.map((a) => (
+              <AttemptCard
+                key={a.id}
+                folderId={folderId}
+                attempt={a}
+                questions={data.questions}
+                archives={archivesByUser.get(a.user.id) ?? []}
+                onGraded={() =>
+                  qc.invalidateQueries({
+                    queryKey: ["cloud", "form-review", folderId],
+                  })
+                }
+              />
+            ))}
+            {data.attempts.length === 0 ? (
+              <p className="text-sm text-muted-foreground text-center py-6">
+                Belum ada siswa yang membuka tugas ini.
+              </p>
+            ) : null}
+          </div>
+        </TabsContent>
+
+        <TabsContent value="analisis" className="mt-4 focus-visible:outline-none">
+          <ItemAnalysis questions={data.questions} attempts={data.attempts} />
+        </TabsContent>
+      </Tabs>
+    </div>
+  );
+}
+
+// ── Analisis Soal: siapa menjawab apa + distribusi per soal ──────────
+// Referensi Google Classroom "Question analytics" + kebutuhan guru Aula:
+// guru membuka soal 1 → langsung terlihat: Siswa A menjawab B, Siswa B
+// menjawab D, dst. Termasuk distribusi pilihan, tingkat kesulitan, dan
+// rata-rata poin (memperlihatkan efek nilai parsial / penalti).
+
+function ItemAnalysis({
+  questions,
+  attempts,
+}: {
+  questions: ReviewQuestion[];
+  attempts: ReviewAttempt[];
+}) {
+  if (questions.length === 0) {
+    return (
+      <p className="text-sm text-muted-foreground text-center py-6">
+        Form belum punya soal.
+      </p>
+    );
+  }
+  return (
+    <div className="space-y-3">
+      {attempts.length === 0 ? (
+        <p className="text-sm text-muted-foreground text-center py-6">
+          Belum ada siswa yang membuka tugas ini — analisis akan muncul saat
+          ada pengerjaan.
+        </p>
+      ) : null}
+      {questions.map((q, i) => (
+        <QuestionAnalysis key={q.id} q={q} index={i} attempts={attempts} />
+      ))}
+    </div>
+  );
+}
+
+function isAutoGradable(q: ReviewQuestion): boolean {
+  return (
+    ((q.type === "PG" || q.type === "MULTI_PG") && q.correct.length > 0) ||
+    (q.type === "SHORT" && q.correct.length > 0)
+  );
+}
+
+function difficultyBadge(pct: number | null): {
+  label: string;
+  cls: string;
+} {
+  if (pct == null) return { label: "—", cls: "text-muted-foreground" };
+  if (pct >= 75)
+    return { label: "Mudah", cls: "text-emerald-600 dark:text-emerald-400" };
+  if (pct >= 40)
+    return { label: "Sedang", cls: "text-amber-600 dark:text-amber-400" };
+  return { label: "Sulit", cls: "text-destructive" };
+}
+
+function QuestionAnalysis({
+  q,
+  index,
+  attempts,
+}: {
+  q: ReviewQuestion;
+  index: number;
+  attempts: ReviewAttempt[];
+}) {
+  const meta = questionTypeMeta(q.type);
+  const answerOf = (a: ReviewAttempt) =>
+    a.answers.find((x) => x.questionId === q.id);
+
+  const answeredAttempts = attempts.filter((a) => {
+    const ans = answerOf(a);
+    return !!ans && ((ans.optionIds?.length ?? 0) > 0 || !!ans.text || !!ans.fileId);
+  });
+  const blankStudents = attempts
+    .filter((a) => !answeredAttempts.includes(a))
+    .map((a) => a.user);
+
+  // Benar = kecocokan persis dengan kunci (PG / MULTI_PG / SHORT berkunci).
+  const auto = isAutoGradable(q);
+  const correctStudents = auto
+    ? attempts.filter((a) => {
+        const ans = answerOf(a);
+        if (!ans) return false;
+        if (q.type === "SHORT") {
+          const keys = q.correct.map((k) => k.trim().toLowerCase());
+          return keys.includes((ans.text ?? "").trim().toLowerCase());
+        }
+        const sel = ans.optionIds ?? [];
+        return (
+          sel.length === q.correct.length &&
+          q.correct.every((c) => sel.includes(c))
+        );
+      })
+    : [];
+  const responded = answeredAttempts.length;
+  const correctPct =
+    auto && responded > 0
+      ? Math.round((correctStudents.length / responded) * 100)
+      : null;
+  const diff = difficultyBadge(correctPct);
+
+  // Rata-rata poin perolehan (memperlihatkan nilai parsial & penalti).
+  const earnedScores = answeredAttempts
+    .map((a) => answerOf(a)?.score)
+    .filter((s): s is number => s != null);
+  const avgEarned =
+    earnedScores.length > 0
+      ? (
+          earnedScores.reduce((s, v) => s + v, 0) / earnedScores.length
+        ).toFixed(1)
+      : null;
+
+  const maxCount = Math.max(1, ...q.options.map((o) => {
+    return attempts.filter((a) => (answerOf(a)?.optionIds ?? []).includes(o.id)).length;
+  }));
+
+  return (
+    <Card className="p-4 space-y-3">
+      {/* Baris judul soal */}
+      <div className="flex items-start justify-between gap-2 flex-wrap">
+        <div className="flex items-start gap-2 min-w-0 flex-1">
+          <span className="text-muted-foreground font-mono text-xs shrink-0 mt-0.5">
+            #{index + 1}
+          </span>
+          <p className="text-sm font-medium line-clamp-2">{q.text}</p>
+        </div>
+        <div className="flex items-center gap-1.5 shrink-0 flex-wrap justify-end">
+          <Badge variant="outline" className="text-[10px]">
+            {meta.label}
+          </Badge>
+          <Badge variant="secondary" className="text-[10px]">
+            {q.points} poin
+          </Badge>
+          {q.penaltyPercent ? (
+            <Badge
+              className="bg-destructive/10 text-destructive border border-destructive/30 text-[10px]"
+              title="Jawaban salah dikurangi sesuai persentase poin soal"
+            >
+              salah −{q.penaltyPercent}%
+            </Badge>
+          ) : null}
+          {q.type === "MULTI_PG" && q.partialScoring ? (
+            <Badge
+              className="bg-primary/10 text-primary border border-primary/30 text-[10px]"
+              title="Tiap jawaban benar yang dipilih bernilai proporsional"
+            >
+              nilai parsial
+            </Badge>
+          ) : null}
+          {auto ? (
+            <Badge variant="outline" className={`text-[10px] ${diff.cls}`}>
+              {diff.label}
+              {correctPct != null ? ` · ${correctPct}%` : ""}
+            </Badge>
+          ) : (
+            <Badge variant="outline" className="text-[10px]">
+              dinilai manual
+            </Badge>
+          )}
+        </div>
+      </div>
+
+      {/* Ringkasan angka */}
+      <div className="flex items-center gap-x-4 gap-y-1 flex-wrap text-xs text-muted-foreground">
+        <span>
+          <b className="text-foreground">{responded}</b> menjawab
+        </span>
+        {auto ? (
+          <span>
+            <b className="text-emerald-600 dark:text-emerald-400">
+              {correctStudents.length}
+            </b>{" "}
+            benar
+          </span>
+        ) : null}
+        <span>
+          <b className="text-foreground">{blankStudents.length}</b> belum
+          menjawab
+        </span>
+        {avgEarned != null ? (
+          <span>
+            rata-rata <b className="text-foreground">{avgEarned}</b> / {q.points} poin
+          </span>
         ) : null}
       </div>
-    </div>
+
+      {/* Distribusi per opsi (PG / MULTI_PG) */}
+      {q.type === "PG" || q.type === "MULTI_PG" ? (
+        <div className="space-y-1.5">
+          {q.options.map((o) => {
+            const pickers = attempts
+              .filter((a) => (answerOf(a)?.optionIds ?? []).includes(o.id))
+              .map((a) => a.user);
+            const isKey = q.correct.includes(o.id);
+            return (
+              <div key={o.id} className="flex items-center gap-2">
+                <div className="w-8 shrink-0 text-right">
+                  {isKey ? (
+                    <CheckCircle2 className="size-3.5 text-emerald-500 inline" />
+                  ) : null}
+                </div>
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span
+                      className={cn(
+                        "text-sm truncate max-w-[45%]",
+                        isKey && "font-semibold text-emerald-700 dark:text-emerald-400"
+                      )}
+                      title={o.label}
+                    >
+                      {o.label}
+                    </span>
+                    <span className="text-[11px] tabular-nums text-muted-foreground">
+                      {pickers.length}
+                      {responded > 0
+                        ? ` · ${Math.round((pickers.length / responded) * 100)}%`
+                        : ""}
+                    </span>
+                    {pickers.length > 0 ? (
+                      <span
+                        className="text-[11px] text-muted-foreground truncate max-w-full"
+                        title={pickers.map((u) => u.name).join(", ")}
+                      >
+                        — {pickers.map((u) => u.name).join(", ")}
+                      </span>
+                    ) : null}
+                  </div>
+                  <div className="h-1.5 rounded bg-muted overflow-hidden mt-0.5">
+                    <div
+                      className={cn(
+                        "h-full rounded transition-all",
+                        isKey ? "bg-emerald-500/70" : "bg-primary/40"
+                      )}
+                      style={{
+                        width: `${Math.max(pickers.length > 0 ? 6 : 0, (pickers.length / maxCount) * 100)}%`,
+                      }}
+                    />
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+          {blankStudents.length > 0 ? (
+            <p className="text-[11px] text-muted-foreground pl-10">
+              Belum menjawab — {blankStudents.map((u) => u.name).join(", ")}
+            </p>
+          ) : null}
+        </div>
+      ) : null}
+
+      {/* Distribusi jawaban isian (SHORT) */}
+      {q.type === "SHORT" ? (
+        <div className="space-y-1.5">
+          {Array.from(
+            answeredAttempts
+              .map((a) => ({
+                user: a.user,
+                text: (answerOf(a)?.text ?? "").trim(),
+              }))
+              .filter((x) => x.text)
+              .reduce((m, x) => {
+                const k = x.text.toLowerCase();
+                const arr = m.get(k) ?? [];
+                arr.push(x);
+                m.set(k, arr);
+                return m;
+              }, new Map<string, { user: ReviewAttempt["user"]; text: string }[]>())
+              .values()
+          ).map((group, gi) => {
+            const isKey = q.correct
+              .map((k) => k.trim().toLowerCase())
+              .includes(group[0].text.toLowerCase());
+            return (
+              <div
+                key={gi}
+                className={cn(
+                  "rounded-md border px-2.5 py-1.5",
+                  isKey
+                    ? "border-emerald-500/40 bg-emerald-500/10"
+                    : "border-border"
+                )}
+              >
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span className="text-sm font-mono truncate max-w-[60%]">
+                    {group[0].text}
+                  </span>
+                  <span className="text-[11px] tabular-nums text-muted-foreground">
+                    {group.length} siswa
+                  </span>
+                  {isKey ? (
+                    <Badge className="bg-emerald-500 text-white border-transparent text-[9px]">
+                      kunci
+                    </Badge>
+                  ) : null}
+                </div>
+                <p className="text-[11px] text-muted-foreground mt-0.5">
+                  {group.map((g) => g.user.name).join(", ")}
+                </p>
+              </div>
+            );
+          })}
+          {q.correct.length > 0 ? (
+            <p className="text-[11px] text-muted-foreground">
+              Kunci: <b>{q.correct.join(" / ")}</b>
+            </p>
+          ) : (
+            <p className="text-[11px] text-muted-foreground italic">
+              Isian tanpa kunci — dinilai manual.
+            </p>
+          )}
+          {blankStudents.length > 0 ? (
+            <p className="text-[11px] text-muted-foreground">
+              Belum menjawab — {blankStudents.map((u) => u.name).join(", ")}
+            </p>
+          ) : null}
+        </div>
+      ) : null}
+
+      {/* Esai / upload: daftar yang menjawab + status penilaian */}
+      {q.type === "ESSAY" || q.type === "FILE" || q.type === "IMAGE" ? (
+        <div className="space-y-1">
+          {answeredAttempts.length === 0 ? (
+            <p className="text-xs text-muted-foreground italic">
+              Belum ada yang menjawab soal ini.
+            </p>
+          ) : (
+            answeredAttempts.map((a) => {
+              const ans = answerOf(a);
+              return (
+                <div
+                  key={a.id}
+                  className="flex items-center gap-2 text-xs flex-wrap"
+                >
+                  <span className="font-medium min-w-0 truncate max-w-[40%]">
+                    {a.user.name}
+                  </span>
+                  {ans?.file ? (
+                    <Badge variant="outline" className="text-[9px] max-w-[220px] truncate">
+                      <Paperclip className="size-2.5" /> {ans.file.name}
+                    </Badge>
+                  ) : null}
+                  {ans?.text ? (
+                    <span className="text-muted-foreground truncate max-w-[240px]" title={ans.text}>
+                      “{ans.text.slice(0, 60)}{ans.text.length > 60 ? "…" : ""}”
+                    </span>
+                  ) : null}
+                  {ans?.score != null ? (
+                    <Badge variant="secondary" className="text-[9px]">
+                      {ans.score}/{q.points}
+                    </Badge>
+                  ) : (
+                    <Badge variant="outline" className="text-[9px]">
+                      belum dinilai
+                    </Badge>
+                  )}
+                </div>
+              );
+            })
+          )}
+          {blankStudents.length > 0 ? (
+            <p className="text-[11px] text-muted-foreground">
+              Belum menjawab — {blankStudents.map((u) => u.name).join(", ")}
+            </p>
+          ) : null}
+        </div>
+      ) : null}
+    </Card>
   );
 }
 

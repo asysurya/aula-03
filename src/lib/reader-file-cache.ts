@@ -1,23 +1,69 @@
 // ─────────────────────────────────────────────────────────────────────────
-// Cache file Aula Reader / pratinjau — SIKLUS HIDUP SEMENTARA:
+// Cache file Aula Reader / pratinjau — SIKLUS HIDUP SEMENTARA + SIMPAN:
 //
 // File yang dibuka di Aula Reader / pratinjau diunduh ke cache browser
 // (memori sesi + Cache Storage) supaya membuka ulang instan SELAGI
-// pratinjau terbuka. Begitu:
-//   - pratinjau DITUTUP            → buffer file DIHAPUS otomatis
-//   - tab / window DITUTUP         → memori mati sendiri; sisa di Cache
-//                                    Storage dibersihkan saat aplikasi
-//                                    dibuka lagi (sweep) + best-effort
-//                                    saat pagehide.
+// pratinjau terbuka. Begitu pratinjau DITUTUP, user ditanya:
+//   - "Simpan"  → file masuk daftar KEEP (localStorage) → tetap ada di
+//                 perangkat & dibuang hanya bila user hapus / cache penuh
+//                 → membuka lagi instan tanpa unduh ulang.
+//   - "Hapus"   → buffer file dihapus otomatis (perilaku lama).
+// Tab / window ditutup → memori mati sendiri; sisa di Cache Storage
+// dibersihkan saat aplikasi dibuka lagi (sweep) + best-effort pagehide —
+// sweep TIDAK menyentuh file yang di-KEEP.
 // Anotasi (stabilo, draw, dll) TIDAK ikut terhapus — disimpan terpisah di
 // MongoDB (lihat useRemoteAnnotations / /api/reader/doc).
 // ─────────────────────────────────────────────────────────────────────────
 
 const READER_CACHE = "aula-reader-v1";
+/** localStorage: daftar storageKey yang user pilih "Simpan" saat menutup. */
+const KEEP_KEY = "aula-reader-keep";
+/** Maks file yang boleh di-keep (mencegah localStorage & cache menumpuk). */
+const MAX_KEPT = 50;
 
 interface MemEntry {
   buffer: ArrayBuffer;
   objectUrl: string;
+}
+
+function loadKeptSet(): Set<string> {
+  try {
+    const raw = localStorage.getItem(KEEP_KEY);
+    if (!raw) return new Set();
+    const arr = JSON.parse(raw);
+    return new Set(Array.isArray(arr) ? arr.filter((x) => typeof x === "string") : []);
+  } catch {
+    return new Set();
+  }
+}
+
+function saveKeptSet(s: Set<string>) {
+  try {
+    // Bila melebihi batas: buang yang TERLAMA (urutan insert di akhir array).
+    const arr = Array.from(s);
+    localStorage.setItem(KEEP_KEY, JSON.stringify(arr.slice(-MAX_KEPT)));
+  } catch {
+    /* private mode / penuh — abaikan */
+  }
+}
+
+/** Apakah file ini dipilih user untuk disimpan (tetap setelah ditutup)? */
+export function isKeptReaderFile(storageKey: string): boolean {
+  return loadKeptSet().has(storageKey);
+}
+
+/** Tandai file agar TETAP di perangkat setelah pratinjau ditutup. */
+export function keepReaderFile(storageKey: string) {
+  const s = loadKeptSet();
+  s.add(storageKey);
+  saveKeptSet(s);
+}
+
+/** Batalkan "simpan" — file kembali dihapus otomatis saat pratinjau ditutup. */
+export function unkeepReaderFile(storageKey: string) {
+  const s = loadKeptSet();
+  s.delete(storageKey);
+  saveKeptSet(s);
 }
 
 /** Memori sesi (tab ini) — mati otomatis saat tab ditutup. */
@@ -93,12 +139,29 @@ export async function putReaderBuffer(
   return entry;
 }
 
+/** Apakah buffer file ini ADA di cache (memori / Cache Storage)?
+ *  Dipakai untuk memutuskan: perlu tanya "simpan atau hapus?" saat tutup. */
+export async function hasReaderCacheEntry(storageKey: string): Promise<boolean> {
+  if (memCache.has(storageKey)) return true;
+  const api = cacheApi();
+  if (!api) return false;
+  try {
+    const cache = await api.open(READER_CACHE);
+    const res = await cache.match(cacheKey(storageKey));
+    return !!(res && res.ok);
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Hapus SATU file dari cache (dipanggil saat pratinjau/reader ditutup).
  * Buffer memori di-revoke objectURL-nya lalu dibuang; Cache Storage ikut
- * dibersihkan. Anotasi TIDAK tersentuh (ada di MongoDB).
+ * dibersihkan; status "keep" (bila pernah disimpan) juga dilepas supaya
+ * tidak ada entri keep basi. Anotasi TIDAK tersentuh (ada di MongoDB).
  */
 export async function evictReaderFile(storageKey: string): Promise<void> {
+  unkeepReaderFile(storageKey);
   activeKeys.delete(storageKey);
   const mem = memCache.get(storageKey);
   if (mem) {
@@ -125,6 +188,8 @@ export async function evictReaderFile(storageKey: string): Promise<void> {
  * Entri yang pratinjaunya sedang terbuka di tab INI tetap dipertahankan.
  */
 export async function sweepReaderCache(): Promise<void> {
+  // File yang dipilih "Simpan" oleh user TIDAK boleh ikut tersapu.
+  const kept = loadKeptSet();
   const api = cacheApi();
   if (api) {
     try {
@@ -138,7 +203,7 @@ export async function sweepReaderCache(): Promise<void> {
           const sk = decodeURIComponent(
             req.url.replace(/^.*\/api\/storage\//, "").split(/[?#]/)[0]
           );
-          if (sk && !activeKeys.has(sk)) {
+          if (sk && !activeKeys.has(sk) && !kept.has(sk)) {
             await cache.delete(req).catch(() => {});
           }
         }
@@ -148,9 +213,10 @@ export async function sweepReaderCache(): Promise<void> {
     }
   }
   // Buang entri memori yang pratinjaunya sudah tidak aktif (mis. dialog
-  // ditutup tanpa evict karena error).
+  // ditutup tanpa evict karena error) — kecuali yang di-keep (buka ulang
+  // tetap instan tanpa unduh dalam sesi ini).
   for (const key of Array.from(memCache.keys())) {
-    if (!activeKeys.has(key)) {
+    if (!activeKeys.has(key) && !kept.has(key)) {
       const mem = memCache.get(key);
       if (mem) {
         try {

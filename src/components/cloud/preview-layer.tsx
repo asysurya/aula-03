@@ -27,14 +27,25 @@ import {
   type PointerEvent as ReactPointerEvent,
 } from "react";
 import { createPortal } from "react-dom";
-import { File as FileIcon, Maximize2, X } from "lucide-react";
+import { File as FileIcon, Maximize2, X, Focus, PictureInPicture2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import {
   usePreviewStore,
   type PipBox,
   type PreviewEntry,
 } from "@/stores/preview-store";
+import { useReaderUiStore } from "@/stores/reader-ui-store";
+import { hasReaderCacheEntry } from "@/lib/reader-file-cache";
 import { PreviewHeader, PreviewBody } from "@/components/cloud/file-preview";
 import { AulaReader } from "@/components/cloud/aula-reader/aula-reader";
 import {
@@ -107,6 +118,10 @@ function PreviewWindow({ entry }: { entry: PreviewEntry }) {
   const ensurePipBox = usePreviewStore((s) => s.ensurePipBox);
   const setPipBox = usePreviewStore((s) => s.setPipBox);
 
+  // Mode fokus Aula Reader (diputuskan oleh PdfReader di dalam konten).
+  const readerFocus = useReaderUiStore((s) => !!s.focusByEntry[entry.id]);
+  const setReaderFocus = useReaderUiStore((s) => s.setFocus);
+
   const file = entry.file;
   const minimized = entry.minimized;
 
@@ -158,16 +173,95 @@ function PreviewWindow({ entry }: { entry: PreviewEntry }) {
     closePreview(entry.id);
   }, [closePreview, entry.id]);
 
+  // ── Tutup dengan pilihan cache: SIMPAN atau HAPUS file dari perangkat ──
+  // Pref "aula.reader.closepref": "ask" (default) | "keep" | "delete".
+  const CLOSE_PREF = "aula.reader.closepref";
+  const [closeAskOpen, setCloseAskOpen] = useState(false);
+  const [rememberChoice, setRememberChoice] = useState(false);
+
+  function readClosePref(): "ask" | "keep" | "delete" {
+    try {
+      const v = localStorage.getItem(CLOSE_PREF);
+      return v === "keep" || v === "delete" ? v : "ask";
+    } catch {
+      return "ask";
+    }
+  }
+
+  async function requestClose() {
+    const pref = readClosePref();
+    if (pref !== "ask") {
+      applyClose(pref);
+      return;
+    }
+    // Hanya tanya bila file memang tersimpan di cache reader (PDF/EPUB/
+    // dokumen office). Gambar/video/audio tidak di-cache → tutup langsung.
+    let cached = false;
+    try {
+      cached = await hasReaderCacheEntry(file.storageKey);
+    } catch {
+      cached = false;
+    }
+    if (!cached) {
+      applyClose("delete");
+      return;
+    }
+    setRememberChoice(false);
+    setCloseAskOpen(true);
+  }
+
+  function applyClose(kind: "keep" | "delete") {
+    if (rememberChoice) {
+      try {
+        localStorage.setItem(CLOSE_PREF, kind);
+      } catch {
+        /* abaikan */
+      }
+      toast.info(
+        kind === "keep"
+          ? "Selanjutnya file yang ditutup otomatis disimpan di perangkat."
+          : "Selanjutnya cache file otomatis dihapus saat ditutup."
+      );
+    }
+    setCloseAskOpen(false);
+    if (kind === "keep") {
+      if (document.fullscreenElement) void document.exitFullscreen();
+      closePreview(entry.id, { keepCache: true });
+    } else {
+      close();
+    }
+  }
+
   // ESC menutup jendela besar (perilaku sama seperti dialog dulu).
   // Saat fullscreen browser, ESC dipakai browser untuk keluar fullscreen.
+  // MODE FOKUS: Esc pertama keluar dari fokus, bukan menutup jendela.
   useEffect(() => {
     if (minimized) return;
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape" && !document.fullscreenElement) close();
+      if (e.key !== "Escape" || document.fullscreenElement) return;
+      if (readerFocus && mode === "aula") {
+        setReaderFocus(entry.id, false);
+        return;
+      }
+      if (closeAskOpen) return; // dialog tanya-cache sedang terbuka
+      void requestClose();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [minimized, close]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [minimized, close, readerFocus, mode, closeAskOpen, file.storageKey]);
+
+  // Keluar dari mode fokus bila pratinjau dikecilkan / ganti mode tampilan.
+  useEffect(() => {
+    if ((minimized || mode !== "aula") && readerFocus) {
+      setReaderFocus(entry.id, false);
+    }
+  }, [minimized, mode, readerFocus, entry.id, setReaderFocus]);
+  // Bersihkan status fokus saat jendela benar-benar ditutup.
+  useEffect(
+    () => () => setReaderFocus(entry.id, false),
+    [entry.id, setReaderFocus]
+  );
 
   // Fokus jendela saat dibuka/dipulihkan (aksibilitas keyboard).
   const frameRef = useRef<HTMLDivElement>(null);
@@ -270,7 +364,7 @@ function PreviewWindow({ entry }: { entry: PreviewEntry }) {
       {!minimized ? (
         <div
           className="fixed inset-0 z-50 bg-black/50 animate-in fade-in-0"
-          onPointerDown={close}
+          onPointerDown={() => void requestClose()}
         />
       ) : null}
 
@@ -293,7 +387,9 @@ function PreviewWindow({ entry }: { entry: PreviewEntry }) {
           minimized ? { left: box.x, top: box.y, width: box.w, height: box.h } : undefined
         }
       >
-        {/* Bilah judul — chrome, boleh berganti antar mode */}
+        {/* Bilah judul — chrome, boleh berganti antar mode.
+            MODE FOKUS: bilah melayang transparan di ATAS konten (bukan
+            mengambil ruang) → dokumen memenuhi seluruh jendela. */}
         {minimized ? (
           <div
             {...dragHandlers}
@@ -309,6 +405,7 @@ function PreviewWindow({ entry }: { entry: PreviewEntry }) {
               variant="ghost"
               className="size-6 shrink-0"
               title="Perbesar pratinjau"
+              aria-label="Perbesar pratinjau"
               onClick={() => restorePreview(entry.id)}
             >
               <Maximize2 className="size-3.5" />
@@ -318,9 +415,47 @@ function PreviewWindow({ entry }: { entry: PreviewEntry }) {
               variant="ghost"
               className="size-6 shrink-0 hover:text-destructive"
               title="Tutup pratinjau"
-              onClick={close}
+              aria-label="Tutup pratinjau"
+              onClick={() => void requestClose()}
             >
               <X className="size-3.5" />
+            </Button>
+          </div>
+        ) : readerFocus && mode === "aula" ? (
+          <div className="absolute top-0 inset-x-0 z-40 flex items-center gap-1.5 h-11 px-3 bg-background/75 backdrop-blur border-b border-border/50">
+            <Focus className="size-3.5 text-primary shrink-0" />
+            <span className="text-xs truncate flex-1 min-w-0" title={file.name}>
+              {file.name}
+            </span>
+            <Button
+              size="icon"
+              variant="ghost"
+              className="size-7 shrink-0"
+              title="Keluar mode fokus"
+              aria-label="Keluar mode fokus"
+              onClick={() => setReaderFocus(entry.id, false)}
+            >
+              <Focus className="size-3.5" />
+            </Button>
+            <Button
+              size="icon"
+              variant="ghost"
+              className="size-7 shrink-0"
+              title="Perkecil menjadi PiP"
+              aria-label="Perkecil menjadi PiP"
+              onClick={() => minimizePreview(entry.id)}
+            >
+              <PictureInPicture2 className="size-3.5" />
+            </Button>
+            <Button
+              size="icon"
+              variant="ghost"
+              className="size-7 shrink-0 hover:text-destructive"
+              title="Tutup pratinjau"
+              aria-label="Tutup pratinjau"
+              onClick={() => void requestClose()}
+            >
+              <X className="size-4" />
             </Button>
           </div>
         ) : (
@@ -335,6 +470,7 @@ function PreviewWindow({ entry }: { entry: PreviewEntry }) {
             isFullscreen={isFullscreen}
             onToggleFullscreen={toggleFullscreen}
             onMinimize={() => minimizePreview(entry.id)}
+            onClose={() => void requestClose()}
           />
         )}
 
@@ -391,6 +527,44 @@ function PreviewWindow({ entry }: { entry: PreviewEntry }) {
           </div>
         ) : null}
       </div>
+
+      {/* Dialog tanya cache saat menutup: Simpan (buka cepat lagi) atau
+          Hapus dari perangkat. Hanya muncul bila file ada di cache. */}
+      <Dialog open={closeAskOpen} onOpenChange={setCloseAskOpen}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>Simpan salinan file di perangkat?</DialogTitle>
+            <DialogDescription>
+              <b className="break-all">{file.name}</b> sudah tersimpan sementara
+              di perangkat ini. Pilih <b>Simpan</b> supaya membuka ulang tanpa
+              mengunduh lagi, atau <b>Hapus</b> untuk langsung membebaskan
+              penyimpanan. Catatan &amp; anotasi tetap aman di akunmu.
+            </DialogDescription>
+          </DialogHeader>
+          <label className="flex items-center gap-2 text-sm text-muted-foreground select-none cursor-pointer">
+            <Checkbox
+              checked={rememberChoice}
+              onCheckedChange={(v) => setRememberChoice(v === true)}
+            />
+            Ingat pilihan ini (jangan tanya lagi)
+          </label>
+          <DialogFooter className="gap-2">
+            <Button variant="outline" onClick={() => setCloseAskOpen(false)}>
+              Batal
+            </Button>
+            <Button
+              variant="outline"
+              className="text-destructive hover:text-destructive"
+              onClick={() => applyClose("delete")}
+            >
+              Hapus &amp; tutup
+            </Button>
+            <Button onClick={() => applyClose("keep")}>
+              Simpan &amp; tutup
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </>,
     document.body
   );

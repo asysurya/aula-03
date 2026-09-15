@@ -38,7 +38,7 @@ export const FORM_QUESTION_TYPES: {
   {
     value: "SHORT",
     label: "Isian Singkat",
-    hint: "Jawaban teks pendek — dinilai manual",
+    hint: "Jawaban teks pendek — otomatis bila kunci diisi, manual bila kosong",
     hasOptions: false,
     isUpload: false,
     isText: true,
@@ -94,7 +94,12 @@ export interface FormQuestionDTO {
   required: boolean;
   order: number;
   options: FormOption[];
-  correct: string[] | null; // only present for teachers / after submit+showResult
+  correct: string[] | null; // only present for teachers / after submit+showResult. SHORT: kunci isian (bukan id opsi)
+  /** MULTI_PG: nilai parsial per jawaban benar (null = semua-atau-tidak). */
+  partialScoring?: boolean | null;
+  /** % poin dikurangi untuk jawaban SALAH (0-100; null/0 = tanpa penalti).
+   *  Hanya untuk soal yang dinilai otomatis: PG, MULTI_PG, SHORT berkunci. */
+  penaltyPercent?: number | null;
   imageFile: {
     id: string;
     name: string;
@@ -183,6 +188,28 @@ export interface FormSubmitResult {
         earned: number | null;
       }[]
     | null;
+}
+
+// ── Pengaturan penilaian ───────────────────────────────────────────
+
+/** Pilihan penalti (persentase poin soal yang dikurangi bila salah). */
+export const PENALTY_OPTIONS: { value: number; label: string }[] = [
+  { value: 0, label: "Tanpa penalti" },
+  { value: 10, label: "Salah −10% poin" },
+  { value: 25, label: "Salah −25% poin" },
+  { value: 33, label: "Salah −33% poin" },
+  { value: 50, label: "Salah −50% poin" },
+  { value: 100, label: "Salah −100% poin" },
+];
+
+/** Normalisasi teks jawaban isian: trim, lowercase, spasi beruntun jadi 1,
+ *  tanpa tanda baca di tepi — supaya "Jakarta " == "jakarta". */
+export function normalizeShortAnswer(s: string): string {
+  return s
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .replace(/^[\s.,;:!?'"]+|[\s.,;:!?'"]+$/g, "")
+    .trim();
 }
 
 // ── Violation labels ──────────────────────────────────────────────

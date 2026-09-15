@@ -490,7 +490,15 @@ model FormQuestion {
   order       Int     @default(0)
   options     String  @default("[]") // JSON [{id,label}]
   imageFileId String?
-  correct     String? // JSON array of correct option ids (never sent to students before submit)
+  correct     String? // JSON array of correct option ids (never sent to students before submit). SHORT: array of accepted text answers (kunci isian).
+  // Penilaian parsial MULTI_PG: tiap opsi benar yang dipilih bernilai
+  // proporsional (poin / jumlah kunci). null = semua-atau-tidak-sama-sekali.
+  // Nullable: MongoDB schemaless — form lama tak terdampak tanpa migrasi.
+  partialScoring Boolean?
+  // Penalti jawaban SALAH: persentase poin soal yang DIKURANGI (boleh minus).
+  // Berlaku untuk soal yang dinilai otomatis: PG, MULTI_PG, SHORT (berkunci).
+  // null/0 = tanpa penalti. Tidak menjawab TIDAK dikenai penalti.
+  penaltyPercent Int?
 
   form       Form         @relation(fields: [formId], references: [id], onDelete: Cascade, onUpdate: Cascade)
   imageFile  CloudFile?   @relation("FormQuestionImage", fields: [imageFileId], references: [id], onDelete: SetNull, onUpdate: Cascade)

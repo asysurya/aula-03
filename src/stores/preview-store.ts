@@ -20,7 +20,10 @@
 import { create } from "zustand";
 import { toast } from "sonner";
 import type { CloudFileItem } from "@/lib/cloud-format";
-import { evictReaderFile } from "@/lib/reader-file-cache";
+import {
+  evictReaderFile,
+  keepReaderFile,
+} from "@/lib/reader-file-cache";
 
 export const MAX_OPEN_PREVIEWS = 3;
 
@@ -48,7 +51,13 @@ interface PreviewState {
   openPreview: (file: CloudFileItem) => void;
   minimizePreview: (id: string) => void;
   restorePreview: (id: string) => void;
-  closePreview: (id: string) => void;
+  /**
+   * Tutup pratinjau.
+   * - keepCache: true → buffer file DIPERTAHANKAN di perangkat (dipakai
+   *   saat user memilih "Simpan" di dialog tutup — buka ulang jadi instan).
+   * - tanpa opsi / keepCache: false → cache file dihapus (perilaku lama).
+   */
+  closePreview: (id: string, opts?: { keepCache?: boolean }) => void;
   setPipBox: (id: string, box: PipBox) => void;
   /** Simpan posisi default kartu PiP (dipasang saat pertama minimize). */
   ensurePipBox: (id: string, box: PipBox) => void;
@@ -56,12 +65,15 @@ interface PreviewState {
 
 function removeEntry(
   entries: PreviewEntry[],
-  id: string
+  id: string,
+  opts?: { keepCache?: boolean }
 ): PreviewEntry[] {
   const victim = entries.find((e) => e.id === id);
   if (victim) {
-    // Bersihkan buffer Cache Storage pratinjau (anotasi tetap aman di DB).
-    void evictReaderFile(victim.file.storageKey);
+    // "Simpan" → tandai keep (sweep berikutnya tidak menghapusnya);
+    // selain itu bersihkan buffer Cache Storage (anotasi tetap aman di DB).
+    if (opts?.keepCache) keepReaderFile(victim.file.storageKey);
+    else void evictReaderFile(victim.file.storageKey);
   }
   return entries.filter((e) => e.id !== id);
 }
@@ -137,7 +149,8 @@ export const usePreviewStore = create<PreviewState>((set, get) => ({
       ),
     })),
 
-  closePreview: (id) => set((s) => ({ entries: removeEntry(s.entries, id) })),
+  closePreview: (id, opts) =>
+    set((s) => ({ entries: removeEntry(s.entries, id, opts) })),
 
   setPipBox: (id, box) =>
     set((s) => ({

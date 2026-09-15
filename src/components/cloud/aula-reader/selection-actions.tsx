@@ -171,7 +171,19 @@ export function useSelectionMenu({
       // kontainer (koordinat konten = scroll + viewport — tanpa ini, di mode
       // horizontal menu terdorong ke tepi kiri / terpotong karena clamp lama
       // mengabaikan scrollLeft).
-      state.y = Math.max(el.scrollTop + 4, state.y - 48);
+      // FIX MOBILE + MODE FOKUS: bila posisi menu jatuh di ZONA ATAS area
+      // terlihat (tempat bilah alat reader / bilah melayang berada), menu
+      // pindah ke BAWAH seleksi — dulu menu tertutup bilah alat dan tidak
+      // bisa dipakai sama sekali di ponsel.
+      const TOOLBAR_SAFE = 60; // tinggi zona aman atas (px)
+      const yAbove = state.y - 48;
+      if (yAbove < el.scrollTop + TOOLBAR_SAFE) {
+        // Taruh di bawah seleksi (seleksi selalu di area terlihat).
+        state.y =
+          rect.bottom - cRect.top + el.scrollTop + 10;
+      } else {
+        state.y = yAbove;
+      }
       const minX = el.scrollLeft + 4;
       const maxX = el.scrollLeft + Math.max(4, el.clientWidth - 250);
       state.x = Math.min(Math.max(minX, state.x), Math.max(minX, maxX));
@@ -265,7 +277,7 @@ export function SelectionToolbar({
       ref={ref}
       role="toolbar"
       aria-label="Aksi teks terpilih"
-      className="absolute z-30 flex items-center gap-0.5 rounded-lg border border-border bg-background shadow-lg px-1 py-1"
+      className="absolute z-40 flex items-center gap-0.5 rounded-lg border border-border bg-background shadow-lg px-1 py-1"
       style={{ left: menu.x, top: menu.y, maxWidth: 320 }}
       onPointerDown={(e) => e.stopPropagation()}
     >

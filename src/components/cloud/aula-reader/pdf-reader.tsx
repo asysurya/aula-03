@@ -21,6 +21,8 @@ import {
   Loader2,
   ArrowDownUp,
   ArrowLeftRight,
+  Focus,
+  Columns2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -37,6 +39,7 @@ import {
 } from "./annotations";
 import { AnnotationLayer } from "./annotation-layer";
 import { useSelectionMenu, SelectionToolbar } from "./selection-actions";
+import { useReaderUiStore } from "@/stores/reader-ui-store";
 import type { PDFDocumentProxy } from "pdfjs-dist";
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -72,6 +75,27 @@ interface PageDim {
 
 export type ViewMode = "vertical" | "horizontal";
 const VM_KEY = "aula.reader.viewmode";
+const FOCUS_KEY = "aula.reader.focus";
+const PERVIEW_KEY = "aula.reader.perview";
+
+/** Jumlah halaman per layar: 1, atau 2 berdampingan (mode buku). */
+type PerView = 1 | 2;
+
+function loadBoolPref(key: string): boolean {
+  try {
+    return localStorage.getItem(key) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function loadPerView(): PerView {
+  try {
+    return localStorage.getItem(PERVIEW_KEY) === "2" ? 2 : 1;
+  } catch {
+    return 1;
+  }
+}
 
 function loadViewMode(): ViewMode {
   try {
@@ -112,6 +136,13 @@ export function PdfReader({
   const [ttsPlaying, setTtsPlaying] = useState(false);
   const [flashPage, setFlashPage] = useState<number | null>(null);
   const [viewMode, setViewMode] = useState<ViewMode>(loadViewMode);
+  /** Mode fokus — bilah alat melayang (auto-hide) + header jendela
+   *  disembunyikan → area halaman maksimal. Persist per browser. */
+  const [focus, setFocus] = useState(() => loadBoolPref(FOCUS_KEY));
+  /** Bilah alat melayang terlihat? (mode fokus saja; auto-hide saat gulir) */
+  const [toolbarVisible, setToolbarVisible] = useState(true);
+  /** Halaman per layar (1 / 2 — mode buku). Persist per browser. */
+  const [perView, setPerView] = useState<PerView>(loadPerView);
   /** Teks input nomor halaman saat sedang diedit (null = ikut page). */
   const [pageInput, setPageInput] = useState<string | null>(null);
 
@@ -132,6 +163,13 @@ export function PdfReader({
   const restored = useRef(false);
 
   const anno = useAnnotations(file.storageKey);
+
+  // Mode fokus perlu dibaca PreviewWindow (untuk menyembunyikan header
+  // jendelanya) — sinkronkan ke store global, di-key per storageKey.
+  const setReaderFocus = useReaderUiStore((s) => s.setFocus);
+  useEffect(() => {
+    setReaderFocus(file.storageKey, focus);
+  }, [focus, file.storageKey, setReaderFocus]);
 
   // ── Load dokumen ──
   useEffect(() => {
@@ -235,15 +273,26 @@ export function PdfReader({
 
   // ── Lebar halaman per mode ──
   // Vertikal: pas-lebar (w). Horizontal: pas-TINGGI (h) → lebar = h/rasio.
+  // Mode buku (perView 2): juga dibatasi lebar agar 2 halaman muat bersebelah.
   const pageWidthOf = useCallback(
     (i: number) => {
+      const GAP = 16; // gap-4 antar halaman
       if (viewMode === "horizontal") {
         const h = containerH > 100 ? (containerH - 32) * zoom : 360;
-        return Math.max(120, h / ratioOf(i));
+        let w = h / ratioOf(i);
+        if (perView === 2) {
+          const wBySpread = (containerW - 24 - GAP) / 2;
+          w = Math.min(w, wBySpread);
+        }
+        return Math.max(120, w);
+      }
+      if (perView === 2) {
+        // Vertikal 2 kolom: tiap halaman separuh lebar wadah.
+        return Math.max(120, (containerW - 24 - GAP) / 2) * zoom;
       }
       return Math.max(280, containerW - 32) * zoom;
     },
-    [viewMode, containerW, containerH, zoom, ratioOf]
+    [viewMode, containerW, containerH, zoom, ratioOf, perView]
   );
 
   // ── Laporkan halaman aktif → tersimpan di MongoDB (lanjut baca lain
@@ -276,9 +325,24 @@ export function PdfReader({
   }, [doc, numPages, anno.savedPage]);
 
   // ── Halaman aktif (saat scroll — mendukung kedua mode) ──
+  const lastScrollPos = useRef(0);
   const onScroll = useCallback(() => {
     const el = containerRef.current;
     if (!el) return;
+    // Mode fokus: gulir maju menyembunyikan bilah alat melayang; gulir
+    // mundur menampilkannya kembali (pola bilah alat aplikasi modern).
+    if (focus) {
+      const pos = viewMode === "horizontal" ? el.scrollLeft : el.scrollTop;
+      if (pos > lastScrollPos.current + 4) {
+        setToolbarVisible(false);
+        lastScrollPos.current = pos;
+      } else if (pos < lastScrollPos.current - 4) {
+        setToolbarVisible(true);
+        lastScrollPos.current = pos;
+      } else {
+        lastScrollPos.current = pos;
+      }
+    }
     let cur = 1;
     if (viewMode === "horizontal") {
       const center = el.scrollLeft + el.clientWidth / 2;
@@ -298,23 +362,41 @@ export function PdfReader({
       }
     }
     setPage((prev) => (prev === cur ? prev : cur));
-  }, [numPages, viewMode]);
+  }, [numPages, viewMode, focus]);
 
-  // ── Jump ke halaman ──
+  // ── Jump ke halaman (sadar-mode-buku: lompat ke spread berisi halaman) ──
+  const spreadRefs = useRef<Map<number, HTMLDivElement>>(new Map());
+  const registerSpread = useCallback((si: number, el: HTMLDivElement | null) => {
+    if (el) spreadRefs.current.set(si, el);
+    else spreadRefs.current.delete(si);
+  }, []);
+
   const gotoPage = useCallback(
     (n: number) => {
       const target = Math.min(Math.max(1, n), numPages || 1);
-      const node = pageRefs.current.get(target);
-      if (node) {
-        node.scrollIntoView({
+      const spreadNode =
+        viewMode === "horizontal" && perView === 2
+          ? spreadRefs.current.get(Math.floor((target - 1) / 2))
+          : null;
+      if (spreadNode) {
+        spreadNode.scrollIntoView({
           behavior: "smooth",
-          block: viewMode === "horizontal" ? "nearest" : "start",
-          inline: viewMode === "horizontal" ? "center" : "nearest",
+          block: "nearest",
+          inline: "center",
         });
+      } else {
+        const node = pageRefs.current.get(target);
+        if (node) {
+          node.scrollIntoView({
+            behavior: "smooth",
+            block: viewMode === "horizontal" ? "nearest" : "start",
+            inline: viewMode === "horizontal" ? "center" : "nearest",
+          });
+        }
       }
       setPage(target);
     },
-    [numPages, viewMode]
+    [numPages, viewMode, perView]
   );
 
   // ── Zoom ──
@@ -388,8 +470,9 @@ export function PdfReader({
     });
   }, []);
 
-  // Ganti mode → posisi scroll lama (mis. scrollLeft horizontal) tidak boleh
-  // terbawa ke mode baru (dulu: halaman tergeser keluar layar setelah toggle).
+  // Ganti mode / jumlah halaman per layar → posisi scroll lama (mis.
+  // scrollLeft horizontal) tidak boleh terbawa ke mode baru (dulu: halaman
+  // tergeser keluar layar setelah toggle).
   useEffect(() => {
     const el = containerRef.current;
     if (!el) return;
@@ -400,7 +483,44 @@ export function PdfReader({
         block: viewMode === "horizontal" ? "nearest" : "start",
         inline: viewMode === "horizontal" ? "center" : "start",
       });
-  }, [viewMode]);
+  }, [viewMode, perView]);
+
+  // ── Mode fokus & halaman per layar ──
+  const toggleFocus = useCallback(() => {
+    setFocus((v) => {
+      const next = !v;
+      try {
+        localStorage.setItem(FOCUS_KEY, next ? "1" : "0");
+      } catch {
+        /* abaikan */
+      }
+      toast.success(
+        next
+          ? "Mode fokus aktif — halaman memenuhi layar (Esc untuk keluar)"
+          : "Mode fokus dimatikan"
+      );
+      if (next) requestAnimationFrame(() => containerRef.current?.focus());
+      return next;
+    });
+    setToolbarVisible(true);
+  }, []);
+
+  const togglePerView = useCallback(() => {
+    setPerView((v) => {
+      const next: PerView = v === 1 ? 2 : 1;
+      try {
+        localStorage.setItem(PERVIEW_KEY, String(next));
+      } catch {
+        /* abaikan */
+      }
+      toast.success(
+        next === 2
+          ? "2 halaman per layar — mode buku"
+          : "1 halaman per layar"
+      );
+      return next;
+    });
+  }, []);
 
   // ── TTS: baca halaman, lanjut otomatis ──
   const speakPage = useCallback(
@@ -550,17 +670,33 @@ export function PdfReader({
     [ttsPlaying, sel]
   );
 
-  // ── Keyboard (remote TV / keyboard) ──
+  // ── Keyboard (remote TV / keyboard / alat bantu) ──
   // Shift+panah dibiarkan untuk seleksi teks via keyboard.
   const onKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
+      if (e.key === "Escape" && focus) {
+        // Mode fokus: Esc keluar dari fokus DULU (bukan menutup jendela).
+        e.preventDefault();
+        e.stopPropagation();
+        toggleFocus();
+        return;
+      }
       if (e.shiftKey) return;
       if (e.key === "PageDown" || e.key === "ArrowRight") {
         e.preventDefault();
-        gotoPage(page + 1);
+        // Mode buku horizontal: panah membalik per SPREAD (2 halaman).
+        const step = viewMode === "horizontal" && perView === 2 ? perView : 1;
+        gotoPage(page + step);
       } else if (e.key === "PageUp" || e.key === "ArrowLeft") {
         e.preventDefault();
-        gotoPage(page - 1);
+        const step = viewMode === "horizontal" && perView === 2 ? perView : 1;
+        gotoPage(page - step);
+      } else if (e.key === "Home") {
+        e.preventDefault();
+        gotoPage(1);
+      } else if (e.key === "End") {
+        e.preventDefault();
+        gotoPage(numPages);
       } else if (e.key === "+" || e.key === "=") {
         changeZoom(0.25);
       } else if (e.key === "-") {
@@ -573,7 +709,7 @@ export function PdfReader({
         toggleViewMode();
       }
     },
-    [page, gotoPage, changeZoom, toggleViewMode, applyZoom]
+    [page, numPages, focus, viewMode, perView, gotoPage, changeZoom, toggleViewMode, applyZoom, toggleFocus]
   );
 
   const pageList = useMemo(() => {
@@ -581,6 +717,16 @@ export function PdfReader({
     for (let i = 1; i <= numPages; i++) arr.push(i);
     return arr;
   }, [numPages]);
+
+  /** Mode buku horizontal: kelompokkan halaman per spread (2 berdampingan). */
+  const spreads = useMemo(() => {
+    if (viewMode !== "horizontal" || perView !== 2) return null;
+    const arr: number[][] = [];
+    for (let i = 1; i <= numPages; i += 2) {
+      arr.push([i, Math.min(i + 1, numPages)]);
+    }
+    return arr;
+  }, [viewMode, perView, numPages]);
 
   // Callback stabil supaya PageView (React.memo) tidak re-render ketika
   // parent ganti state yang tak terkait. (Dulu: onVisible & registerRef
@@ -625,14 +771,29 @@ export function PdfReader({
   }
 
   return (
-    <div className="flex flex-col flex-1 h-full min-h-0">
+    <div className="relative flex flex-col flex-1 h-full min-h-0">
+      {/* Pengumuman halaman aktif untuk pembaca layar / alat bantu */}
+      <span className="sr-only" role="status" aria-live="polite">
+        Halaman {page} dari {numPages}
+      </span>
       {/* ── Toolbar (satu baris, bisa digulir ke samping di layar sempit —
-          dulu flex-wrap: 4 baris di HP memakan ruang file & menutup tool) ── */}
+          dulu flex-wrap: 4 baris di HP memakan ruang file & menutup tool).
+          MODE FOKUS: melayang di atas halaman, transparan, auto-hide. ── */}
       <div
+        role="toolbar"
+        aria-label="Alat pembaca dokumen"
         className={cn(
-          "flex items-center gap-1.5 px-3 py-2 border-b border-border bg-background/95 z-20",
+          "flex items-center gap-1.5 px-3 py-2 z-30",
           "flex-nowrap overflow-x-auto",
-          "[scrollbar-width:none] [-ms-overflow-style:none] [&::-webkit-scrollbar]:hidden"
+          "[scrollbar-width:none] [-ms-overflow-style:none] [&::-webkit-scrollbar]:hidden",
+          focus
+            ? cn(
+                "absolute left-1/2 top-2 -translate-x-1/2 rounded-full border border-border/70",
+                "bg-background/90 backdrop-blur shadow-lg max-w-[calc(100%-16px)]",
+                "transition-[opacity,translate] duration-300",
+                !toolbarVisible && "opacity-0 pointer-events-none -translate-y-[130%]"
+              )
+            : "border-b border-border bg-background/95 z-20"
         )}
       >
         <div className="flex items-center gap-1 shrink-0">
@@ -643,6 +804,7 @@ export function PdfReader({
             onClick={() => gotoPage(page - 1)}
             disabled={page <= 1}
             title="Halaman sebelumnya"
+            aria-label="Halaman sebelumnya"
           >
             <ChevronLeft className="size-4" />
           </Button>
@@ -686,6 +848,7 @@ export function PdfReader({
             onClick={() => gotoPage(page + 1)}
             disabled={page >= numPages}
             title="Halaman berikutnya"
+            aria-label="Halaman berikutnya"
           >
             <ChevronRight className="size-4" />
           </Button>
@@ -698,6 +861,7 @@ export function PdfReader({
             className="h-9 w-9"
             onClick={() => changeZoom(-0.25)}
             title="Perkecil"
+            aria-label="Perkecil tampilan"
           >
             <ZoomOut className="size-4" />
           </Button>
@@ -710,6 +874,7 @@ export function PdfReader({
             className="h-9 w-9"
             onClick={() => changeZoom(0.25)}
             title="Perbesar"
+            aria-label="Perbesar tampilan"
           >
             <ZoomIn className="size-4" />
           </Button>
@@ -719,6 +884,7 @@ export function PdfReader({
             className="h-9 w-9"
             onClick={() => applyZoom(1)}
             title="Pas layar"
+            aria-label="Pas layar"
           >
             <Maximize className="size-4" />
           </Button>
@@ -733,12 +899,48 @@ export function PdfReader({
                 ? "Mode horizontal — halaman bergeser ke samping (tekan H)"
                 : "Mode vertikal — halaman bergulir ke bawah (tekan H)"
             }
+            aria-label={
+              viewMode === "vertical"
+                ? "Ganti ke mode horizontal"
+                : "Ganti ke mode vertikal"
+            }
           >
             {viewMode === "vertical" ? (
               <ArrowDownUp className="size-4" />
             ) : (
               <ArrowLeftRight className="size-4" />
             )}
+          </Button>
+          {/* Halaman per layar: 1 / 2 (mode buku) */}
+          <Button
+            variant={perView === 2 ? "secondary" : "outline"}
+            size="icon"
+            className="h-9 w-9"
+            onClick={togglePerView}
+            disabled={numPages < 2}
+            title={
+              perView === 2
+                ? "Satu halaman per layar"
+                : "Dua halaman per layar (mode buku)"
+            }
+            aria-label={
+              perView === 2
+                ? "Satu halaman per layar"
+                : "Dua halaman per layar, mode buku"
+            }
+          >
+            <Columns2 className="size-4" />
+          </Button>
+          {/* Mode fokus: bilah alat auto-hide, halaman memenuhi layar */}
+          <Button
+            variant={focus ? "secondary" : "outline"}
+            size="icon"
+            className="h-9 w-9"
+            onClick={toggleFocus}
+            title="Mode fokus — halaman memenuhi layar, bilah alat disembunyikan (Esc keluar)"
+            aria-label="Mode fokus"
+          >
+            <Focus className="size-4" />
           </Button>
         </div>
 
@@ -749,6 +951,7 @@ export function PdfReader({
             className="h-9 w-9"
             onClick={() => setNight((v) => !v)}
             title={night ? "Mode terang" : "Mode malam (nyaman di gelap)"}
+            aria-label={night ? "Mode terang" : "Mode malam"}
           >
             {night ? <Sun className="size-4" /> : <Moon className="size-4" />}
           </Button>
@@ -758,6 +961,7 @@ export function PdfReader({
             className="h-9 w-9"
             onClick={() => setSearchOpen((v) => !v)}
             title="Cari teks di dokumen"
+            aria-label="Cari teks di dokumen"
           >
             <Search className="size-4" />
           </Button>
@@ -767,6 +971,7 @@ export function PdfReader({
             className="h-9 w-9"
             onClick={toggleTts}
             title={ttsPlaying ? "Hentikan bacaan" : "Bacakan halaman (TTS)"}
+            aria-label={ttsPlaying ? "Hentikan bacaan" : "Bacakan halaman"}
           >
             {ttsPlaying ? <Square className="size-4" /> : <Volume2 className="size-4" />}
           </Button>
@@ -780,6 +985,7 @@ export function PdfReader({
             className="h-9 w-9"
             onClick={() => setTool(tool === "hl" ? "none" : "hl")}
             title="Stabilo — seret di halaman, atau blok teks lalu pilih Stabilo"
+            aria-label="Alat stabilo"
           >
             <Highlighter className="size-4" />
           </Button>
@@ -789,6 +995,7 @@ export function PdfReader({
             className="h-9 w-9"
             onClick={() => setTool(tool === "pen" ? "none" : "pen")}
             title="Pena — gambar bebas di halaman"
+            aria-label="Alat pena"
           >
             <Pen className="size-4" />
           </Button>
@@ -798,6 +1005,7 @@ export function PdfReader({
             className="h-9 w-9"
             onClick={() => setTool(tool === "erase" ? "none" : "erase")}
             title="Penghapus — sentuh anotasi untuk menghapus"
+            aria-label="Alat penghapus"
           >
             <Eraser className="size-4" />
           </Button>
@@ -825,6 +1033,7 @@ export function PdfReader({
             onClick={() => anno.undo()}
             disabled={anno.count === 0}
             title="Urungkan anotasi terakhir"
+            aria-label="Urungkan anotasi terakhir"
           >
             <Undo2 className="size-4" />
           </Button>
@@ -835,6 +1044,7 @@ export function PdfReader({
             onClick={() => anno.clearAll()}
             disabled={anno.count === 0}
             title="Hapus semua anotasi file ini (tersimpan di akunmu)"
+            aria-label="Hapus semua anotasi"
           >
             <Trash2 className="size-4" />
           </Button>
@@ -843,7 +1053,13 @@ export function PdfReader({
 
       {/* Panel pencarian */}
       {searchOpen ? (
-        <div className="px-3 py-2 border-b border-border bg-muted/40">
+        <div
+          className={cn(
+            "px-3 py-2 border-b border-border bg-muted/40 z-30",
+            focus &&
+              "absolute left-1/2 top-14 -translate-x-1/2 rounded-xl border-border shadow-lg bg-background/95 backdrop-blur max-w-[calc(100%-16px)]"
+          )}
+        >
           <div className="flex items-center gap-2">
             <Input
               autoFocus
@@ -905,43 +1121,87 @@ export function PdfReader({
       <div
         ref={containerRef}
         tabIndex={0}
+        role="region"
+        aria-label="Halaman dokumen — panah kiri/kanan pindah halaman, tombol plus/minus zoom, tanda minus untuk Home/End"
         onKeyDown={onKeyDown}
         onScroll={onScroll}
+        onMouseMove={(e) => {
+          // Mode fokus: dekati tepi atas → tampilkan bilah alat melayang.
+          if (!focus) return;
+          const rect = e.currentTarget.getBoundingClientRect();
+          if (e.clientY - rect.top < 96) setToolbarVisible(true);
+        }}
         className={cn(
           "relative flex-1 min-h-0 overflow-auto outline-none",
-          viewMode === "horizontal" && "snap-x snap-mandatory",
+          "focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring",
+          // Snap HANYA saat pas-layar (zoom 1). Saat di-zoom, snap-mandatory
+          // justru MENCEGAH pembaca menggeser/melihat detail halaman
+          // (scroll selalu dipaksa kembali ke tengah halaman) — bug lama.
+          viewMode === "horizontal" && zoom === 1 && "snap-x snap-mandatory",
           night ? "bg-neutral-900 pdf-night" : "bg-neutral-200 dark:bg-neutral-900/60"
         )}
       >
         <div
           className={cn(
             viewMode === "vertical"
-              ? "flex flex-col items-center gap-4 py-4 px-3"
+              ? perView === 2
+                ? "grid grid-cols-2 justify-items-center gap-4 py-4 px-3"
+                : "flex flex-col items-center gap-4 py-4 px-3"
               : "flex flex-row items-stretch h-full w-max gap-4 px-3 py-4"
           )}
         >
-          {pageList.map((i) => (
-            <PageView
-              key={i}
-              doc={doc}
-              pageNo={i}
-              width={pageWidthOf(i)}
-              ratio={ratioOf(i)}
-              visible={visible.has(i)}
-              onVisible={handleVisible}
-              registerRef={registerPage}
-              tool={tool}
-              color={color}
-              items={anno.items}
-              onAdd={anno.add}
-              onErase={anno.remove}
-              night={night}
-              flash={flashPage === i}
-              horizontal={viewMode === "horizontal"}
-            />
-          ))}
+          {spreads
+            ? spreads.map((sp, si) => (
+                <div
+                  key={si}
+                  ref={(el) => registerSpread(si, el)}
+                  data-spread={si}
+                  className="flex items-center h-full gap-4 snap-center shrink-0"
+                >
+                  {sp.map((i) => (
+                    <PageView
+                      key={i}
+                      doc={doc}
+                      pageNo={i}
+                      width={pageWidthOf(i)}
+                      ratio={ratioOf(i)}
+                      visible={visible.has(i)}
+                      onVisible={handleVisible}
+                      registerRef={registerPage}
+                      tool={tool}
+                      color={color}
+                      items={anno.items}
+                      onAdd={anno.add}
+                      onErase={anno.remove}
+                      night={night}
+                      flash={flashPage === i}
+                      horizontal={false}
+                    />
+                  ))}
+                </div>
+              ))
+            : pageList.map((i) => (
+                <PageView
+                  key={i}
+                  doc={doc}
+                  pageNo={i}
+                  width={pageWidthOf(i)}
+                  ratio={ratioOf(i)}
+                  visible={visible.has(i)}
+                  onVisible={handleVisible}
+                  registerRef={registerPage}
+                  tool={tool}
+                  color={color}
+                  items={anno.items}
+                  onAdd={anno.add}
+                  onErase={anno.remove}
+                  night={night}
+                  flash={flashPage === i}
+                  horizontal={viewMode === "horizontal"}
+                />
+              ))}
           {numPages > 0 && viewMode === "vertical" ? (
-            <p className="text-xs text-muted-foreground pb-2 px-4">
+            <p className="text-xs text-muted-foreground pb-2 px-4 col-span-full">
               {numPages} halaman · {anno.count > 0 ? `${anno.count} anotasi tersimpan di akunmu · ` : ""}
               Blok teks lalu pilih Bacakan / Stabilo / Salin · gunakan ⯇ ⯈ atau geser
             </p>
@@ -964,6 +1224,20 @@ export function PdfReader({
           />
         ) : null}
       </div>
+
+      {/* Tombol melayang keluar-fokus — selalu terlihat di mode fokus */}
+      {focus ? (
+        <Button
+          variant="outline"
+          size="icon"
+          className="absolute bottom-4 right-4 z-30 size-11 rounded-full bg-background/85 backdrop-blur border-border/70 shadow-lg"
+          onClick={toggleFocus}
+          title="Keluar mode fokus (Esc)"
+          aria-label="Keluar mode fokus"
+        >
+          <Focus className="size-4" />
+        </Button>
+      ) : null}
     </div>
   );
 }

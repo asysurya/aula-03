@@ -2,6 +2,7 @@ import { NextRequest } from "next/server";
 import { db } from "@/lib/db";
 import { requireUser } from "@/lib/session";
 import { errorResponse, folderClassroomId, isClassroomMember } from "@/lib/cloud-utils";
+import { normalizeShortAnswer } from "@/lib/form-types";
 
 function parseJsonArray<T>(raw: string | null | undefined): T[] {
   if (!raw) return [];
@@ -75,6 +76,17 @@ export async function POST(
   }
 
   // ── Server-side grading ──────────────────────────────────────────
+  // Aturan penilaian (dapat diatur guru per soal):
+  // - PG: benar → +poin; salah (dijawab tapi tidak tepat) → −penalti%
+  //   dari poin; kosong → 0.
+  // - MULTI_PG semua-atau-tidak: tepat sama → +poin; selain itu
+  //   (dijawab sebagian/salah) → −penalti%; kosong → 0.
+  // - MULTI_PG parsial: tiap opsi benar yang dipilih = +poin/jumlah
+  //   kunci (dibulatkan); tiap opsi salah yang dipilih = −penalti% poin;
+  //   kosong → 0. Nilai bisa minus bila penalti aktif.
+  // - SHORT berkunci: cocok (normalisasi: trim/lowercase/spasi) → +poin;
+  //   dijawab tapi tidak cocok → −penalti%; kosong → 0.
+  // - ESSAY / FILE / IMAGE / SHORT tanpa kunci: menunggu nilai manual guru.
   const answerByQ = new Map(attempt.answers.map((a) => [a.questionId, a]));
   const results: {
     questionId: string;
@@ -88,42 +100,123 @@ export async function POST(
 
   for (const q of form.questions) {
     const answer = answerByQ.get(q.id);
-    const auto =
-      (q.type === "PG" || q.type === "MULTI_PG") &&
-      (q.correct != null);
-    if (!auto) {
+    const penalty = Math.max(0, Math.min(100, q.penaltyPercent ?? 0));
+    const penaltyPoints = Math.round((q.points * penalty) / 100);
+
+    if (q.type === "PG" || q.type === "MULTI_PG") {
+      if (q.correct == null) {
+        results.push({
+          questionId: q.id,
+          auto: false,
+          correct: null,
+          correctOptionIds: null,
+          earned: null,
+        });
+        continue;
+      }
+      const correctIds = parseJsonArray<string>(q.correct);
+      const selected = answer?.optionIds
+        ? parseJsonArray<string>(answer.optionIds)
+        : [];
+      const isCorrect =
+        selected.length === correctIds.length &&
+        correctIds.every((c) => selected.includes(c));
+
+      let earned: number;
+      if (isCorrect) {
+        earned = q.points;
+      } else if (selected.length === 0) {
+        earned = 0; // tidak menjawab: tidak dikenai penalti
+      } else if (q.type === "MULTI_PG" && q.partialScoring === true) {
+        // Nilai parsial: benar terpilih memberi poin proporsional,
+        // salah terpilih mengurangi sesuai penalti.
+        const perCorrect = correctIds.length
+          ? Math.round(q.points / correctIds.length)
+          : 0;
+        const hit = selected.filter((s) => correctIds.includes(s)).length;
+        const miss = selected.filter((s) => !correctIds.includes(s)).length;
+        earned = hit * perCorrect - miss * penaltyPoints;
+      } else {
+        earned = -penaltyPoints; // salah → minus
+      }
+      autoScore += earned;
+
+      // Persist auto score on the answer row.
+      if (answer) {
+        await db.formAnswer.update({
+          where: { id: answer.id },
+          data: { score: earned },
+        });
+      }
       results.push({
         questionId: q.id,
-        auto: false,
-        correct: null,
-        correctOptionIds: null,
-        earned: null, // pending manual grade (or null answer)
+        auto: true,
+        correct: isCorrect,
+        correctOptionIds: correctIds,
+        earned,
       });
       continue;
     }
-    const correctIds = parseJsonArray<string>(q.correct);
-    const selected = answer?.optionIds
-      ? parseJsonArray<string>(answer.optionIds)
-      : [];
-    const isCorrect =
-      selected.length === correctIds.length &&
-      correctIds.every((c) => selected.includes(c));
-    const earned = isCorrect ? q.points : 0;
-    autoScore += earned;
 
-    // Persist auto score on the answer row.
-    if (answer) {
-      await db.formAnswer.update({
-        where: { id: answer.id },
-        data: { score: earned },
+    if (q.type === "SHORT") {
+      // SHORT berkunci → dinilai otomatis (cocok salah satu variasi kunci).
+      const keys = q.correct
+        ? parseJsonArray<string>(q.correct).map(normalizeShortAnswer)
+        : [];
+      if (keys.length === 0) {
+        results.push({
+          questionId: q.id,
+          auto: false,
+          correct: null,
+          correctOptionIds: null,
+          earned: null,
+        });
+        continue;
+      }
+      const text = (answer?.text ?? "").trim();
+      if (!text) {
+        if (answer) {
+          await db.formAnswer.update({
+            where: { id: answer.id },
+            data: { score: 0 },
+          });
+        }
+        results.push({
+          questionId: q.id,
+          auto: true,
+          correct: false,
+          correctOptionIds: null,
+          earned: 0,
+        });
+        continue;
+      }
+      const isCorrect = keys.includes(normalizeShortAnswer(text));
+      const earned = isCorrect ? q.points : -penaltyPoints;
+      autoScore += earned;
+      if (answer) {
+        await db.formAnswer.update({
+          where: { id: answer.id },
+          data: { score: earned },
+        });
+      }
+      results.push({
+        questionId: q.id,
+        auto: true,
+        correct: isCorrect,
+        // Kunci isian hanya dikirim bila boleh tampil (di bawah, filter
+        // results memakai showResult/showAnswerKey — kunci ikut field ini).
+        correctOptionIds: null,
+        earned,
       });
+      continue;
     }
+
     results.push({
       questionId: q.id,
-      auto: true,
-      correct: isCorrect,
-      correctOptionIds: correctIds,
-      earned,
+      auto: false,
+      correct: null,
+      correctOptionIds: null,
+      earned: null, // pending manual grade (or null answer)
     });
   }
 

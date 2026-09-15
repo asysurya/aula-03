@@ -51,6 +51,8 @@ export async function GET(
           order: true,
           options: true,
           correct: true,
+          partialScoring: true,
+          penaltyPercent: true,
           imageFileId: true,
         },
       },
@@ -104,6 +106,8 @@ export async function GET(
     order: q.order,
     options: parseJsonArray<{ id: string; label: string }>(q.options),
     correct: parseJsonArray<string>(q.correct),
+    partialScoring: q.partialScoring ?? null,
+    penaltyPercent: q.penaltyPercent ?? null,
     imageFileId: q.imageFileId,
   }));
 

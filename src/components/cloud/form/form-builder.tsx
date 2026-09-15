@@ -55,6 +55,7 @@ import {
 import { cn } from "@/lib/utils";
 import {
   FORM_QUESTION_TYPES,
+  PENALTY_OPTIONS,
   makeOptionId,
   makeQuestionId,
   questionTypeMeta,
@@ -84,6 +85,12 @@ interface EditableQuestion {
   required: boolean;
   options: FormOption[];
   correct: string[];
+  /** MULTI_PG: nilai parsial per jawaban benar. */
+  partialScoring: boolean;
+  /** % poin dikurangi bila jawaban salah (0 = tanpa penalti). */
+  penaltyPercent: number;
+  /** Buffer teks kunci isian SHORT (dipisah "|") — diparse saat save. */
+  shortKeyRaw: string;
   imageFileId: string | null;
   imagePreview?: { name: string; url: string } | null;
 }
@@ -98,6 +105,9 @@ function dtoToEditable(q: FormQuestionDTO): EditableQuestion {
     required: q.required,
     options: q.options.map((o) => ({ ...o })),
     correct: q.correct ?? [],
+    partialScoring: q.partialScoring === true,
+    penaltyPercent: q.penaltyPercent ?? 0,
+    shortKeyRaw: (q.correct ?? []).filter(Boolean).join(" | "),
     imageFileId: null,
     imagePreview: q.imageFile
       ? {
@@ -174,6 +184,9 @@ export function FormBuilder({
       required: q.required,
       options: q.options.map((o) => ({ ...o })),
       correct: [...q.correct],
+      partialScoring: false,
+      penaltyPercent: 0,
+      shortKeyRaw: "",
       imageFileId: null,
       imagePreview: null,
     }));
@@ -293,6 +306,9 @@ export function FormBuilder({
           { id: makeOptionId(), label: "" },
         ],
         correct: [],
+        partialScoring: false,
+        penaltyPercent: 0,
+        shortKeyRaw: "",
         imageFileId: null,
       },
     ]);
@@ -477,7 +493,21 @@ export function FormBuilder({
             points: q.points,
             required: q.required,
             options: q.options,
-            correct: q.type === "PG" || q.type === "MULTI_PG" ? q.correct : [],
+            correct:
+              q.type === "PG" || q.type === "MULTI_PG"
+                ? q.correct
+                : q.type === "SHORT"
+                  ? q.shortKeyRaw
+                      .split("|")
+                      .map((s) => s.trim())
+                      .filter(Boolean)
+                      .slice(0, 5)
+                  : [],
+            partialScoring: q.type === "MULTI_PG" ? q.partialScoring : false,
+            penaltyPercent:
+              q.type === "PG" || q.type === "MULTI_PG" || q.type === "SHORT"
+                ? q.penaltyPercent
+                : 0,
             imageFileId: q.imageFileId,
           })),
         }),
@@ -1067,6 +1097,75 @@ export function FormBuilder({
                     Wajib dijawab
                   </label>
                 </div>
+
+                {/* Penilaian: penalti salah, nilai parsial, kunci isian */}
+                {q.type === "PG" || q.type === "MULTI_PG" || q.type === "SHORT" ? (
+                  <div className="flex items-center gap-x-4 gap-y-2 flex-wrap">
+                    <div className="flex items-center gap-2">
+                      <Label className="text-xs whitespace-nowrap">
+                        Penalti salah
+                      </Label>
+                      <Select
+                        value={String(q.penaltyPercent ?? 0)}
+                        disabled={locked}
+                        onValueChange={(v) =>
+                          updateQuestion(q.localId, {
+                            penaltyPercent: parseInt(v, 10) || 0,
+                          })
+                        }
+                      >
+                        <SelectTrigger className="w-[160px] h-8">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {PENALTY_OPTIONS.map((p) => (
+                            <SelectItem key={p.value} value={String(p.value)}>
+                              {p.label}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    {q.type === "MULTI_PG" ? (
+                      <label
+                        className="flex items-center gap-2 text-xs cursor-pointer"
+                        title="Tiap jawaban benar yang dipilih bernilai proporsional; jawaban salah mengurangi sesuai penalti"
+                      >
+                        <Switch
+                          checked={q.partialScoring}
+                          disabled={locked}
+                          onCheckedChange={(v) =>
+                            updateQuestion(q.localId, { partialScoring: v })
+                          }
+                        />
+                        Nilai parsial per jawaban benar
+                      </label>
+                    ) : null}
+                    {q.type === "SHORT" ? (
+                      <div className="flex items-center gap-2 flex-1 min-w-[240px]">
+                        <Label
+                          htmlFor={`key-${q.localId}`}
+                          className="text-xs whitespace-nowrap"
+                          title="Diisi → soal dinilai otomatis; kosong → dinilai manual guru"
+                        >
+                          Kunci (opsional)
+                        </Label>
+                        <Input
+                          id={`key-${q.localId}`}
+                          className="h-8"
+                          placeholder="mis: Fotosintesis | fotosintesa — pisahkan dengan |"
+                          value={q.shortKeyRaw}
+                          disabled={locked}
+                          onChange={(e) =>
+                            updateQuestion(q.localId, {
+                              shortKeyRaw: e.target.value.slice(0, 1200),
+                            })
+                          }
+                        />
+                      </div>
+                    ) : null}
+                  </div>
+                ) : null}
                   </>
                 ) : null}
               </Card>
@@ -1120,6 +1219,9 @@ export function FormBuilder({
               required: q.required,
               options: q.options.map((o) => ({ ...o })),
               correct: [...q.correct],
+              partialScoring: false,
+              penaltyPercent: 0,
+              shortKeyRaw: "",
               imageFileId: null,
               imagePreview: null,
             },

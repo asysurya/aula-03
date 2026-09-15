@@ -17,6 +17,8 @@ import {
   ExternalLink,
   BookOpenText,
   Monitor,
+  HardDriveDownload,
+  X,
 } from "lucide-react";
 import {
   DropdownMenu,
@@ -34,6 +36,11 @@ import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { AiMarkdown } from "@/components/ai/ai-markdown";
 import { filePublicUrl } from "@/lib/file-constants";
 import { formatBytes, type CloudFileItem } from "@/lib/cloud-format";
+import {
+  keepReaderFile,
+  unkeepReaderFile,
+  isKeptReaderFile,
+} from "@/lib/reader-file-cache";
 import { useTransferStore } from "@/lib/transfer-store";
 import { usePreviewStore } from "@/stores/preview-store";
 import {
@@ -117,6 +124,7 @@ export function PreviewHeader({
   isFullscreen,
   onToggleFullscreen,
   onMinimize,
+  onClose,
 }: {
   file: CloudFileItem;
   mode: PreviewMode;
@@ -125,6 +133,7 @@ export function PreviewHeader({
   isFullscreen: boolean;
   onToggleFullscreen: () => void;
   onMinimize: () => void;
+  onClose: () => void;
 }) {
   const enqueueDownload = useTransferStore((s) => s.enqueueDownload);
   // File MEGA mentah (mount) butuh ?name= agar server tahu nama + mimetype.
@@ -132,9 +141,34 @@ export function PreviewHeader({
     filePublicUrl(file.storageKey) +
     (file.raw ? `?name=${encodeURIComponent(file.name)}` : "");
 
+  // Tombol cache: simpan file di perangkat (buka ulang tanpa unduh) atau
+  // batalkan simpanan. Status mengikuti daftar keep di localStorage.
+  const [keptOffline, setKeptOffline] = useState(() =>
+    isKeptReaderFile(file.storageKey)
+  );
+  useEffect(() => {
+    setKeptOffline(isKeptReaderFile(file.storageKey));
+  }, [file.storageKey]);
+
+  function toggleKeepOffline() {
+    if (isKeptReaderFile(file.storageKey)) {
+      unkeepReaderFile(file.storageKey);
+      setKeptOffline(false);
+      toast.info(
+        "Simpanan dibatalkan — file akan dihapus dari perangkat saat pratinjau ditutup."
+      );
+    } else {
+      keepReaderFile(file.storageKey);
+      setKeptOffline(true);
+      toast.success(
+        "File disimpan — membuka lagi tanpa mengunduh ulang."
+      );
+    }
+  }
+
   return (
     <div
-      className={`flex items-start gap-3 pr-8 px-4 py-3 border-b border-border bg-background ${
+      className={`relative flex items-start gap-3 pr-12 px-4 py-3 border-b border-border bg-background ${
         isFullscreen ? "bg-black/80 border-black" : ""
       }`}
     >
@@ -226,6 +260,31 @@ export function PreviewHeader({
           <PictureInPicture2 className="size-4" />
           <span className="hidden sm:inline">PiP</span>
         </Button>
+        {/* Cache: simpan file di perangkat (hanya relevan di Aula Reader —
+            file PDF/EPUB/dokumen yang memang diunduh ke cache browser). */}
+        {mode === "aula" ? (
+          <Button
+            size="sm"
+            variant={keptOffline ? "secondary" : "outline"}
+            className="gap-1.5"
+            onClick={toggleKeepOffline}
+            title={
+              keptOffline
+                ? "File tersimpan di perangkat — klik untuk batal menyimpan"
+                : "Simpan di perangkat — buka lagi tanpa mengunduh ulang"
+            }
+            aria-label={
+              keptOffline
+                ? "Batalkan simpan file di perangkat"
+                : "Simpan file di perangkat"
+            }
+          >
+            <HardDriveDownload className="size-4" />
+            <span className="hidden sm:inline">
+              {keptOffline ? "Tersimpan" : "Simpan offline"}
+            </span>
+          </Button>
+        ) : null}
         <Button
           size="sm"
           variant="outline"
@@ -273,6 +332,18 @@ export function PreviewHeader({
           title="Unduh (berjalan di latar belakang)"
         >
           <Download className="size-4" /> Unduh
+        </Button>
+        {/* Tombol tutup X — aksesibilitas sentuh/remote (dulu hanya Esc &
+            klik overlay; pengguna layar sentuh tidak punya tombol terlihat). */}
+        <Button
+          size="icon"
+          variant="ghost"
+          className="absolute right-2 top-2 size-8 hover:text-destructive"
+          onClick={onClose}
+          title="Tutup pratinjau"
+          aria-label="Tutup pratinjau"
+        >
+          <X className="size-4" />
         </Button>
       </div>
     </div>
@@ -476,7 +547,7 @@ function OfficePreview({
   return <PptxView file={file} entry={entry} url={url} />;
 }
 
-// ───────── docx (mammoth) ─────────
+// ───────── docx (docx-preview → layout halaman seperti Word; fallback mammoth) ─────────
 
 function DocxView({
   file,
@@ -487,58 +558,107 @@ function DocxView({
   entry: OfficeCacheEntry;
   url: string;
 }) {
-  const [html, setHtml] = useState<string | null>(
+  const hostRef = useRef<HTMLDivElement>(null);
+  const [mode, setMode] = useState<"pages" | "flat" | "loading" | "error">(
+    "loading"
+  );
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [flatHtml, setFlatHtml] = useState<string | null>(
     docxHtmlCache.get(file.storageKey) ?? null
   );
-  const [error, setError] = useState<string | null>(null);
 
+  // Render halaman pertama via docx-preview (DOKUMEN ASLI Word: halaman
+  // per bagian, margin, header/footer, tabel & gambar terformat).
   useEffect(() => {
-    if (html) return;
+    if (mode !== "loading") return;
     let cancelled = false;
     (async () => {
       try {
-        const mammoth = await import("mammoth");
-        const result = await mammoth.convertToHtml({ arrayBuffer: entry.buffer });
-        const out = result.value || "<p>(dokumen kosong)</p>";
-        docxHtmlCache.set(file.storageKey, out);
-        if (!cancelled) setHtml(out);
-      } catch (e) {
-        if (!cancelled)
-          setError(e instanceof Error ? e.message : "Gagal mengonversi .docx");
+        const docx = await import("docx-preview");
+        const host = hostRef.current;
+        if (!host || cancelled) return;
+        host.replaceChildren();
+        await docx.renderAsync(entry.buffer.slice(0), host, undefined, {
+          className: "docx",
+          inWrapper: true,
+          ignoreWidth: false,
+          ignoreHeight: false,
+          ignoreFonts: false,
+          breakPages: true,
+          ignoreLastRenderedPageBreak: false,
+          experimental: true,
+          useBase64URL: true,
+          debug: false,
+        });
+        if (cancelled) return;
+        setMode("pages");
+      } catch {
+        if (cancelled) return;
+        // Fallback: konversi mammoth (aliran teks sederhana).
+        try {
+          const mammoth = await import("mammoth");
+          const result = await mammoth.convertToHtml({
+            arrayBuffer: entry.buffer,
+          });
+          const out = result.value || "<p>(dokumen kosong)</p>";
+          docxHtmlCache.set(file.storageKey, out);
+          if (!cancelled) {
+            setFlatHtml(out);
+            setMode("flat");
+          }
+        } catch (e) {
+          if (!cancelled) {
+            setErrorMsg(
+              e instanceof Error ? e.message : "Gagal mengonversi .docx"
+            );
+            setMode("error");
+          }
+        }
       }
     })();
     return () => {
       cancelled = true;
     };
-  }, [file.storageKey, entry.buffer, html]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [file.storageKey, entry.buffer, mode]);
 
-  if (error)
+  if (mode === "error")
     return (
       <ErrorBlock
-        message={error}
+        message={errorMsg ?? "Gagal membuka .docx"}
         url={url}
         kindLabel=".docx"
         name={file.name}
         size={file.size}
       />
     );
-  if (!html) {
+  if (mode === "flat") {
+    // Fallback mammoth (docx-preview gagal) — aliran teks.
     return (
-      <div className="p-6 flex items-center justify-center text-sm text-muted-foreground min-h-[40vh]">
-        <Loader2 className="size-4 animate-spin mr-2" /> Mengonversi .docx…
-      </div>
+      <ScrollArea className="h-full min-h-[60vh]">
+        <div
+          className="prose prose-sm dark:prose-invert max-w-none p-6 break-words"
+          // mammoth produces sanitised HTML from the docx XML structure
+          // (paragraphs, lists, tables). It is generated from the document
+          // content itself, not from user-supplied input.
+          dangerouslySetInnerHTML={{ __html: flatHtml ?? "" }}
+        />
+      </ScrollArea>
     );
   }
+  // mode "loading" | "pages" — tampilan seperti Microsoft Word / Google
+  // Docs: latar abu-abu, halaman putih ber-margin berbayang, di tengah.
+  // Host docx-preview SELALU ter-mount (render membutuhkan DOM nyata);
+  // indikator loading hanyalah lapisan di atasnya.
   return (
-    <ScrollArea className="h-full min-h-[60vh]">
-      <div
-        className="prose prose-sm dark:prose-invert max-w-none p-6 break-words"
-        // mammoth produces sanitised HTML from the docx XML structure
-        // (paragraphs, lists, tables). It is generated from the document
-        // content itself, not from user-supplied input.
-        dangerouslySetInnerHTML={{ __html: html }}
-      />
-    </ScrollArea>
+    <div className="docx-viewer relative h-full min-h-[60vh] overflow-auto bg-neutral-200 dark:bg-neutral-900/70">
+      <div ref={hostRef} className={mode === "pages" ? "" : "invisible"} />
+      {mode === "loading" ? (
+        <div className="absolute inset-0 flex items-center justify-center text-sm text-muted-foreground bg-neutral-200/60 dark:bg-neutral-900/60">
+          <Loader2 className="size-4 animate-spin mr-2" /> Membuka dokumen…
+        </div>
+      ) : null}
+    </div>
   );
 }
 

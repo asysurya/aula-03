@@ -4,6 +4,7 @@ import { requireUser } from "@/lib/session";
 import {
   errorResponse,
   folderClassroomId,
+  getClassroomRole,
   isClassroomMember,
 } from "@/lib/cloud-utils";
 
@@ -134,4 +135,43 @@ export async function PATCH(
     .catch(() => {});
 
   return Response.json({ doc: updated });
+}
+
+// DELETE /api/cloud/docs/[id] — hapus dokumen bersama.
+// Izin: ADMIN, pembuat dokumen, atau guru kelas tempat dokumen berada.
+// Kolaborator dilepas dulu (relasi NoAction — tanpa itu Prisma menolak).
+export async function DELETE(
+  _req: NextRequest,
+  { params }: { params: Promise<{ id: string }> }
+) {
+  const user = await requireUser().catch(() => null);
+  if (!user) return errorResponse("UNAUTHORIZED", 401);
+
+  const { id } = await params;
+  const doc = await db.sharedDoc.findUnique({
+    where: { id },
+    select: { id: true, folderId: true, createdBy: true, title: true },
+  });
+  if (!doc) return errorResponse("DOC_NOT_FOUND", 404);
+
+  let classroomId: string | null = null;
+  if (doc.folderId) {
+    classroomId = await folderClassroomId(doc.folderId);
+  }
+
+  let allowed = user.role === "ADMIN" || doc.createdBy === user.id;
+  if (!allowed && classroomId) {
+    const role =
+      user.role === "ADMIN"
+        ? "TEACHER"
+        : await getClassroomRole(classroomId, user.id);
+    allowed = role === "TEACHER";
+  }
+  if (!allowed) return errorResponse("FORBIDDEN", 403);
+
+  // Kolaborator & relasi lain dulu (DocCollaborator onDelete: NoAction).
+  await db.docCollaborator.deleteMany({ where: { docId: doc.id } });
+  await db.sharedDoc.delete({ where: { id: doc.id } });
+
+  return Response.json({ ok: true, deletedTitle: doc.title });
 }

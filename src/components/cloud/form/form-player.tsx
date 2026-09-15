@@ -1840,28 +1840,41 @@ function ReviewWithFeedback({
               ) : null}
             </div>
             {isAuto ? (
-              <div className="flex flex-wrap gap-1.5">
-                {q.options.map((o) => {
-                  const isCorrect = correct.includes(o.id);
-                  const isMine = selected.includes(o.id);
-                  return (
-                    <span
-                      key={o.id}
-                      className={cn(
-                        "rounded-md border px-2 py-1 text-xs",
-                        isCorrect
-                          ? "border-emerald-500/50 bg-emerald-500/10"
-                          : isMine
-                            ? "border-destructive/50 bg-destructive/10"
-                            : "border-border"
-                      )}
-                    >
-                      {o.label}
-                      {isCorrect ? " ✓" : isMine ? " ✗" : ""}
+              q.type === "SHORT" ? (
+                <div className="flex flex-wrap gap-1.5">
+                  <span className="rounded-md border border-emerald-500/50 bg-emerald-500/10 px-2 py-1 text-xs">
+                    Kunci: {correct.join(" / ")}
+                  </span>
+                  {a?.text ? (
+                    <span className="rounded-md border border-border px-2 py-1 text-xs">
+                      Jawabanmu: {a.text}
                     </span>
-                  );
-                })}
-              </div>
+                  ) : null}
+                </div>
+              ) : (
+                <div className="flex flex-wrap gap-1.5">
+                  {q.options.map((o) => {
+                    const isCorrect = correct.includes(o.id);
+                    const isMine = selected.includes(o.id);
+                    return (
+                      <span
+                        key={o.id}
+                        className={cn(
+                          "rounded-md border px-2 py-1 text-xs",
+                          isCorrect
+                            ? "border-emerald-500/50 bg-emerald-500/10"
+                            : isMine
+                              ? "border-destructive/50 bg-destructive/10"
+                              : "border-border"
+                        )}
+                      >
+                        {o.label}
+                        {isCorrect ? " ✓" : isMine ? " ✗" : ""}
+                      </span>
+                    );
+                  })}
+                </div>
+              )
             ) : a?.text ? (
               <p className="text-xs text-muted-foreground rounded-md bg-muted/50 border border-border px-2.5 py-1.5 whitespace-pre-wrap max-h-24 overflow-y-auto">
                 {a.text}
