@@ -159,22 +159,39 @@ export function PdfReader({
   const [perView, setPerView] = useState<PerView>(loadPerView);
   /** Teks input nomor halaman saat sedang diedit (null = ikut page). */
   const [pageInput, setPageInput] = useState<string | null>(null);
+  /** Gestur cubit sedang berlangsung → tampilkan indikator zoom melayang. */
+  const [pinchActive, setPinchActive] = useState(false);
 
   const containerRef = useRef<HTMLDivElement>(null);
   const pageRefs = useRef<Map<number, HTMLDivElement>>(new Map());
   /** Mirror state `page` (dibaca callback stabil tanpa dependensi). */
   const pageRef = useRef(page);
   pageRef.current = page;
-  /** Jangkar zoom: halaman aktif + fraksi posisi di dalamnya — agar
-   *  halaman TIDAK "pindah" saat zoom (dulu: ukuran semua halaman berubah
-   *  → konten bergeser sendiri & halaman aktif bisa berubah). */
-  const zoomAnchor = useRef<{ page: number; frac: number } | null>(null);
+  /** Jangkar zoom: halaman + posisi relatif (fraksi 0..1) di dalamnya +
+   *  titik jangkar di viewport (vx, vy) — konten yang berada di bawah
+   *  titik itu TETAP di bawahnya setelah zoom (gestur cubit: titik di
+   *  bawah dua jari; tombol/keyboard: tengah viewport). Tanpa ini: ukuran
+   *  semua halaman berubah → konten bergeser sendiri / "pindah" halaman. */
+  const zoomAnchor = useRef<{
+    page: number;
+    fracX: number;
+    fracY: number;
+    vx: number;
+    vy: number;
+  } | null>(null);
   const textCache = useRef<Map<number, string>>(new Map());
   const ttsStop = useRef(false);
   /** Sudahkah laporan perubahan halaman pertama dilewati (init/restore). */
   const pageReportInit = useRef(false);
   /** Sudahkah posisi baca tersimpan di-restore untuk file ini. */
   const restored = useRef(false);
+  /** Seret-pan (pointer tetikus / remote TV) saat zoom > 1. */
+  const panRef = useRef<{
+    x: number;
+    y: number;
+    sl: number;
+    st: number;
+  } | null>(null);
 
   const anno = useAnnotations(file.storageKey);
 
@@ -466,25 +483,53 @@ export function PdfReader({
   );
 
   // ── Zoom ──
-  // Sebelum zoom berubah, catat posisi relatif (fraksi 0..1) di dalam
-  // halaman aktif → setelah layout baru dipasang, scroll dikembalikan ke
-  // titik itu. Tanpa ini: tinggi/lebar SEMUA halaman berubah → halaman
-  // aktif bergeser sendiri / "pindah" halaman saat zoom.
+  // Sebelum zoom berubah, catat titik konten yang sedang berada di bawah
+  // titik jangkar (tombol: tengah viewport; gestur: titik ketukan/cubit)
+  // → setelah layout baru dipasang, scroll dikembalikan sehingga titik
+  // konten itu tidak berpindah (halaman tidak "melompat" saat zoom).
   const applyZoom = useCallback(
-    (next: number) => {
+    (next: number, anchorAt?: { clientX: number; clientY: number }) => {
       const z = Math.min(4, Math.max(0.5, +next.toFixed(2)));
       if (z === zoom) return;
       const el = containerRef.current;
       const node = pageRefs.current.get(pageRef.current);
       if (el && node) {
+        const rect = el.getBoundingClientRect();
+        // Titik jangkar di dalam viewport container.
+        // Gestur (cubit/ketuk/dobel-klik): tepat di titik jari. Tombol /
+        // keyboard: horizontal = tengah-x + TEPAT-ATAS-y (atas halaman
+        // tetap terlihat setelah zoom — kalau tengah-y, atas halaman
+        // "terpotong" walau bisa digulir), vertikal = tengah-x + atas-y.
+        const vx =
+          anchorAt != null
+            ? anchorAt.clientX - rect.left
+            : el.clientWidth / 2;
+        const vy =
+          anchorAt != null ? anchorAt.clientY - rect.top : 0;
+        // Titik konten yang sama (koordinat scroll + offset).
+        const cx = el.scrollLeft + vx;
+        const cy = el.scrollTop + vy;
+        // Halaman yang memuat titik itu (fallback: halaman aktif).
+        let tp = pageRef.current;
+        let target = node;
+        for (const [i, n] of pageRefs.current) {
+          if (
+            cx >= n.offsetLeft &&
+            cx <= n.offsetLeft + n.offsetWidth &&
+            cy >= n.offsetTop &&
+            cy <= n.offsetTop + n.offsetHeight
+          ) {
+            tp = i;
+            target = n;
+            break;
+          }
+        }
         zoomAnchor.current = {
-          page: pageRef.current,
-          frac:
-            viewMode === "vertical"
-              ? (el.scrollTop - node.offsetTop) /
-                Math.max(1, node.offsetHeight)
-              : (el.scrollLeft - node.offsetLeft) /
-                Math.max(1, node.offsetWidth),
+          page: tp,
+          fracX: (cx - target.offsetLeft) / Math.max(1, target.offsetWidth),
+          fracY: (cy - target.offsetTop) / Math.max(1, target.offsetHeight),
+          vx,
+          vy,
         };
       }
       setZoom(z);
@@ -497,8 +542,145 @@ export function PdfReader({
     [applyZoom, zoom]
   );
 
+  // Mirror zoom & applyZoom — listener gestur natif dipasang sekali per
+  // dokumen, tapi harus selalu memanggil versi terbaru (state terkini).
+  const zoomRef = useRef(zoom);
+  zoomRef.current = zoom;
+  const applyZoomRef = useRef(applyZoom);
+  applyZoomRef.current = applyZoom;
+
+  // ── Gestur tangan (untuk HP & Smart TV layar sentuh) ──
+  // • CUBIT dua jari (pinch) → zoom halus di antara titik kedua jari.
+  // • KETUK dua kali → zoom 2× pada titik ketuk; ketuk lagi → pulih.
+  // • Ctrl/Cmd + roda → cubit trackpad laptop / remote TV pointer.
+  // • Seret (pointer) saat zoom > 1 → menggeser (pan) halaman.
+  // Listener dipasang NATIF non-pasif: React 17+ mendaftarkan touchmove/
+  // wheel secara pasif di root sehingga preventDefault() di sana tidak
+  // berlaku — padahal kita HARUS mencegah scroll/zum halaman natif agar
+  // gerakan jari sepenuhnya milik reader.
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+
+    const dist = (t: TouchList) =>
+      Math.hypot(t[0].clientX - t[1].clientX, t[0].clientY - t[1].clientY);
+
+    let pinch: { startDist: number; startZoom: number } | null = null;
+    let prevTouchAction = "";
+    // Safari (iPad): GestureEvent membawa `scale` relatif awal gestur.
+    // Saat gestur Safari aktif, touchmove 2-jari ikut aktif → flag agar
+    // zoom tidak terpakai dua kali pada gerakan yang sama.
+    let safariGesture = false;
+    let sgStartZoom = 1;
+    // Setelah pinch selesai, angkatnya jari jangan dianggap ketukan.
+    let suppressTapUntil = 0;
+    let lastTap = 0;
+    let lastX = 0;
+    let lastY = 0;
+
+    const onTouchStart = (e: TouchEvent) => {
+      if (e.touches.length !== 2) return;
+      // Rebut gestur ini dari browser: matikan scroll/zoom natif selama
+      // cubit. Di-set SEBELUM gerakan pertama → berlaku untuk gestur ini
+      // (Chrome membaca touch-action saat gestur mulai bergerak).
+      prevTouchAction = el.style.touchAction;
+      el.style.touchAction = "none";
+      pinch = { startDist: dist(e.touches) || 1, startZoom: zoomRef.current };
+      setPinchActive(true);
+      e.preventDefault();
+    };
+
+    const onTouchMove = (e: TouchEvent) => {
+      if (e.touches.length !== 2 || !pinch || safariGesture) return;
+      e.preventDefault();
+      const d = dist(e.touches) || 1;
+      applyZoomRef.current(pinch.startZoom * (d / pinch.startDist));
+    };
+
+    const endPinch = () => {
+      if (!pinch) return;
+      el.style.touchAction = prevTouchAction || "";
+      pinch = null;
+      setPinchActive(false);
+      suppressTapUntil = Date.now() + 400;
+    };
+
+    const onTouchEnd = (e: TouchEvent) => {
+      if (e.touches.length < 2) endPinch();
+      if (e.touches.length > 0 || e.changedTouches.length !== 1) return;
+      if (Date.now() < suppressTapUntil) return;
+      const t = e.changedTouches[0];
+      const tgt = t.target as HTMLElement | null;
+      // Ketukan pada tombol/menu = aksi tombol itu; ketukan pada teks
+      // = seleksi kata (bukan zoom).
+      if (tgt?.closest("button, a, input, [role=menu]")) return;
+      if (tgt?.closest(".pdf-text-layer")) return;
+      const now = Date.now();
+      const near = Math.hypot(t.clientX - lastX, t.clientY - lastY) < 32;
+      if (now - lastTap < 320 && near) {
+        applyZoomRef.current(zoomRef.current === 1 ? 2 : 1, {
+          clientX: t.clientX,
+          clientY: t.clientY,
+        });
+        lastTap = 0;
+      } else {
+        lastTap = now;
+        lastX = t.clientX;
+        lastY = t.clientY;
+      }
+    };
+
+    // Trackpad laptop & sebagian remote TV: cubit dikirim sebagai roda
+    // dengan Ctrl/Cmd tertekan.
+    const onWheel = (e: WheelEvent) => {
+      if (!e.ctrlKey && !e.metaKey) return;
+      e.preventDefault();
+      applyZoomRef.current(zoomRef.current * Math.exp(-e.deltaY * 0.002));
+    };
+
+    // Safari (iPad) — GestureEvent (diabaikan browser lain).
+    const onGestureStart = (e: Event) => {
+      safariGesture = true;
+      sgStartZoom = zoomRef.current;
+      setPinchActive(true);
+      (e as { preventDefault?(): void }).preventDefault?.();
+    };
+    const onGestureChange = (e: Event) => {
+      if (!safariGesture) return;
+      const ge = e as { scale?: number; preventDefault?(): void };
+      ge.preventDefault?.();
+      applyZoomRef.current(sgStartZoom * (ge.scale || 1));
+    };
+    const onGestureEnd = () => {
+      safariGesture = false;
+      setPinchActive(false);
+      suppressTapUntil = Date.now() + 400;
+    };
+
+    el.addEventListener("touchstart", onTouchStart, { passive: false });
+    el.addEventListener("touchmove", onTouchMove, { passive: false });
+    el.addEventListener("touchend", onTouchEnd);
+    el.addEventListener("touchcancel", endPinch);
+    el.addEventListener("wheel", onWheel, { passive: false });
+    el.addEventListener("gesturestart", onGestureStart);
+    el.addEventListener("gesturechange", onGestureChange);
+    el.addEventListener("gestureend", onGestureEnd);
+    return () => {
+      el.removeEventListener("touchstart", onTouchStart);
+      el.removeEventListener("touchmove", onTouchMove);
+      el.removeEventListener("touchend", onTouchEnd);
+      el.removeEventListener("touchcancel", endPinch);
+      el.removeEventListener("wheel", onWheel);
+      el.removeEventListener("gesturestart", onGestureStart);
+      el.removeEventListener("gesturechange", onGestureChange);
+      el.removeEventListener("gestureend", onGestureEnd);
+    };
+  }, [doc]);
+
   // Pulihkan jangkar zoom SEBELUM paint (useLayoutEffect — layout baru
-  // sudah terpasang, belum terlihat → tak ada "loncatan").
+  // sudah terpasang, belum terlihat → tak ada "loncatan"). Titik konten
+  // (fraksi × ukuran baru) diletakkan kembali di bawah titik jangkar
+  // viewport (vx/vy); assignment scroll otomatis di-clamp browser.
   useLayoutEffect(() => {
     const a = zoomAnchor.current;
     if (!a) return;
@@ -506,16 +688,14 @@ export function PdfReader({
     const el = containerRef.current;
     const node = pageRefs.current.get(a.page);
     if (!el || !node) return;
-    if (viewMode === "vertical") {
-      el.scrollTop = node.offsetTop + a.frac * node.offsetHeight;
-    } else {
-      // Horizontal: snap-mandatory menata ulang — cukup pastikan halaman
-      // aktif yang berada di tengah viewport.
-      el.scrollLeft = Math.max(
-        0,
-        node.offsetLeft - (el.clientWidth - node.offsetWidth) / 2
-      );
-    }
+    el.scrollLeft = Math.max(
+      0,
+      node.offsetLeft + a.fracX * node.offsetWidth - a.vx
+    );
+    el.scrollTop = Math.max(
+      0,
+      node.offsetTop + a.fracY * node.offsetHeight - a.vy
+    );
   }, [zoom, viewMode]);
 
   // ── Mode tampilan (persist) ──
@@ -1203,17 +1383,69 @@ export function PdfReader({
         ref={containerRef}
         tabIndex={0}
         role="region"
-        aria-label="Halaman dokumen — panah kiri/kanan pindah halaman, tombol plus/minus zoom, tanda minus untuk Home/End"
+        aria-label="Halaman dokumen — panah kiri/kanan pindah halaman, plus/minus zoom, cubit dua jari untuk zoom, ketuk dua kali untuk zoom 2×"
         onKeyDown={onKeyDown}
         onScroll={onScroll}
+        onDoubleClick={(e) => {
+          // Dobel-klik (tetikus / remote TV pointer): zoom 2× pada titik
+          // itu; dobel-klik lagi → pulih pas-layar. Di lapisan teks biarkan
+          // seleksi kata bawaan yang bekerja.
+          if ((e.target as HTMLElement).closest(".pdf-text-layer")) return;
+          if ((e.target as HTMLElement).closest("button, a, input, [role=menu]"))
+            return;
+          applyZoom(zoom === 1 ? 2 : 1, {
+            clientX: e.clientX,
+            clientY: e.clientY,
+          });
+        }}
+        onMouseDown={(e) => {
+          // Seret untuk menggeser (pan) saat di-zoom — remote TV pointer /
+          // tetikus. Di lapisan teks & alat anotasi aktif biarkan perilaku
+          // normal (seleksi / menggambar).
+          if (
+            e.button !== 0 ||
+            zoom === 1 ||
+            tool !== "none" ||
+            (e.target as HTMLElement).closest(
+              ".pdf-text-layer, button, a, input, [role=menu]"
+            )
+          )
+            return;
+          // Cegah seleksi teks tak sengaja saat menggeser.
+          e.preventDefault();
+          panRef.current = {
+            x: e.clientX,
+            y: e.clientY,
+            sl: e.currentTarget.scrollLeft,
+            st: e.currentTarget.scrollTop,
+          };
+        }}
         onMouseMove={(e) => {
+          // Geser (pan) mengikuti gerakan tangan.
+          const p = panRef.current;
+          if (p) {
+            e.currentTarget.scrollLeft = p.sl - (e.clientX - p.x);
+            e.currentTarget.scrollTop = p.st - (e.clientY - p.y);
+            return;
+          }
           // Mode fokus: dekati tepi atas → tampilkan bilah alat melayang.
           if (!focus) return;
           const rect = e.currentTarget.getBoundingClientRect();
           if (e.clientY - rect.top < 96) setToolbarVisible(true);
         }}
+        onMouseUp={() => {
+          panRef.current = null;
+        }}
+        onMouseLeave={() => {
+          panRef.current = null;
+        }}
         className={cn(
           "relative flex-1 min-h-0 overflow-auto outline-none",
+          // Sentuh: geser 1 jari tetap natif (pan-x pan-y) tapi cubit /
+          // ketuk-dua-kali halaman ditangani reader sendiri (bukan zum
+          // halaman browser) — penting di HP & Smart TV layar sentuh.
+          "[touch-action:pan-x_pan-y]",
+          zoom > 1 && "cursor-grab",
           "focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring",
           // Snap HANYA saat pas-layar (zoom 1). Saat di-zoom, snap-mandatory
           // justru MENCEGAH pembaca menggeser/melihat detail halaman
@@ -1290,7 +1522,8 @@ export function PdfReader({
           {numPages > 0 && viewMode === "vertical" ? (
             <p className="text-xs text-muted-foreground pb-2 px-4 col-span-full">
               {numPages} halaman · {anno.count > 0 ? `${anno.count} anotasi tersimpan di akunmu · ` : ""}
-              Blok teks lalu pilih Bacakan / Stabilo / Salin · gunakan ⯇ ⯈ atau geser
+              Blok teks lalu pilih Bacakan / Stabilo / Salin · gunakan ⯇ ⯈ atau geser ·
+              cubit dua jari untuk zoom, ketuk dua kali untuk zoom 2×
             </p>
           ) : null}
         </div>
@@ -1311,6 +1544,17 @@ export function PdfReader({
           />
         ) : null}
       </div>
+
+      {/* Indikator zoom gestur — umpan balik instan saat cubit dua jari
+          (di TV besar toolbar bisa tersembunyi / jauh dari jangkauan). */}
+      {pinchActive ? (
+        <div
+          aria-hidden="true"
+          className="absolute bottom-5 left-1/2 -translate-x-1/2 z-30 pointer-events-none rounded-full bg-background/90 backdrop-blur border border-border/70 shadow-lg px-3 py-1 text-sm font-medium tabular-nums"
+        >
+          {Math.round(zoom * 100)}%
+        </div>
+      ) : null}
 
       {/* Tombol melayang keluar-fokus — selalu terlihat di mode fokus */}
       {focus ? (
