@@ -55,6 +55,7 @@ import { AutoTextarea } from "@/components/ui/auto-textarea"
 import { loadJSON, saveJSON } from "@/lib/study/store"
 import { useStudyMaterial } from "@/lib/study/use-study-material"
 import { MaterialAiDialog } from "@/components/study/material-ai-dialog"
+import { useAiAttachments, AiAttachments } from "@/components/ai/ai-attachments"
 import { fetchAiSettings } from "@/components/ai/ai-settings-dialog"
 import {
   buildOutline,
@@ -98,7 +99,8 @@ const TOO_SHORT_MESSAGE =
 /** Panggil route study AI & kumpulkan seluruh jawaban streaming jadi string. */
 async function callStudyAi(
   task: "flashcards" | "quiz",
-  material: string
+  material: string,
+  attachmentIds?: string[]
 ): Promise<string> {
   const res = await fetch("/api/ai/study", {
     method: "POST",
@@ -110,6 +112,8 @@ async function callStudyAi(
           : "Buat kuis latihan dari MATERI di atas.",
       task,
       material,
+      // Lampiran file format apa pun — digabung server ke materi.
+      attachmentIds: attachmentIds?.length ? attachmentIds : undefined,
     }),
   })
   if (!res.ok) {
@@ -255,6 +259,8 @@ function TabHint({ text }: { text: string }) {
 export function TextTools() {
   // ── Materi bersama (dipakai semua tab + Teman AI — SATU sumber) ──
   const { material, setMaterial } = useStudyMaterial()
+  // Lampiran berkas materi (format apa pun) — konteks flashcard/kuis AI.
+  const att = useAiAttachments()
   const [tab, setTab] = React.useState("rangkum")
 
   // ── AI tersedia? (untuk tombol "Buat dengan AI") ──
@@ -552,7 +558,7 @@ export function TextTools() {
     }
     setDeckLoading(true)
     try {
-      const raw = await callStudyAi("flashcards", material)
+      const raw = await callStudyAi("flashcards", material, att.ids)
       const parsed = parseAiFlashcards(extractJsonArray(raw) ?? [])
       if (!parsed) throw new Error("Format jawaban AI tidak dikenali.")
       resetDeck(parsed, "ai")
@@ -609,7 +615,7 @@ export function TextTools() {
     }
     setQuizLoading(true)
     try {
-      const raw = await callStudyAi("quiz", material)
+      const raw = await callStudyAi("quiz", material, att.ids)
       const parsed = parseAiQuiz(extractJsonArray(raw) ?? [])
       if (!parsed) throw new Error("Format jawaban AI tidak dikenali.")
       resetQuiz(parsed, "ai")
@@ -703,6 +709,11 @@ export function TextTools() {
             onChange={(e) => setMaterial(e.target.value)}
             placeholder="Tempel atau tulis materi di sini… atau minta AI membuatnya — tersinkron dengan tab Teman AI (minimal ±200 karakter agar fitur aktif)"
             className="min-h-36 text-sm leading-relaxed" maxHeight={Math.round(window.innerHeight * 0.4)}
+          />
+          <AiAttachments
+            att={att}
+            allowText={false}
+            label="Lampirkan berkas materi"
           />
           <div className="flex flex-wrap items-center justify-between gap-2">
             <p className="text-xs text-muted-foreground">

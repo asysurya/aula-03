@@ -53,6 +53,7 @@ import {
 } from "@/components/ui/dialog";
 import { cn } from "@/lib/utils";
 import { AiMarkdown } from "@/components/ai/ai-markdown";
+import { useAiAttachments, AiAttachments } from "@/components/ai/ai-attachments";
 
 // ---------------------------------------------------------------------------
 // Tipe & util
@@ -210,6 +211,9 @@ export function AiBuilder() {
   // ── chat & kode ──
   const [chat, setChat] = useState<ChatMsg[]>([]);
   const [input, setInput] = useState("");
+  // Lampiran materi (file format apa pun + teks) — konteks tambahan
+  // untuk membangun aplikasi.
+  const att = useAiAttachments();
   const [busy, setBusy] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
   const [html, setHtml] = useState("");
@@ -357,9 +361,12 @@ export function AiBuilder() {
           message,
           currentHtml: html || undefined,
           sessionId: sessionIdRef.current ?? undefined,
+          attachmentIds: att.ids.length ? att.ids : undefined,
+          materialText: att.text.trim() || undefined,
         }),
         signal: ac.signal,
       });
+      if (res.ok) att.clearAll();
 
       if (!res.ok || !res.body) {
         const json = await res.json().catch(() => null);
@@ -623,6 +630,11 @@ export function AiBuilder() {
         </ScrollArea>
 
         <div className="border-t border-border p-2.5">
+          <AiAttachments
+            att={att}
+            label="Lampirkan materi"
+            className="mb-1.5"
+          />
           <div className="flex items-end gap-2">
             <textarea
               value={input}

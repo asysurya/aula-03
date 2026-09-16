@@ -611,6 +611,27 @@ model FormRecordingFrame {
   @@index([recordingId, seq])
 }
 
+// ── Lampiran materi untuk fitur AI ────────────────────────────────────
+// File APA PUN yang dilampirkan user (Teman AI, Pusat Belajar, AI
+// Builder, generator soal) di-extract jadi teks di server (PDF/DOCX/
+// XLSX/ZIP/teks; biner dicatat nama+tipe) lalu disimpan — dipakai
+// sebagai konteks tambahan saat request AI, tanpa re-upload.
+model AiAttachment {
+  id        String   @id @default(cuid()) @map("_id")
+  userId    String
+  name      String
+  mime      String   @default("")
+  size      Int      @default(0)
+  // Label jenis untuk UI: PDF | DOCX | XLSX | ZIP | Teks | Biner
+  kind      String   @default("Teks")
+  // Hasil ekstraksi (sudah di-cap saat upload).
+  text      String   @default("")
+  chars     Int      @default(0)
+  createdAt DateTime @default(now())
+
+  @@index([userId, createdAt])
+}
+
 // ── Chunked upload staging (file > 4.5 MB melewati serverless Vercel) ──
 // File besar dipecah jadi chunk ≤ 4 MB, disimpan sementara di MongoDB,
 // lalu dirakit ulang saat "complete" dan diunggah ke MEGA/S3.

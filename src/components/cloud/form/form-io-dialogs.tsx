@@ -28,6 +28,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { AutoTextarea } from "@/components/ui/auto-textarea";
+import { useAiAttachments, AiAttachments } from "@/components/ai/ai-attachments";
 import { cn } from "@/lib/utils";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
@@ -207,6 +208,8 @@ export function AiGenerateDialog({
   onApply,
 }: DialogProps) {
   const [prompt, setPrompt] = useState("");
+  // Lampiran materi (file format apa pun + teks) — sumber konteks soal.
+  const att = useAiAttachments();
   const [countInput, setCountInput] = useState("10");
   const [type, setType] = useState<
     "MIX" | "PG" | "MULTI_PG" | "SHORT" | "ESSAY"
@@ -253,7 +256,13 @@ export function AiGenerateDialog({
       const res = await fetch("/api/forms/ai-generate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ prompt: p, count, types }),
+        body: JSON.stringify({
+          prompt: p,
+          count,
+          types,
+          attachmentIds: att.ids.length ? att.ids : undefined,
+          materialText: att.text.trim() || undefined,
+        }),
       });
       const json = await res.json();
       if (!res.ok) {
@@ -331,6 +340,14 @@ export function AiGenerateDialog({
               className="text-sm"
             />
           </div>
+          <AiAttachments
+            att={att}
+            label="Lampirkan materi (teks / berkas)"
+          />
+          <p className="-mt-1 text-[11px] text-muted-foreground">
+            Materi apa pun (PDF, DOCX, XLSX, ZIP, txt…) diextract otomatis
+            sebagai sumber soal — soal mengikuti isi lampiranmu.
+          </p>
           <div className="grid grid-cols-2 gap-3">
             <div className="space-y-1.5">
               <Label htmlFor="ai-count">Jumlah soal</Label>

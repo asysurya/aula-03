@@ -4,6 +4,7 @@ import { requireUser } from "@/lib/session";
 import { db } from "@/lib/db";
 import { decryptSecret } from "@/lib/crypto";
 import { chatEndpoint, providerErrorMessage, resolveAiConfig, type AiSettingInput } from "@/lib/ai-providers";
+import { resolveAttachmentContext } from "@/lib/ai-attachments";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -49,6 +50,10 @@ function rateLimited(userId: string): boolean {
 
 const bodySchema = z.object({
   message: z.string().trim().min(1, "Pesan tidak boleh kosong").max(8000),
+  // Lampiran materi: id AiAttachment (upload /api/ai/attachments) +
+  // materi teks manual — digabung server sebagai konteks tambahan.
+  attachmentIds: z.array(z.string()).max(8).optional(),
+  materialText: z.string().max(20_000).optional(),
 });
 
 export async function POST(req: NextRequest) {
@@ -74,6 +79,13 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: first }, { status: 400 });
   }
   const message = parsed.data.message;
+
+  // ── Lampiran materi (teks & file format apa pun) ──
+  const attachCtx = await resolveAttachmentContext(
+    user.id,
+    parsed.data.attachmentIds ?? [],
+    parsed.data.materialText
+  ).catch(() => null);
 
   // ── Config aktif: milik user → default admin ──
   const [userRow, adminRow] = await Promise.all([
@@ -163,7 +175,12 @@ export async function POST(req: NextRequest) {
       body: JSON.stringify({
         model: config.model,
         messages: [
-          { role: "system", content: SYSTEM_PROMPT },
+          {
+            role: "system",
+            content: attachCtx
+              ? `${SYSTEM_PROMPT}\n\n${attachCtx}`
+              : SYSTEM_PROMPT,
+          },
           ...history,
           { role: "user", content: message },
         ],

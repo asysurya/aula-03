@@ -53,6 +53,7 @@ import {
   type AiSettingsData,
 } from "@/components/ai/ai-settings-dialog";
 import { MaterialAiDialog } from "@/components/study/material-ai-dialog";
+import { useAiAttachments, AiAttachments } from "@/components/ai/ai-attachments";
 import { loadJSON, saveJSON } from "@/lib/study/store";
 import { useStudyMaterial } from "@/lib/study/use-study-material";
 import { cn } from "@/lib/utils";
@@ -191,6 +192,7 @@ async function readStudyStream(
 export function StudyBuddy() {
   // --- materi bersama (sinkron dengan Alat Materi) ---
   const { material, setMaterial, loaded: materialLoaded } = useStudyMaterial();
+  const att = useAiAttachments();
 
   // --- chat persist ---
   const [chat, setChat] = useState<ChatMsg[]>([]);
@@ -323,6 +325,8 @@ export function StudyBuddy() {
           message: question,
           task: "chat",
           material: material.slice(0, 12_000),
+          // Lampiran file format apa pun — digabung server ke materi.
+          attachmentIds: att.ids.length ? att.ids : undefined,
           history,
         }),
         signal: ac.signal,
@@ -451,6 +455,12 @@ export function StudyBuddy() {
             Materi panjang — AI membaca maksimal 12.000 karakter pertama.
           </p>
         )}
+        <AiAttachments
+          att={att}
+          allowText={false}
+          label="Lampirkan berkas materi"
+          className="mt-1.5"
+        />
       </section>
 
       {/* ===== Panel chat ===== */}

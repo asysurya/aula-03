@@ -14,6 +14,7 @@ import {
   nextMondayJakarta,
   type BuilderQuotaStatus,
 } from "@/lib/builder-quota";
+import { resolveAttachmentContext } from "@/lib/ai-attachments";
 
 // ─────────────────────────────────────────────────────────────────────
 // POST /api/ai/builder — AI Builder (Pusat Belajar → tab AI Builder).
@@ -138,6 +139,10 @@ const bodySchema = z.object({
   // ID sesi dari event "session" sebelumnya — revisi sesi sama tidak
   // memakan kuota. Harus sesi milik user ini pada pekan berjalan.
   sessionId: z.string().trim().min(8).max(64).optional(),
+  // Lampiran materi (file format apa pun + teks) sebagai konteks
+  // tambahan untuk membangun aplikasi.
+  attachmentIds: z.array(z.string()).max(8).optional(),
+  materialText: z.string().max(20_000).optional(),
 });
 
 export async function POST(req: NextRequest) {
@@ -162,7 +167,7 @@ export async function POST(req: NextRequest) {
     const first = parsed.error.issues[0]?.message ?? "Data tidak valid";
     return NextResponse.json({ error: first }, { status: 400 });
   }
-  const { message, currentHtml, sessionId } = parsed.data;
+  const { message, currentHtml, sessionId, attachmentIds, materialText } = parsed.data;
   const cur = (currentHtml ?? "").trim();
 
   // ── Kuota & sesi ──
@@ -241,6 +246,19 @@ export async function POST(req: NextRequest) {
     { role: "system", content: system },
     { role: "user", content: message },
   ];
+
+  // ── Lampiran materi (file format apa pun + teks) ──
+  const attachCtx = await resolveAttachmentContext(
+    user.id,
+    attachmentIds ?? [],
+    materialText
+  ).catch(() => null);
+  if (attachCtx) {
+    messages[1] = {
+      role: "user",
+      content: `${message}\n\n${attachCtx}`,
+    };
+  }
 
   // ── Panggil provider (kompatibel OpenAI chat completions, SSE) ──
   const controller = new AbortController();

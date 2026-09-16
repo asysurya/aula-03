@@ -9,6 +9,7 @@ import {
   resolveAiConfig,
   type AiSettingInput,
 } from "@/lib/ai-providers";
+import { resolveAttachmentContext } from "@/lib/ai-attachments";
 
 // ─────────────────────────────────────────────────────────────────────
 // POST /api/ai/study — AI untuk Pusat Belajar (Teman Belajar + pembuat
@@ -101,6 +102,9 @@ const bodySchema = z.object({
   message: z.string().trim().min(1, "Pesan tidak boleh kosong").max(8000),
   task: z.enum(["chat", "material", "flashcards", "quiz"]).default("chat"),
   material: z.string().max(MATERIAL_LIMIT).optional(),
+  // Lampiran materi file (id AiAttachment) — teks hasil ekstraksi
+  // digabung server-side ke material (bukan dikirim ulang tiap request).
+  attachmentIds: z.array(z.string()).max(8).optional(),
   history: z
     .array(
       z.object({
@@ -134,7 +138,7 @@ export async function POST(req: NextRequest) {
     const first = parsed.error.issues[0]?.message ?? "Data tidak valid";
     return NextResponse.json({ error: first }, { status: 400 });
   }
-  const { message, task, material, history } = parsed.data;
+  const { message, task, material, attachmentIds, history } = parsed.data;
 
   // ── Config aktif: milik user → default admin (sama seperti Teman AI) ──
   const [userRow, adminRow] = await Promise.all([
@@ -181,7 +185,16 @@ export async function POST(req: NextRequest) {
   }
 
   // ── Susun messages sesuai task ──
-  const mat = (material ?? "").trim().slice(0, MATERIAL_LIMIT);
+  // Lampiran file (format apa pun) di-extract server-side lalu digabung
+  // ke materi — semua task (chat/materi/flashcard/kuis) otomatis ikut.
+  const attachCtx = await resolveAttachmentContext(
+    user.id,
+    attachmentIds ?? []
+  ).catch(() => null);
+  const matBase = (material ?? "").trim().slice(0, MATERIAL_LIMIT);
+  const mat = attachCtx
+    ? (matBase ? `${matBase}\n\n${attachCtx}` : attachCtx).slice(0, MATERIAL_LIMIT)
+    : matBase;
   let system: string;
   if (task === "material") {
     system = MATERIAL_SYSTEM_PROMPT;

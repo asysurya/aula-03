@@ -23,6 +23,7 @@ import {
   Loader2,
   AlertTriangle,
   KeyRound,
+  Paperclip,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -39,6 +40,7 @@ import {
 } from "@/components/ui/alert-dialog";
 import type { MeResponse } from "@/hooks/use-me";
 import { cn } from "@/lib/utils";
+import { AiAttachments, useAiAttachments } from "@/components/ai/ai-attachments";
 import { providerLabel } from "@/lib/ai-providers";
 import {
   AiSettingsDialog,
@@ -54,11 +56,14 @@ interface ChatMsg {
   error?: boolean;
   stopped?: boolean;
   streaming?: boolean;
+  /** Nama berkas yang dilampirkan pada pesan ini (chip kecil). */
+  attachNames?: string[];
 }
 
 export function TemanAiView({ me }: { me: MeResponse }) {
   const [messages, setMessages] = useState<ChatMsg[]>([]);
   const [input, setInput] = useState("");
+  const att = useAiAttachments();
   const [streaming, setStreaming] = useState(false);
   const [settings, setSettings] = useState<AiSettingsData | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -121,6 +126,11 @@ export function TemanAiView({ me }: { me: MeResponse }) {
   async function send() {
     const text = input.trim();
     if (!text || streaming) return;
+    // Lampiran materi (file format apa pun + teks) — dikirim sebagai
+    // konteks tambahan; chip kecil di bubble user menandai lampiran.
+    const attachIds = att.ids;
+    const attachNames = att.files.map((f) => f.name);
+    const materialText = att.text.trim() || undefined;
     setInput("");
     stickBottomRef.current = true;
 
@@ -128,7 +138,12 @@ export function TemanAiView({ me }: { me: MeResponse }) {
     const aiId = `a-${Date.now()}`;
     setMessages((prev) => [
       ...prev,
-      { id: userId, role: "user", content: text },
+      {
+        id: userId,
+        role: "user",
+        content: text,
+        attachNames: attachNames.length ? attachNames : undefined,
+      },
       { id: aiId, role: "assistant", content: "", streaming: true },
     ]);
     setStreaming(true);
@@ -140,9 +155,14 @@ export function TemanAiView({ me }: { me: MeResponse }) {
       const res = await fetch("/api/ai/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: text }),
+        body: JSON.stringify({
+          message: text,
+          attachmentIds: attachIds.length ? attachIds : undefined,
+          materialText,
+        }),
         signal: ac.signal,
       });
+      if (res.ok) att.clearAll();
 
       if (!res.ok || !res.body) {
         const json = await res.json().catch(() => null);
@@ -357,9 +377,17 @@ export function TemanAiView({ me }: { me: MeResponse }) {
                   )}
                 >
                   {m.role === "user" ? (
-                    <p className="text-sm whitespace-pre-wrap break-words">
-                      {m.content}
-                    </p>
+                    <div className="min-w-0">
+                      <p className="text-sm whitespace-pre-wrap break-words">
+                        {m.content}
+                      </p>
+                      {m.attachNames?.length ? (
+                        <p className="mt-1 flex items-center gap-1 text-[11px] opacity-80">
+                          <Paperclip className="size-3 shrink-0" />
+                          <span className="truncate">{m.attachNames.join(", ")}</span>
+                        </p>
+                      ) : null}
+                    </div>
                   ) : m.error ? (
                     <p className="text-sm text-destructive flex items-start gap-2 break-words">
                       <AlertTriangle className="h-4 w-4 mt-0.5 shrink-0" />
@@ -397,7 +425,9 @@ export function TemanAiView({ me }: { me: MeResponse }) {
 
       {/* Input */}
       <div className="border-t border-border px-4 md:px-6 py-3 shrink-0">
-        <div className="max-w-3xl mx-auto flex items-end gap-2">
+        <div className="max-w-3xl mx-auto">
+          <AiAttachments att={att} compact className="mb-1.5" label="Lampirkan materi" />
+          <div className="flex items-end gap-2">
           <AutoTextarea
             value={input}
             onChange={(e) => setInput(e.target.value)}
@@ -433,6 +463,7 @@ export function TemanAiView({ me }: { me: MeResponse }) {
               <Send className="h-4 w-4" />
             </Button>
           )}
+          </div>
         </div>
         <p className="max-w-3xl mx-auto text-[11px] text-muted-foreground mt-1.5">
           Teman AI bisa salah — cek jawaban penting ke buku/guru.

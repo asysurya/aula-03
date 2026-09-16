@@ -11,6 +11,7 @@ import {
 } from "@/lib/ai-providers";
 import { parseFormJson, type FormIOParsedQuestion } from "@/lib/form-io";
 import { AI_TYPE_LABELS, buildAiSystemPrompt } from "@/lib/form-ai";
+import { resolveAttachmentContext } from "@/lib/ai-attachments";
 
 // POST /api/forms/ai-generate
 // body: { prompt: string, count?: number (1-40), types?: string[] }
@@ -41,6 +42,19 @@ export async function POST(req: NextRequest) {
   if (!prompt) return errorResponse("PROMPT_REQUIRED", 400);
   if (prompt.length > MAX_PROMPT)
     return errorResponse(`PROMPT_TOO_LONG (maks ${MAX_PROMPT} karakter)`, 400);
+
+  // Lampiran materi: id AiAttachment (guru upload) + teks manual —
+  // digabung server-side sebagai konteks soal.
+  const attachmentIds: string[] = Array.isArray(body?.attachmentIds)
+    ? (body.attachmentIds as unknown[]).map(String).filter((x) => x.length > 0).slice(0, 8)
+    : [];
+  const materialText =
+    typeof body?.materialText === "string" ? body.materialText.slice(0, 20_000) : "";
+  const attachCtx = await resolveAttachmentContext(
+    user.id,
+    attachmentIds,
+    materialText
+  ).catch(() => null);
 
   const count = Math.min(
     MAX_COUNT,
@@ -99,7 +113,12 @@ export async function POST(req: NextRequest) {
           // System prompt HARUS role "system" (bukan "assistant") supaya
           // instruksi format ditaati model secara konsisten.
           { role: "system", content: buildAiSystemPrompt(count, types) },
-          { role: "user", content: prompt },
+          {
+            role: "user",
+            content: attachCtx
+              ? `${prompt}\n\nGunakan MATERI LAMPIRAN berikut sebagai sumber utama soal:\n\n${attachCtx}`
+              : prompt,
+          },
         ],
         stream: false,
         max_tokens: 8000,

@@ -26,6 +26,7 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { useAiAttachments, AiAttachments } from "@/components/ai/ai-attachments";
 import { AutoTextarea } from "@/components/ui/auto-textarea";
 
 const TOPIC_MAX = 500;
@@ -55,6 +56,9 @@ export function MaterialAiDialog({
   const abortRef = useRef<AbortController | null>(null);
   // Backup materi sebelum diganti (untuk aksi "Kembalikan").
   const backupRef = useRef<string | null>(null);
+  // Lampiran materi (file format apa pun) — konteks tambahan pembuatan
+  // materi; teks di-extract server-side.
+  const att = useAiAttachments();
 
   function reset() {
     abortRef.current?.abort();
@@ -62,6 +66,7 @@ export function MaterialAiDialog({
     setGenerating(false);
     setTopic("");
     setNotes("");
+    att.clearAll();
   }
 
   function close() {
@@ -93,7 +98,11 @@ export function MaterialAiDialog({
       const res = await fetch("/api/ai/study", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message, task: "material" }),
+        body: JSON.stringify({
+          message,
+          task: "material",
+          attachmentIds: att.ids.length ? att.ids : undefined,
+        }),
         signal: ac.signal,
       });
 
@@ -243,6 +252,14 @@ export function MaterialAiDialog({
                 menggantinya. Tombol “Kembalikan” tersedia setelah selesai.
               </p>
             ) : null}
+            <div className="grid gap-1.5">
+              <Label>Lampiran materi (opsional)</Label>
+              <AiAttachments att={att} allowText={false} label="Lampirkan berkas" />
+              <p className="text-[11px] text-muted-foreground">
+                Format apa pun — PDF/DOCX/XLSX/ZIP/teks diextract otomatis
+                sebagai rujukan pembuatan materi.
+              </p>
+            </div>
           </div>
         )}
 
