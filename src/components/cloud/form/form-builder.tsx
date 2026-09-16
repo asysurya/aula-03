@@ -144,6 +144,7 @@ export function FormBuilder({
       showAnswerKey: true,
       allowBack: false,
       maxAttempts: 1,
+      recordWork: false,
     }
   );
   const [questions, setQuestions] = useState<EditableQuestion[]>(
@@ -614,6 +615,15 @@ export function FormBuilder({
             disabled={locked}
             onChange={(v) =>
               setSettings((s) => ({ ...s, showAnswerKey: v }))
+            }
+          />
+          <SettingSwitch
+            label="Rekam pengerjaan siswa"
+            hint="Tangkapan layar berkala saat dikerjakan — guru bisa memantau LIVE dan memutar ulang setelah selesai"
+            checked={settings.recordWork ?? false}
+            disabled={locked}
+            onChange={(v) =>
+              setSettings((s) => ({ ...s, recordWork: v }))
             }
           />
         </div>

@@ -124,12 +124,39 @@ export interface FormSettings {
   allowBack?: boolean;
   /** Jumlah percobaan pengerjaan yang diizinkan (1–10; null/undefined = 1). */
   maxAttempts?: number | null;
+  /** Rekam pengerjaan siswa: snapshot area kerja dikirim berkala saat
+   *  siswa mengerjakan → guru memantau LIVE; setelah submit rekaman
+   *  tersimpan & bisa diputar ulang. Null (form lama) = false. */
+  recordWork?: boolean | null;
 }
 
 export interface FormViolation {
   type: "TAB_SWITCH" | "PASTE" | "TIMEOUT" | "EXIT";
   at: string;
   detail?: string;
+}
+
+// ── Rekaman pengerjaan (toggle guru Form.recordWork) ───────────────
+
+/** Satu rekaman pengerjaan satu siswa (LIVE = masih dikerjakan,
+ *  SAVED = sudah selesai & tersimpan untuk diputar ulang). */
+export interface FormRecordingDTO {
+  id: string;
+  status: "LIVE" | "SAVED";
+  startedAt: string;
+  finishedAt: string | null;
+  frameCount: number;
+  lastSeq: number;
+  lastFrameAt: string | null;
+  /** Hanya diisi pada response untuk guru (daftar rekaman). */
+  user?: { id: string; name: string; username: string };
+}
+
+/** Satu frame snapshot rekaman (HTML area kerja siswa). */
+export interface FormRecordingFrameDTO {
+  seq: number;
+  html: string;
+  capturedAt: string;
 }
 
 export interface FormAnswerDTO {

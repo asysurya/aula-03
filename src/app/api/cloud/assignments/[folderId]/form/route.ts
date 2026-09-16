@@ -149,6 +149,7 @@ export async function GET(
         showAnswerKey: form.showAnswerKey ?? null,
         allowBack: form.allowBack ?? false,
         maxAttempts: form.maxAttempts ?? 1,
+        recordWork: form.recordWork ?? false,
         questions: form.questions.map((q) => toQuestionDTO(q, true)),
       },
       attempt: null,
@@ -214,6 +215,7 @@ export async function GET(
         showAnswerKey: form.showAnswerKey ?? null,
         allowBack: form.allowBack ?? false,
         maxAttempts,
+        recordWork: form.recordWork ?? false,
         questions: showCorrect
           ? form.questions.map((q) => toQuestionDTO(q, true, seed))
           : ordered,
@@ -261,6 +263,7 @@ export async function GET(
       showAnswerKey: form.showAnswerKey ?? null,
       allowBack: form.allowBack ?? false,
       maxAttempts: form.maxAttempts ?? 1,
+      recordWork: form.recordWork ?? false,
       questions: [...qs].sort((a, b) => a.order - b.order),
     },
     attempt: null,
@@ -432,6 +435,8 @@ export async function PUT(
     showAnswerKey: settings.showAnswerKey !== false,
     allowBack: !!settings.allowBack,
     maxAttempts,
+    // Rekam pengerjaan siswa (toggle guru di builder — default OFF).
+    recordWork: !!settings.recordWork,
     createdBy: user.id,
   };
 

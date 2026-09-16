@@ -54,6 +54,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { cn } from "@/lib/utils";
+import { captureWorkSnapshot } from "@/lib/rec-snapshot";
 import {
   questionTypeMeta,
   violationLabel,
@@ -178,6 +179,129 @@ export function FormPlayer({
   const submitRef = useRef<((auto?: boolean) => Promise<void>) | null>(null);
   // Milestone peringatan yang sudah dibunyikan (anti dobel).
   const warnedRef = useRef<Set<number>>(new Set());
+
+  // ── Rekaman pengerjaan (toggle guru Form.recordWork) ────────────────
+  // Snapshot DOM area kerja dikirim berkala → guru memantau LIVE;
+  // saat submit, rekaman ditandai SAVED (server & client) dan bisa
+  // diputar ulang. Gagal kirim frame = diam-diam (pengerjaan tak
+  // terganggu); autosave jawaban tetap jalan lewat persist().
+  const recAreaRef = useRef<HTMLDivElement | null>(null);
+  const recRef = useRef<{
+    id: string | null;
+    timer: ReturnType<typeof setInterval> | null;
+    lastCapture: number;
+    busy: boolean;
+    dirty: boolean;
+    stopped: boolean;
+  }>({ id: null, timer: null, lastCapture: 0, busy: false, dirty: true, stopped: false });
+  const [recordingActive, setRecordingActive] = useState(false);
+
+  const recordWork = settings?.recordWork ?? form?.recordWork ?? false;
+
+  /** Ambil snapshot area kerja & kirim sebagai frame. Terjadi bila:
+   *  ada perubahan jawaban (min 4 dtk sejak frame terakhir) ATAU sudah
+   *  >10 dtk tanpa frame (rekaman "hidup" walau siswa diam). */
+  const captureAndSend = useCallback(
+    async (force = false) => {
+      const st = recRef.current;
+      if (!st.id || st.stopped) return;
+      if (st.busy) {
+        // Frame terakhir saat submit MENUNGGU kiriman sebelumnya selesai
+        // (bukan diskip) supaya kondisi akhir area kerja pasti terekam.
+        if (!force) return;
+        for (let w = 0; w < 30 && recRef.current.busy && !recRef.current.stopped; w++) {
+          await new Promise((r) => setTimeout(r, 50));
+        }
+        if (recRef.current.busy || recRef.current.stopped) return;
+      }
+      const now = Date.now();
+      if (!force && !st.dirty && now - st.lastCapture < 10_000) return;
+      if (!force && now - st.lastCapture < 4_000) return;
+      const frag = captureWorkSnapshot(recAreaRef.current);
+      if (!frag || frag.length > 300_000) {
+        st.dirty = false;
+        return;
+      }
+      st.busy = true;
+      st.lastCapture = now;
+      st.dirty = false;
+      try {
+        const res = await fetch(
+          `/api/cloud/assignments/${folderId}/form/recordings/${st.id}`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ html: frag }),
+          }
+        );
+        if (!res.ok) {
+          // 409: attempt sudah submit / rekaman SAVED → berhenti diam-diam.
+          if (res.status === 409) {
+            st.stopped = true;
+            if (st.timer) clearInterval(st.timer);
+            setRecordingActive(false);
+          }
+          return;
+        }
+        const json = await res.json().catch(() => null);
+        if (json?.capped) {
+          st.stopped = true;
+          if (st.timer) clearInterval(st.timer);
+        }
+      } catch {
+        // Koneksi putus — coba lagi di tick berikutnya.
+        st.dirty = true;
+      } finally {
+        st.busy = false;
+      }
+    },
+    [folderId]
+  );
+
+  // Mulai/lanjutkan rekaman saat phase playing & recordWork aktif.
+  // POST /recordings idempotent: setelah refresh tetap lanjut rekaman
+  // LIVE yang sama (guru tidak kehilangan sesi).
+  useEffect(() => {
+    const st = recRef.current;
+    if (phase !== "playing" || !recordWork) {
+      if (st.timer) clearInterval(st.timer);
+      st.timer = null;
+      st.id = null;
+      setRecordingActive(false);
+      return;
+    }
+    st.stopped = false;
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch(
+          `/api/cloud/assignments/${folderId}/form/recordings`,
+          { method: "POST" }
+        );
+        const json = await res.json().catch(() => null);
+        if (!res.ok || !json?.recording?.id) return;
+        if (cancelled || recRef.current.id) return;
+        recRef.current.id = json.recording.id as string;
+        setRecordingActive(true);
+        recRef.current.dirty = true;
+        void captureAndSend(true);
+        recRef.current.timer = setInterval(() => void captureAndSend(), 2500);
+      } catch {
+        /* rekaman gagal mulai — pengerjaan tetap jalan normal */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [phase, recordWork, folderId, captureAndSend]);
+
+  // Matikan interval rekaman saat komponen dibongkar.
+  useEffect(
+    () => () => {
+      if (recRef.current.timer) clearInterval(recRef.current.timer);
+    },
+    []
+  );
 
   const invalidate = useCallback(() => {
     qc.invalidateQueries({ queryKey: ["cloud", "assignment", folderId] });
@@ -490,6 +614,16 @@ export function FormPlayer({
     setSubmitError(null);
     try {
       await persist(); // flush latest answers first
+      // Frame TERAKHIR pengerjaan — dikirim sebelum submit (attempt masih
+      // IN_PROGRESS) supaya kondisi akhir area kerja ikut terekam. Timer
+      // dimatikan dulu agar tidak ada tick lain berpacu.
+      if (recRef.current.timer) {
+        clearInterval(recRef.current.timer);
+        recRef.current.timer = null;
+      }
+      if (recRef.current.id && !recRef.current.stopped) {
+        await captureAndSend(true);
+      }
       const res = await fetch(
         `/api/cloud/assignments/${folderId}/form/attempt/submit`,
         {
@@ -518,6 +652,25 @@ export function FormPlayer({
       if (auto) logViolation("TIMEOUT");
       setResult(json as FormSubmitResult);
       setPhase("done");
+      // Rekaman selesai → SAVED (server juga menandainya di route submit;
+      // PATCH ini redundan tapi memastikan).
+      if (recRef.current.id) {
+        try {
+          await fetch(
+            `/api/cloud/assignments/${folderId}/form/recordings/${recRef.current.id}`,
+            {
+              method: "PATCH",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ finish: true }),
+            }
+          );
+        } catch {
+          /* server sudah men-SAVED-kan via submit attempt */
+        }
+        if (recRef.current.timer) clearInterval(recRef.current.timer);
+        recRef.current.stopped = true;
+        setRecordingActive(false);
+      }
       toast.success(
         auto ? "Waktu habis — jawaban otomatis dikirim." : "Jawaban terkirim!"
       );
@@ -543,6 +696,7 @@ export function FormPlayer({
       [questionId]: { ...(prev[questionId] ?? { optionIds: [], fileId: null }), text },
     }));
     dirtyRef.current = true;
+    recRef.current.dirty = true;
   }
 
   function selectOption(questionId: string, optionId: string, multi: boolean) {
@@ -559,6 +713,7 @@ export function FormPlayer({
       return { ...prev, [questionId]: { ...cur, optionIds: next } };
     });
     dirtyRef.current = true;
+    recRef.current.dirty = true;
   }
 
   async function uploadAnswerFile(
@@ -593,6 +748,7 @@ export function FormPlayer({
         },
       }));
       dirtyRef.current = true;
+      recRef.current.dirty = true;
       toast.success("File terunggah (cloud)");
     } catch {
       toast.error("Gagal mengunggah jawaban");
@@ -787,6 +943,9 @@ export function FormPlayer({
           ) : null}
           {form?.trackTabSwitch ? (
             <Rule text="Pindah tab / menutup jendela tercatat sebagai pelanggaran." />
+          ) : null}
+          {form?.recordWork ? (
+            <Rule text="Pengerjaanmu direkam (tangkapan layar berkala) untuk dipantau guru." />
           ) : null}
           {form?.timeLimitMin ? (
             <Rule text={`Timer ${form.timeLimitMin} menit — jawaban terkirim otomatis saat habis.`} />
@@ -1096,6 +1255,7 @@ export function FormPlayer({
 
   return (
     <div
+      ref={recAreaRef}
       className="space-y-4 select-none"
       {...antiPasteHandlers}
     >
@@ -1124,6 +1284,16 @@ export function FormPlayer({
             <Badge variant="secondary" className="gap-1">
               <EyeOff className="size-3" /> Mode anti-nyontek aktif
             </Badge>
+            {recordingActive ? (
+              <Badge
+                data-rec-skip
+                className="bg-red-500/15 text-red-600 dark:text-red-400 border border-red-500/30 gap-1.5"
+                title="Pengerjaanmu direkam berkala untuk dipantau guru"
+              >
+                <span className="size-2 rounded-full bg-red-500 animate-pulse" />
+                Perekaman aktif
+              </Badge>
+            ) : null}
             <span className="text-xs text-muted-foreground">
               Terjawab {answeredCount}/{qs.length}
             </span>

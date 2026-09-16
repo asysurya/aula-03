@@ -236,6 +236,15 @@ export async function POST(
     },
   });
 
+  // ── Rekaman pengerjaan: saat siswa SELESAI, rekaman LIVE miliknya
+  // ditandai SAVED di sisi SERVER (jaminan bawa-bawa: client mungkin
+  // tertutup/kehilangan koneksi sebelum sempat memanggil finish). Guru
+  // langsung bisa memutar ulang rekaman yang tersimpan.
+  await db.formRecording.updateMany({
+    where: { formId: form.id, userId: user.id, status: "LIVE" },
+    data: { status: "SAVED", finishedAt: new Date() },
+  });
+
   return Response.json({
     ok: true,
     autoSubmitted: isAutoSubmit,

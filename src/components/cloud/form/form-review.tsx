@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { format } from "date-fns";
 import { id as localeId } from "date-fns/locale";
@@ -25,6 +25,7 @@ import {
   ShieldAlert,
   Table2,
   Users,
+  Video,
   XCircle,
 } from "lucide-react";
 
@@ -52,7 +53,9 @@ import {
   violationLabel,
   type FormAnswerDTO,
   type FormQuestionDTO,
+  type FormRecordingDTO,
 } from "@/lib/form-types";
+import { RecordingViewer } from "./recording-viewer";
 
 // ── Wire types for review endpoint ─────────────────────────────────
 
@@ -130,6 +133,11 @@ interface ReviewResponse {
   }[];
 }
 
+interface RecordingsResponse {
+  recordWork: boolean;
+  recordings: FormRecordingDTO[];
+}
+
 export function FormReview({ folderId }: { folderId: string }) {
   const qc = useQueryClient();
   // Live monitoring: auto-refresh 5 dtk (bisa dimatikan).
@@ -146,6 +154,34 @@ export function FormReview({ folderId }: { folderId: string }) {
     },
     refetchInterval: live ? 5_000 : false,
   });
+
+  // Rekaman pengerjaan (toggle guru Form.recordWork) — ikut polling
+  // live: guru melihat siswa yang sedang terekam & rekaman tersimpan.
+  const { data: recData } = useQuery<RecordingsResponse>({
+    queryKey: ["cloud", "form-recordings", folderId],
+    queryFn: async () => {
+      const res = await fetch(
+        `/api/cloud/assignments/${folderId}/form/recordings`,
+        { cache: "no-store" }
+      );
+      if (!res.ok) throw new Error("Gagal memuat rekaman");
+      return res.json();
+    },
+    refetchInterval: live ? 5_000 : false,
+    retry: false,
+  });
+  const recordings = recData?.recordings ?? [];
+  const recordingsByUser = useMemo(() => {
+    const m = new Map<string, FormRecordingDTO[]>();
+    for (const r of recordings) {
+      const uid = r.user?.id ?? "";
+      const list = m.get(uid);
+      if (list) list.push(r);
+      else m.set(uid, [r]);
+    }
+    return m;
+  }, [recordings]);
+  const liveRecordings = recordings.filter((r) => r.status === "LIVE");
 
   if (isLoading) {
     return (
@@ -325,6 +361,12 @@ export function FormReview({ folderId }: { folderId: string }) {
             pelanggaran
           </Badge>
         ) : null}
+        {liveRecordings.length > 0 ? (
+          <Badge className="bg-red-500/15 text-red-600 dark:text-red-400 border border-red-500/30">
+            <Radio className="size-3 animate-pulse" /> {liveRecordings.length}{""}
+            direkam live
+          </Badge>
+        ) : null}
         {/* Live monitoring toggle */}
         <button
           type="button"
@@ -416,6 +458,7 @@ export function FormReview({ folderId }: { folderId: string }) {
                 attempt={a}
                 questions={data.questions}
                 archives={archivesByUser.get(a.user.id) ?? []}
+                recordings={recordingsByUser.get(a.user.id) ?? []}
                 onGraded={() =>
                   qc.invalidateQueries({
                     queryKey: ["cloud", "form-review", folderId],
@@ -812,12 +855,15 @@ function AttemptCard({
   attempt,
   questions,
   archives,
+  recordings,
   onGraded,
 }: {
   folderId: string;
   attempt: ReviewAttempt;
   questions: ReviewQuestion[];
   archives: ReviewArchive[];
+  /** Rekaman pengerjaan siswa ini (toggle guru recordWork). */
+  recordings: FormRecordingDTO[];
   onGraded: () => void;
 }) {
   const [open, setOpen] = useState(false);
@@ -825,9 +871,12 @@ function AttemptCard({
   const [resetOpen, setResetOpen] = useState(false);
   const [resetting, setResetting] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
+  const [recOpen, setRecOpen] = useState(false);
   const answerByQ = new Map(attempt.answers.map((a) => [a.questionId, a]));
 
   const submitted = attempt.status === "SUBMITTED";
+  const liveRec = recordings.find((r) => r.status === "LIVE");
+  const hasRecordings = recordings.length > 0;
 
   // Guru mereset pengerjaan siswa — jawaban, file, pelanggaran, dan skor
   // dihapus; siswa bisa mulai dari awal (mis. submit gagal / terlanjur salah).
@@ -908,6 +957,15 @@ function AttemptCard({
               {archives.length + 1} percobaan
             </Badge>
           ) : null}
+          {liveRec ? (
+            <Badge className="bg-red-500/15 text-red-600 dark:text-red-400 border border-red-500/30 gap-1 shrink-0">
+              <Radio className="size-3 animate-pulse" /> Direkam
+            </Badge>
+          ) : hasRecordings ? (
+            <Badge variant="outline" className="shrink-0 gap-1">
+              <Video className="size-3" /> Rekaman
+            </Badge>
+          ) : null}
           {attempt.violations.length > 0 ? (
             <Badge className="bg-amber-500/15 text-amber-600 dark:text-amber-400 border border-amber-500/30 gap-1 shrink-0">
               <AlertTriangle className="size-3" />
@@ -931,6 +989,29 @@ function AttemptCard({
           </Badge>
         </button>
         <div className="shrink-0 pr-3 pl-1 flex items-center gap-1">
+          {hasRecordings ? (
+            <Button
+              size="sm"
+              variant="outline"
+              className="h-8 gap-1.5 text-xs"
+              onClick={() => setRecOpen(true)}
+              title={
+                liveRec
+                  ? "Pantau LANGSUNG layar siswa ini (rekaman berjalan)"
+                  : "Putar ulang rekaman pengerjaan siswa ini"
+              }
+              aria-label={
+                liveRec ? "Pantau rekaman langsung siswa" : "Putar rekaman pengerjaan siswa"
+              }
+            >
+              {liveRec ? (
+                <Radio className="size-3.5 animate-pulse text-red-500" />
+              ) : (
+                <Video className="size-3.5" />
+              )}
+              {liveRec ? "Live" : "Rekaman"}
+            </Button>
+          ) : null}
           <Button
             size="icon"
             variant="ghost"
@@ -1003,6 +1084,17 @@ function AttemptCard({
 
       {/* Pratinjau file jawaban — tanpa download */}
       <FilePreview file={previewFile} onClose={() => setPreviewFile(null)} />
+
+      {/* Viewer rekaman pengerjaan (LIVE / putar ulang) */}
+      {hasRecordings ? (
+        <RecordingViewer
+          open={recOpen}
+          onOpenChange={setRecOpen}
+          folderId={folderId}
+          user={attempt.user}
+          recordings={recordings}
+        />
+      ) : null}
 
       {/* Dialog riwayat semua percobaan (arsip + percobaan aktif) */}
       <AttemptHistoryDialog

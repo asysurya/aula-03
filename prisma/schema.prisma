@@ -471,6 +471,10 @@ model Form {
   // Nullable: form lama (null) = 1 — kompatibel dengan DB produksi lama
   // (MongoDB schemaless; tanpa migrasi/index baru).
   maxAttempts      Int?
+  // Toggle guru: REKAM PENGERJAAN siswa saat mengerjakan (snapshot DOM
+  // area kerja dikirim berkala → guru pantau LIVE; setelah submit rekaman
+  // tersimpan & bisa diputar ulang). Nullable: form lama (null) = false.
+  recordWork       Boolean?
   createdBy        String
   createdAt        DateTime @default(now())
   updatedAt        DateTime @updatedAt
@@ -563,6 +567,42 @@ model FormAnswer {
   file     CloudFile?   @relation("FormAnswerFile", fields: [fileId], references: [id], onDelete: SetNull, onUpdate: Cascade)
 
   @@unique([attemptId, questionId])
+}
+
+// ── Rekaman pengerjaan tugas (toggle guru Form.recordWork) ──────────
+// Saat siswa mengerjakan form, area kerjanya di-snapshot berkala dan
+// dikirim ke server (satu dokumen rekaman per siswa per percobaan).
+// Guru memantau LIVE selama status LIVE; setelah siswa submit, rekaman
+// ditandai SAVED dan bisa diputar ulang frame-per-frame.
+// Koleksi baru tanpa relasi Prisma (pola FormAttemptArchive) — MongoDB
+// membuatnya otomatis saat prisma db push.
+model FormRecording {
+  id          String    @id @default(cuid()) @map("_id")
+  formId      String
+  userId      String
+  status      String    @default("LIVE") // LIVE | SAVED
+  startedAt   DateTime  @default(now())
+  finishedAt  DateTime?
+  frameCount  Int       @default(0)
+  lastSeq     Int       @default(0)
+  lastFrameAt DateTime?
+
+  @@index([formId, status])
+  @@index([formId, userId])
+}
+
+// Satu frame snapshot (HTML area kerja, sudah disanitasi: tanpa script,
+// tanpa atribut on*, nilai input diserialisasi ke atribut). Seq naik
+// monoton per rekaman — dipakai polling live (after=lastSeq) dan putar
+// ulang (batch).
+model FormRecordingFrame {
+  id          String   @id @default(cuid()) @map("_id")
+  recordingId String
+  seq         Int
+  html        String
+  capturedAt  DateTime @default(now())
+
+  @@index([recordingId, seq])
 }
 
 // ── Chunked upload staging (file > 4.5 MB melewati serverless Vercel) ──
