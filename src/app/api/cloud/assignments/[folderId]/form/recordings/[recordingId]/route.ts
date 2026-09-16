@@ -45,6 +45,8 @@ function recordingDto(r: {
   frameCount: number;
   lastSeq: number;
   lastFrameAt: Date | null;
+  faceOk: boolean | null;
+  camOff: boolean | null;
 }) {
   return {
     id: r.id,
@@ -54,6 +56,8 @@ function recordingDto(r: {
     frameCount: r.frameCount,
     lastSeq: r.lastSeq,
     lastFrameAt: r.lastFrameAt,
+    faceOk: r.faceOk,
+    camOff: r.camOff,
   };
 }
 
@@ -151,6 +155,10 @@ export async function POST(
   const body = await req.json().catch(() => null);
   const htmlRaw = typeof body?.html === "string" ? body.html : "";
   if (!htmlRaw.trim()) return errorResponse("FRAME_REQUIRED", 400);
+  // Status wajah PiP (kamera rekaman) — dikirim bersama frame oleh
+  // client setelah izin kamera settle; undefined = tanpa info.
+  const faceOk = typeof body?.faceOk === "boolean" ? body.faceOk : undefined;
+  const camOff = typeof body?.camOff === "boolean" ? body.camOff : undefined;
 
   const html = sanitizeRecordingHtml(htmlRaw);
   if (html.length > MAX_FRAME_HTML)
@@ -171,6 +179,9 @@ export async function POST(
       frameCount: { increment: 1 },
       lastSeq: seq,
       lastFrameAt: new Date(),
+      ...(faceOk !== undefined || camOff !== undefined
+        ? { faceOk: faceOk ?? false, camOff: camOff ?? false }
+        : {}),
     },
   });
 

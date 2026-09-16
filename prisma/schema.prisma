@@ -586,6 +586,12 @@ model FormRecording {
   frameCount  Int       @default(0)
   lastSeq     Int       @default(0)
   lastFrameAt DateTime?
+  // Status wajah pada frame terakhir (kamera PiP rekaman):
+  //   faceOk — wajah terlihat kamera?
+  //   camOff — kamera tidak aktif/ditolak siswa?
+  // Null = fitur kamera belum pernah settle (frame tanpa PiP wajah).
+  faceOk      Boolean?
+  camOff      Boolean?
 
   @@index([formId, status])
   @@index([formId, userId])

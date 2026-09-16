@@ -24,6 +24,8 @@ function recordingDto(r: {
   frameCount: number;
   lastSeq: number;
   lastFrameAt: Date | null;
+  faceOk: boolean | null;
+  camOff: boolean | null;
 }) {
   return {
     id: r.id,
@@ -33,6 +35,8 @@ function recordingDto(r: {
     frameCount: r.frameCount,
     lastSeq: r.lastSeq,
     lastFrameAt: r.lastFrameAt,
+    faceOk: r.faceOk,
+    camOff: r.camOff,
   };
 }
 

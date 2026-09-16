@@ -11,6 +11,7 @@ import {
   Pause,
   Play,
   Radio,
+  ScanFace,
 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -22,7 +23,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { buildRecordingDoc } from "@/lib/rec-snapshot";
+import { buildRecordingDoc, faceStateOf } from "@/lib/rec-snapshot";
 import type {
   FormRecordingDTO,
   FormRecordingFrameDTO,
@@ -96,6 +97,8 @@ export function RecordingViewer({
     () => (current ? buildRecordingDoc(current.html) : ""),
     [current?.html, current?.seq]
   );
+  // Status wajah pada frame yang sedang ditampilkan (PiP kamera).
+  const faceState = current ? faceStateOf(current.html) : "none";
 
   // ── LIVE: polling frame baru tiap 3 detik ──────────────────────────
   useEffect(() => {
@@ -206,6 +209,19 @@ export function RecordingViewer({
                 <CheckCircle2 className="size-3" /> Tersimpan
               </Badge>
             )}
+            {faceState === "ok" ? (
+              <Badge className="bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 border border-emerald-500/40 gap-1.5">
+                <ScanFace className="size-3" /> Wajah terlihat
+              </Badge>
+            ) : faceState === "hidden" ? (
+              <Badge className="bg-red-500/15 text-red-600 dark:text-red-400 border border-red-500/40 gap-1.5">
+                <ScanFace className="size-3 animate-pulse" /> Wajah tidak terlihat
+              </Badge>
+            ) : faceState === "camoff" ? (
+              <Badge className="bg-amber-500/15 text-amber-600 dark:text-amber-400 border border-amber-500/40 gap-1.5">
+                <ScanFace className="size-3" /> Kamera tidak aktif
+              </Badge>
+            ) : null}
           </DialogTitle>
           <DialogDescription>
             {isLive
@@ -350,8 +366,9 @@ export function RecordingViewer({
 
         <p className="text-[11px] text-muted-foreground">
           Snapshot diambil otomatis setiap beberapa detik selama siswa
-          mengerjakan — termasuk saat jawaban berubah. Tampilan memakai
-          gaya aplikasi saat frame diambil.
+          mengerjakan — termasuk saat jawaban berubah. Jendela kecil di
+          pojok kanan bawah adalah kamera wajah siswa saat frame diambil.
+          Tampilan memakai gaya aplikasi saat frame diambil.
         </p>
       </DialogContent>
     </Dialog>

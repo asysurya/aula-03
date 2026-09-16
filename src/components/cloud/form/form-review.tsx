@@ -21,6 +21,7 @@ import {
   Paperclip,
   Printer,
   Radio,
+  ScanFace,
   RotateCcw,
   ShieldAlert,
   Table2,
@@ -965,6 +966,27 @@ function AttemptCard({
             <Badge variant="outline" className="shrink-0 gap-1">
               <Video className="size-3" /> Rekaman
             </Badge>
+          ) : null}
+          {/* Status wajah siswa (kamera PiP rekaman) — live dari frame
+              terakhir; guru tahu siapa yang tidak terlihat kamera. */}
+          {liveRec ? (
+            liveRec.camOff ? (
+              <Badge
+                data-face-badge="camoff"
+                className="bg-amber-500/15 text-amber-600 dark:text-amber-400 border border-amber-500/30 gap-1 shrink-0"
+                title="Kamera siswa tidak aktif / tidak diizinkan"
+              >
+                <ScanFace className="size-3" /> Kamera mati
+              </Badge>
+            ) : liveRec.faceOk === false ? (
+              <Badge
+                data-face-badge="hidden"
+                className="bg-red-500/15 text-red-600 dark:text-red-400 border border-red-500/30 gap-1 shrink-0"
+                title="Wajah siswa tidak terlihat kamera pada frame terakhir"
+              >
+                <ScanFace className="size-3 animate-pulse" /> Wajah tak terlihat
+              </Badge>
+            ) : null
           ) : null}
           {attempt.violations.length > 0 ? (
             <Badge className="bg-amber-500/15 text-amber-600 dark:text-amber-400 border border-amber-500/30 gap-1 shrink-0">

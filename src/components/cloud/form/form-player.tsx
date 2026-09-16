@@ -6,6 +6,8 @@ import { toast } from "sonner";
 import { format } from "date-fns";
 import {
   AlertTriangle,
+  Camera,
+  CameraOff,
   CheckCircle2,
   ChevronLeft,
   ChevronRight,
@@ -55,6 +57,11 @@ import {
 } from "@/components/ui/dialog";
 import { cn } from "@/lib/utils";
 import { captureWorkSnapshot } from "@/lib/rec-snapshot";
+import {
+  detectFaceOk,
+  grabFaceJpeg,
+  type FaceFrameInfo,
+} from "@/lib/face-detect";
 import {
   questionTypeMeta,
   violationLabel,
@@ -196,6 +203,28 @@ export function FormPlayer({
   }>({ id: null, timer: null, lastCapture: 0, busy: false, dirty: true, stopped: false });
   const [recordingActive, setRecordingActive] = useState(false);
 
+  // ── Kamera wajah: PiP pada rekaman + notifikasi "wajah harus
+  // terlihat". mode: pending (minta izin) → on (stream jalan) | off
+  // (ditolak/tak ada). JPEG terakhir + status wajah disimpan di
+  // faceInfoRef dan disisipkan ke tiap frame oleh captureWorkSnapshot.
+  const FACE_NOTICE_HIDDEN =
+    "Wajahmu tidak terlihat kamera — posisikan wajahmu di depan kamera selama mengerjakan tugas ini.";
+  const FACE_NOTICE_CAMOFF =
+    "Kamera tidak aktif — izinkan kamera agar wajahmu ikut terekam selama pengerjaan (muka harus terlihat kamera).";
+  const faceVideoRef = useRef<HTMLVideoElement | null>(null);
+  const faceStreamRef = useRef<MediaStream | null>(null);
+  const faceInfoRef = useRef<FaceFrameInfo>({ dataUrl: null, ok: false });
+  const faceModeRef = useRef<"pending" | "on" | "off">("pending");
+  const faceTickRef = useRef<{
+    timer: ReturnType<typeof setInterval> | null;
+    missStreak: number;
+    lastWarn: number;
+  }>({ timer: null, missStreak: 0, lastWarn: 0 });
+  const [faceCamOn, setFaceCamOn] = useState(false);
+  const [faceBlocked, setFaceBlocked] = useState(false);
+  const [faceVisible, setFaceVisible] = useState(true);
+  const [faceNotice, setFaceNotice] = useState<string | null>(null);
+
   const recordWork = settings?.recordWork ?? form?.recordWork ?? false;
 
   /** Ambil snapshot area kerja & kirim sebagai frame. Terjadi bila:
@@ -217,7 +246,12 @@ export function FormPlayer({
       const now = Date.now();
       if (!force && !st.dirty && now - st.lastCapture < 10_000) return;
       if (!force && now - st.lastCapture < 4_000) return;
-      const frag = captureWorkSnapshot(recAreaRef.current);
+      // PiP wajah: bila izin kamera masih diproses, frame dikirim tanpa
+      // wajah (jangan salah tampil "kamera mati"); setelah settles, JPEG
+      // + status wajah terakhir ikut setiap frame.
+      const face =
+        faceModeRef.current === "pending" ? undefined : faceInfoRef.current;
+      const frag = captureWorkSnapshot(recAreaRef.current, face);
       if (!frag || frag.length > 300_000) {
         st.dirty = false;
         return;
@@ -231,7 +265,11 @@ export function FormPlayer({
           {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ html: frag }),
+            body: JSON.stringify({
+              html: frag,
+              faceOk: face ? face.ok : undefined,
+              camOff: face ? !face.dataUrl : undefined,
+            }),
           }
         );
         if (!res.ok) {
@@ -258,6 +296,75 @@ export function FormPlayer({
     [folderId]
   );
 
+  // ── Kamera wajah: deteksi + tangkap JPEG tiap 2 dtk ────────────────
+  // Wajah tak terlihat 2 siklus berturut-turut (>4 dtk) → notifikasi
+  // siswa (banner + toast); pengingat diulang maks. tiap 15 dtk selama
+  // masih tak terlihat. Status ikut terkirim bersama frame → guru
+  // melihat "wajah tak terlihat / kamera mati" tanpa membuka dialog.
+  const faceTick = useCallback(async () => {
+    const v = faceVideoRef.current;
+    if (!v || v.readyState < 2) return;
+    let ok = false;
+    try {
+      ok = await detectFaceOk(v);
+    } catch {
+      ok = false;
+    }
+    let dataUrl: string | null = null;
+    try {
+      dataUrl = grabFaceJpeg(v);
+    } catch {
+      dataUrl = null;
+    }
+    faceInfoRef.current = { dataUrl, ok };
+    // Kamera dianggap "on" untuk rekaman hanya setelah frame JPEG pertama
+    // berhasil diambil — frame sebelumnya dikirim tanpa PiP (bukan
+    // placeholder "kamera mati" yang menyesatkan).
+    if (dataUrl && faceModeRef.current === "pending") faceModeRef.current = "on";
+    setFaceVisible(ok);
+    const t = faceTickRef.current;
+    if (ok) {
+      t.missStreak = 0;
+      setFaceNotice((n) => (n === FACE_NOTICE_HIDDEN ? null : n));
+    } else {
+      t.missStreak++;
+      if (t.missStreak >= 2) {
+        const now = Date.now();
+        if (now - t.lastWarn > 15_000) {
+          t.lastWarn = now;
+          setFaceNotice(FACE_NOTICE_HIDDEN);
+          toast.warning("Wajahmu tidak terlihat kamera", {
+            description:
+              "Muka harus terlihat kamera selama mengerjakan — posisikan wajahmu di depan kamera.",
+          });
+        }
+      }
+    }
+  }, []);
+
+  /** Matikan kamera + interval deteksi (submit / keluar / unmount). */
+  const stopFaceCam = useCallback(() => {
+    const t = faceTickRef.current;
+    if (t.timer) {
+      clearInterval(t.timer);
+      t.timer = null;
+    }
+    faceStreamRef.current?.getTracks().forEach((tr) => tr.stop());
+    faceStreamRef.current = null;
+    if (faceVideoRef.current) {
+      try {
+        faceVideoRef.current.srcObject = null;
+      } catch {
+        /* ignore */
+      }
+    }
+    faceModeRef.current = "pending";
+    setFaceCamOn(false);
+    setFaceBlocked(false);
+    setFaceVisible(true);
+    setFaceNotice(null);
+  }, []);
+
   // Mulai/lanjutkan rekaman saat phase playing & recordWork aktif.
   // POST /recordings idempotent: setelah refresh tetap lanjut rekaman
   // LIVE yang sama (guru tidak kehilangan sesi).
@@ -268,10 +375,58 @@ export function FormPlayer({
       st.timer = null;
       st.id = null;
       setRecordingActive(false);
+      stopFaceCam();
       return;
     }
     st.stopped = false;
     let cancelled = false;
+    // Kamera wajah diminta SEKALI per sesi pengerjaan. Siswa menolak /
+    // kamera tak ada → rekaman tetap berjalan; placeholder "kamera tidak
+    // aktif" terekam + notifikasi supaya siswa mengaktifkan kembali.
+    faceModeRef.current = "pending";
+    setFaceBlocked(false);
+    void (async () => {
+      try {
+        if (!navigator.mediaDevices?.getUserMedia) throw new Error("no-media");
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: {
+            facingMode: "user",
+            width: { ideal: 320 },
+            height: { ideal: 240 },
+          },
+          audio: false,
+        });
+        if (cancelled) {
+          stream.getTracks().forEach((tr) => tr.stop());
+          return;
+        }
+        if (faceStreamRef.current)
+          faceStreamRef.current.getTracks().forEach((tr) => tr.stop());
+        faceStreamRef.current = stream;
+        // mode tetap "pending" sampai JPEG pertama dihasilkan faceTick —
+        // frame awal dikirim tanpa PiP, bukan "kamera tidak aktif".
+        setFaceCamOn(true);
+        const v = faceVideoRef.current;
+        if (v) {
+          v.srcObject = stream;
+          try {
+            await v.play();
+          } catch {
+            /* autoplay muted aman diabaikan */
+          }
+        }
+        faceTickRef.current.missStreak = 0;
+        void faceTick();
+        if (faceTickRef.current.timer) clearInterval(faceTickRef.current.timer);
+        faceTickRef.current.timer = setInterval(() => void faceTick(), 2000);
+      } catch {
+        if (cancelled) return;
+        faceModeRef.current = "off";
+        faceInfoRef.current = { dataUrl: null, ok: false };
+        setFaceBlocked(true);
+        setFaceNotice(FACE_NOTICE_CAMOFF);
+      }
+    })();
     (async () => {
       try {
         const res = await fetch(
@@ -293,14 +448,15 @@ export function FormPlayer({
     return () => {
       cancelled = true;
     };
-  }, [phase, recordWork, folderId, captureAndSend]);
+  }, [phase, recordWork, folderId, captureAndSend, stopFaceCam, faceTick]);
 
   // Matikan interval rekaman saat komponen dibongkar.
   useEffect(
     () => () => {
       if (recRef.current.timer) clearInterval(recRef.current.timer);
+      stopFaceCam();
     },
-    []
+    [stopFaceCam]
   );
 
   const invalidate = useCallback(() => {
@@ -670,6 +826,7 @@ export function FormPlayer({
         if (recRef.current.timer) clearInterval(recRef.current.timer);
         recRef.current.stopped = true;
         setRecordingActive(false);
+        stopFaceCam(); // matikan kamera wajah — pengerjaan selesai
       }
       toast.success(
         auto ? "Waktu habis — jawaban otomatis dikirim." : "Jawaban terkirim!"
@@ -945,7 +1102,7 @@ export function FormPlayer({
             <Rule text="Pindah tab / menutup jendela tercatat sebagai pelanggaran." />
           ) : null}
           {form?.recordWork ? (
-            <Rule text="Pengerjaanmu direkam (tangkapan layar berkala) untuk dipantau guru." />
+            <Rule text="Pengerjaanmu direkam (tangkapan layar berkala + kamera wajah) untuk dipantau guru — wajahmu harus terlihat kamera selama mengerjakan." />
           ) : null}
           {form?.timeLimitMin ? (
             <Rule text={`Timer ${form.timeLimitMin} menit — jawaban terkirim otomatis saat habis.`} />
@@ -1272,6 +1429,85 @@ export function FormPlayer({
           >
             ✕
           </button>
+        </div>
+      ) : null}
+
+      {/* Notifikasi WAJAH — siswa harus terlihat kamera selama
+          pengerjaan; muncul bila wajah hilang >4 dtk atau kamera mati. */}
+      {faceNotice && phase === "playing" ? (
+        <div
+          data-face-notice="1"
+          role="alert"
+          className="flex items-start gap-2 rounded-lg border border-red-500/40 bg-red-500/10 px-3 py-2.5 text-sm text-red-700 dark:text-red-300"
+        >
+          <Camera className="size-4 shrink-0 mt-0.5" />
+          <span className="flex-1">{faceNotice}</span>
+          <button
+            type="button"
+            className="text-muted-foreground hover:text-foreground"
+            onClick={() => setFaceNotice(null)}
+            aria-label="Tutup notifikasi wajah"
+          >
+            ✕
+          </button>
+        </div>
+      ) : null}
+
+      {/* PiP kamera wajah (preview siswa) — elemen ini TIDAK ikut
+          rekaman (data-rec-skip); gambar PiP di frame diambil dari JPEG
+          per-frame agar tetap tampil saat guru memutar ulang. */}
+      {phase === "playing" && recordWork ? (
+        <div
+          data-rec-skip
+          data-face-pip="1"
+          data-face-state={faceCamOn ? "on" : faceBlocked ? "off" : "pending"}
+          className="fixed bottom-4 right-4 z-40 w-[104px] rounded-xl border-2 bg-background/95 p-1 shadow-xl backdrop-blur"
+          style={{
+            borderColor: faceCamOn
+              ? faceVisible
+                ? "rgba(34,197,94,.9)"
+                : "rgba(239,68,68,.95)"
+              : faceBlocked
+                ? "rgba(239,68,68,.95)"
+                : "rgba(120,120,130,.6)",
+          }}
+        >
+          <div className="relative h-[72px] w-full">
+            <video
+              ref={faceVideoRef}
+              muted
+              playsInline
+              autoPlay
+              className={cn(
+                "h-full w-full rounded-lg bg-muted object-cover",
+                !faceCamOn && "absolute inset-0 opacity-0"
+              )}
+            />
+            {faceCamOn ? (
+              <span
+                data-face-ok={faceVisible ? "1" : "0"}
+                className={cn(
+                  "absolute -bottom-1 left-1/2 -translate-x-1/2 rounded-full px-1.5 py-px text-[9px] font-semibold whitespace-nowrap shadow",
+                  faceVisible
+                    ? "bg-emerald-500 text-white"
+                    : "bg-red-500 text-white animate-pulse"
+                )}
+              >
+                {faceVisible ? "Wajah terlihat" : "Tidak terlihat"}
+              </span>
+            ) : faceBlocked ? (
+              <span className="absolute inset-0 flex flex-col items-center justify-center gap-1 text-red-500">
+                <CameraOff className="size-5" />
+                <span className="text-[9px] leading-tight text-center">
+                  Kamera tidak aktif
+                </span>
+              </span>
+            ) : (
+              <span className="absolute inset-0 flex items-center justify-center text-[10px] text-muted-foreground animate-pulse">
+                Meminta kamera…
+              </span>
+            )}
+          </div>
         </div>
       ) : null}
 

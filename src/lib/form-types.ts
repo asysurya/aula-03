@@ -148,6 +148,10 @@ export interface FormRecordingDTO {
   frameCount: number;
   lastSeq: number;
   lastFrameAt: string | null;
+  /** Status wajah frame terakhir (kamera PiP rekaman); null = tanpa
+   *  info (kamera belum settle saat frame dikirim). */
+  faceOk?: boolean | null;
+  camOff?: boolean | null;
   /** Hanya diisi pada response untuk guru (daftar rekaman). */
   user?: { id: string; name: string; username: string };
 }
