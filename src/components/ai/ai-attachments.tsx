@@ -2,15 +2,20 @@
 
 // ── Lampiran materi untuk SEMUA fitur AI ──────────────────────────────
 // Dipakai: Teman AI, Pusat Belajar (Teman Belajar/Buat Materi/Alat
-// Materi), AI Builder, dan generator soal tugas. Dua sumber materi:
+// Materi), AI Builder, dan generator soal tugas. Sumber materi:
 //   • TEKS  — textarea collapsible ("Materi teks")
 //   • FILE  — format APA PUN (PDF/DOCX/XLSX/ZIP/EPUB/teks/…): diupload
 //             ke /api/ai/attachments, teksnya di-extract di server.
+//   • CLOUD — tautan http/https (Google Drive/Dropbox/OneDrive/GitHub
+//             /URL langsung) → POST /api/ai/attachments/import {url}.
+//   • MOUNT — berkas di folder server yang di-mount (mis. NAS bersama)
+//             → POST /api/ai/attachments/import {path}, dibatasi env
+//             AI_MOUNT_ROOTS di server.
 // Id lampiran dikirim ulang pada request AI (attachmentIds) — konteks
 // digabung server-side, tanpa membebani body request AI.
 
 import { useCallback, useRef, useState } from "react";
-import { FileText, Loader2, Paperclip, Type, X } from "lucide-react";
+import { Cloud, FileText, HardDrive, Loader2, Paperclip, Type, X } from "lucide-react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
@@ -22,6 +27,10 @@ export interface AiAttachFileMeta {
   kind: string;
   chars: number;
   note?: string;
+  /** Asal: "cloud" | "mount" | undefined (= upload biasa). */
+  source?: string;
+  /** URL cloud / path mount asal (untuk tooltip chip). */
+  origin?: string;
 }
 
 export interface AiAttachmentsState {
@@ -32,6 +41,8 @@ export interface AiAttachmentsState {
   setText: (v: string) => void;
   setTextOpen: (v: boolean) => void;
   pickFiles: (fl: FileList | null) => Promise<void>;
+  importFromUrl: (url: string) => Promise<boolean>;
+  importFromPath: (p: string) => Promise<boolean>;
   removeFile: (id: string) => void;
   clearAll: () => void;
   /** Id lampiran aktif — untuk body request AI (attachmentIds). */
@@ -92,6 +103,47 @@ export function useAiAttachments(): AiAttachmentsState {
     }
   }, []);
 
+  // ── impor dari cloud (URL) / mount (path server) ──
+  const doImport = useCallback(
+    async (payload: { url?: string; path?: string }): Promise<boolean> => {
+      setUploading(true);
+      try {
+        const res = await fetch("/api/ai/attachments/import", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        const json = await res.json().catch(() => null);
+        if (!res.ok || !json?.attachment?.id) {
+          toast.error(json?.error ?? "Gagal mengimpor materi");
+          return false;
+        }
+        const a = json.attachment as AiAttachFileMeta;
+        setFiles((prev) => [...prev, a]);
+        toast.success(`"${a.name}" siap dipakai`.slice(0, 120), {
+          description:
+            `${a.kind}${a.chars ? ` · ${a.chars.toLocaleString("id-ID")} karakter terbaca` : " · biner"} · dari ${a.source === "mount" ? "mount" : "cloud"}`,
+        });
+        return true;
+      } catch {
+        toast.error("Gagal mengimpor materi — coba lagi.");
+        return false;
+      } finally {
+        setUploading(false);
+      }
+    },
+    []
+  );
+
+  const importFromUrl = useCallback(
+    (url: string) => doImport({ url: url.trim() }),
+    [doImport]
+  );
+  const importFromPath = useCallback(
+    (p: string) => doImport({ path: p.trim() }),
+    [doImport]
+  );
+
   const removeFile = useCallback((id: string) => {
     setFiles((prev) => prev.filter((f) => f.id !== id));
   }, []);
@@ -110,11 +162,21 @@ export function useAiAttachments(): AiAttachmentsState {
     setText,
     setTextOpen,
     pickFiles,
+    importFromUrl,
+    importFromPath,
     removeFile,
     clearAll,
     ids: files.map((f) => f.id),
     hasAny: files.length > 0 || text.trim().length > 0,
   };
+}
+
+function ChipIcon({ source }: { source?: string }) {
+  if (source === "cloud")
+    return <Cloud className="size-3.5 shrink-0 text-sky-500" />;
+  if (source === "mount")
+    return <HardDrive className="size-3.5 shrink-0 text-amber-500" />;
+  return <FileText className="size-3.5 shrink-0 text-primary" />;
 }
 
 export function AiAttachments({
@@ -133,6 +195,29 @@ export function AiAttachments({
   className?: string;
 }) {
   const inputRef = useRef<HTMLInputElement | null>(null);
+  const [cloudOpen, setCloudOpen] = useState(false);
+  const [mountOpen, setMountOpen] = useState(false);
+  const [cloudVal, setCloudVal] = useState("");
+  const [mountVal, setMountVal] = useState("");
+
+  const submitCloud = () => {
+    if (!cloudVal.trim()) return;
+    void att.importFromUrl(cloudVal).then((ok) => {
+      if (ok) {
+        setCloudVal("");
+        setCloudOpen(false);
+      }
+    });
+  };
+  const submitMount = () => {
+    if (!mountVal.trim()) return;
+    void att.importFromPath(mountVal).then((ok) => {
+      if (ok) {
+        setMountVal("");
+        setMountOpen(false);
+      }
+    });
+  };
 
   return (
     <div className={cn("w-full", className)} data-ai-attach="1">
@@ -177,6 +262,38 @@ export function AiAttachments({
             Materi teks
           </Button>
         ) : null}
+        <Button
+          type="button"
+          size="sm"
+          variant={cloudOpen ? "secondary" : "outline"}
+          className="h-7 gap-1.5 text-xs"
+          disabled={att.uploading}
+          aria-label="Dari cloud"
+          onClick={() => {
+            setCloudOpen(!cloudOpen);
+            setMountOpen(false);
+          }}
+          title="Impor materi dari tautan cloud — Google Drive, Dropbox, OneDrive, GitHub, atau URL langsung"
+        >
+          <Cloud className="size-3.5" />
+          Dari cloud
+        </Button>
+        <Button
+          type="button"
+          size="sm"
+          variant={mountOpen ? "secondary" : "outline"}
+          className="h-7 gap-1.5 text-xs"
+          disabled={att.uploading}
+          aria-label="Dari mount"
+          onClick={() => {
+            setMountOpen(!mountOpen);
+            setCloudOpen(false);
+          }}
+          title="Impor materi dari folder server (mount) — mis. NAS/drive bersama sekolah"
+        >
+          <HardDrive className="size-3.5" />
+          Dari mount
+        </Button>
         {att.files.length > 0 && !compact ? (
           <span className="text-[11px] text-muted-foreground">
             {att.files.length} lampiran
@@ -185,21 +302,96 @@ export function AiAttachments({
         ) : null}
       </div>
 
+      {cloudOpen ? (
+        <div
+          className="mt-1.5 flex items-center gap-1.5"
+          data-ai-import-cloud="1"
+        >
+          <input
+            value={cloudVal}
+            onChange={(e) => setCloudVal(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                submitCloud();
+              }
+            }}
+            aria-label="URL materi cloud"
+            placeholder="Tautan cloud — https://drive.google.com/… atau URL langsung"
+            className="w-full rounded-md border border-border bg-background px-2.5 py-1.5 text-xs outline-none focus:ring-1 focus:ring-ring"
+          />
+          <Button
+            type="button"
+            size="sm"
+            className="h-7 gap-1 text-xs"
+            aria-label="Impor dari cloud"
+            disabled={att.uploading || !cloudVal.trim()}
+            onClick={submitCloud}
+          >
+            {att.uploading ? (
+              <Loader2 className="size-3.5 animate-spin" />
+            ) : (
+              <Cloud className="size-3.5" />
+            )}
+            Impor
+          </Button>
+        </div>
+      ) : null}
+
+      {mountOpen ? (
+        <div
+          className="mt-1.5 flex items-center gap-1.5"
+          data-ai-import-mount="1"
+        >
+          <input
+            value={mountVal}
+            onChange={(e) => setMountVal(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                submitMount();
+              }
+            }}
+            aria-label="Path materi mount"
+            placeholder="Path server — mis. /mnt/aula-materi/modul.pdf"
+            className="w-full rounded-md border border-border bg-background px-2.5 py-1.5 text-xs outline-none focus:ring-1 focus:ring-ring"
+          />
+          <Button
+            type="button"
+            size="sm"
+            className="h-7 gap-1 text-xs"
+            aria-label="Impor dari mount"
+            disabled={att.uploading || !mountVal.trim()}
+            onClick={submitMount}
+          >
+            {att.uploading ? (
+              <Loader2 className="size-3.5 animate-spin" />
+            ) : (
+              <HardDrive className="size-3.5" />
+            )}
+            Impor
+          </Button>
+        </div>
+      ) : null}
+
       {att.files.length > 0 ? (
         <ul className="mt-1.5 space-y-1">
           {att.files.map((f) => (
             <li
               key={f.id}
               data-ai-attach-chip={f.name}
+              data-ai-attach-source={f.source ?? "upload"}
               className="inline-flex max-w-full items-center gap-1.5 rounded-md border border-border bg-muted/40 pl-2 pr-1 py-0.5 text-xs"
+              title={f.origin ? `${f.origin}` : f.name}
             >
-              <FileText className="size-3.5 shrink-0 text-primary" />
+              <ChipIcon source={f.source} />
               <span className="truncate max-w-[220px]" title={f.name}>
                 {f.name}
               </span>
               <span className="shrink-0 text-muted-foreground">
                 {f.kind}
                 {f.chars ? ` · ${f.chars.toLocaleString("id-ID")} kr` : ""}
+                {f.source === "cloud" ? " · cloud" : f.source === "mount" ? " · mount" : ""}
               </span>
               <button
                 type="button"

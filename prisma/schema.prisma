@@ -627,6 +627,11 @@ model AiAttachment {
   // Hasil ekstraksi (sudah di-cap saat upload).
   text      String   @default("")
   chars     Int      @default(0)
+  // Asal lampiran: upload (default) | cloud (URL) | mount (path server).
+  // Opsional agar baris lama (sebelum Task 25) tetap terbaca null.
+  source    String?
+  // URL cloud / path mount asal — ditampilkan kembali di chip UI.
+  origin    String?
   createdAt DateTime @default(now())
 
   @@index([userId, createdAt])
