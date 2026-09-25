@@ -261,3 +261,105 @@ export async function importFromMount(rawPath: string): Promise<ImportedFile> {
     origin: p,
   };
 }
+
+// ── File explorer mount (untuk modal lampiran) ────────────────────────
+
+export interface MountEntry {
+  name: string;
+  /** Path absolut asli (siap dikirim balik untuk impor/navigasi). */
+  path: string;
+  dir: boolean;
+  size: number;
+  ext: string;
+}
+
+export interface MountDirListing {
+  /** Path folder yang dibuka (bukan root). */
+  path: string;
+  /** Folder induk yang masih diizinkan — null bila sudah paling atas. */
+  parent: string | null;
+  entries: MountEntry[];
+}
+
+/** Realpath semua root yang valid (untuk daftar awal explorer). */
+export async function mountRootList(): Promise<
+  { path: string; name: string }[]
+> {
+  const out: { path: string; name: string }[] = [];
+  for (const r of mountRoots()) {
+    const real = await fs.realpath(r).catch(() => null);
+    if (!real) continue;
+    const st = await fs.stat(real).catch(() => null);
+    if (!st?.isDirectory()) continue;
+    out.push({ path: real, name: path.basename(real) || real });
+  }
+  return out;
+}
+
+const MAX_ENTRIES_PER_DIR = 500;
+
+/** Daftar isi folder di dalam root mount (urut: folder dulu, lalu nama). */
+export async function listMount(rawPath: string): Promise<MountDirListing> {
+  const roots = await mountRootList();
+  if (!roots.length) {
+    throw new ImportError(
+      "Impor dari mount belum dikonfigurasi di server (AI_MOUNT_ROOTS)",
+      501
+    );
+  }
+  const p = (rawPath || "").trim();
+  if (!p.startsWith("/")) {
+    throw new ImportError("Gunakan path absolut folder", 400);
+  }
+  if (p.split("/").includes("..")) {
+    throw new ImportError("Path tidak boleh memuat '..'", 403);
+  }
+
+  const real = await fs.realpath(p).catch(() => null);
+  if (!real) throw new ImportError(`Folder tidak ditemukan: ${p}`, 404);
+  const root = roots.find((r) => real === r.path || real.startsWith(r.path + "/"));
+  if (!root) {
+    throw new ImportError(
+      `Di luar folder materi yang diizinkan (${roots.map((r) => r.path).join(", ")})`,
+      403
+    );
+  }
+  const st = await fs.stat(real).catch(() => null);
+  if (!st?.isDirectory()) {
+    throw new ImportError("Path menunjuk berkas, bukan folder", 400);
+  }
+
+  const dirents = await fs.readdir(real, { withFileTypes: true });
+  const entries: MountEntry[] = [];
+  for (const d of dirents) {
+    const full = `${real}/${d.name}`;
+    if (d.isDirectory()) {
+      entries.push({ name: d.name, path: full, dir: true, size: 0, ext: "" });
+    } else if (d.isFile()) {
+      const s = await fs.stat(full).catch(() => null);
+      const name = d.name;
+      const ext = name.includes(".") ? name.split(".").pop()!.toLowerCase() : "";
+      entries.push({
+        name,
+        path: full,
+        dir: false,
+        size: s?.size ?? 0,
+        ext,
+      });
+    }
+    if (entries.length >= MAX_ENTRIES_PER_DIR) break;
+  }
+  entries.sort((a, b) =>
+    a.dir === b.dir ? a.name.localeCompare(b.name) : a.dir ? -1 : 1
+  );
+
+  const parent = path.dirname(real);
+  return {
+    path: real,
+    parent:
+      parent === root.path || parent.startsWith(root.path + "/")
+        ? parent
+        : null,
+    entries,
+  };
+}

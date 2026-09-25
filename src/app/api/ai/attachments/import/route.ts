@@ -2,7 +2,13 @@ import { NextRequest, NextResponse } from "next/server";
 import { requireUser } from "@/lib/session";
 import { db } from "@/lib/db";
 import { extractText } from "@/lib/ai-extract";
-import { ImportError, importFromCloud, importFromMount } from "@/lib/ai-import";
+import {
+  ImportError,
+  importFromCloud,
+  importFromMount,
+  listMount,
+  mountRootList,
+} from "@/lib/ai-import";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -18,6 +24,27 @@ export const maxDuration = 60;
 // (source "cloud"/"mount", origin menyimpan URL/path asal).
 // Response: { attachment: { id, name, kind, chars, source, origin } }.
 // ─────────────────────────────────────────────────────────────────────
+
+export async function GET(req: NextRequest) {
+  const user = await requireUser().catch(() => null);
+  if (!user) {
+    return NextResponse.json({ error: "UNAUTHORIZED" }, { status: 401 });
+  }
+  try {
+    const raw = req.nextUrl.searchParams.get("path") ?? "";
+    if (!raw) {
+      const roots = await mountRootList();
+      return NextResponse.json({ roots });
+    }
+    const listing = await listMount(raw);
+    return NextResponse.json(listing);
+  } catch (e) {
+    if (e instanceof ImportError) {
+      return NextResponse.json({ error: e.message }, { status: e.status });
+    }
+    return NextResponse.json({ error: "Gagal membaca folder" }, { status: 500 });
+  }
+}
 
 export async function POST(req: NextRequest) {
   const user = await requireUser().catch(() => null);
