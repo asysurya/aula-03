@@ -31,7 +31,7 @@ import {
 import { resolveMime } from "@/lib/file-constants";
 import { ImportError, type ImportedFile } from "@/lib/ai-import";
 
-const MAX_IMPORT_SIZE = 4 * 1024 * 1024; // 4 MB — sama dengan upload/cloud/mount
+const MAX_IMPORT_SIZE = 100 * 1024 * 1024; // 100 MB — sama dengan upload/cloud/mount & lampiran chat
 
 export interface ImportUser {
   id: string;
@@ -89,7 +89,7 @@ export async function importFromStorageFile(
   }
 
   if (file.size > MAX_IMPORT_SIZE) {
-    throw new ImportError("Berkas terlalu besar (maks 4 MB)", 413);
+    throw new ImportError("Berkas terlalu besar (maks 100 MB)", 413);
   }
 
   const data = await getFile(file.storageKey);
@@ -100,7 +100,7 @@ export async function importFromStorageFile(
     );
   }
   if (data.bytes.length > MAX_IMPORT_SIZE) {
-    throw new ImportError("Berkas terlalu besar (maks 4 MB)", 413);
+    throw new ImportError("Berkas terlalu besar (maks 100 MB)", 413);
   }
 
   // Nama folder untuk keterangan asal (best-effort).
@@ -231,7 +231,7 @@ export async function importFromMega(
     );
   }
   if (stat.size > MAX_IMPORT_SIZE) {
-    throw new ImportError("Berkas terlalu besar (maks 4 MB)", 413);
+    throw new ImportError("Berkas terlalu besar (maks 100 MB)", 413);
   }
 
   const buf = await megaDownload(accountLike, nodeId);
@@ -242,7 +242,7 @@ export async function importFromMega(
     );
   }
   if (buf.length > MAX_IMPORT_SIZE) {
-    throw new ImportError("Berkas terlalu besar (maks 4 MB)", 413);
+    throw new ImportError("Berkas terlalu besar (maks 100 MB)", 413);
   }
 
   return {

@@ -13,8 +13,8 @@
 import { promises as fs } from "fs";
 import path from "path";
 
-const MAX_IMPORT_SIZE = 4 * 1024 * 1024; // 4 MB — sama dengan upload
-const CLOUD_TIMEOUT_MS = 20_000;
+const MAX_IMPORT_SIZE = 100 * 1024 * 1024; // 100 MB — sama dengan upload & lampiran chat
+const CLOUD_TIMEOUT_MS = 120_000; // 2 menit — unduhan 100 MB di tautan lambat
 
 /** Galat impor dengan kode HTTP untuk endpoint. */
 export class ImportError extends Error {
@@ -163,14 +163,14 @@ export async function importFromCloud(rawUrl: string): Promise<ImportedFile> {
   }
   const declared = Number(res.headers.get("content-length") || 0);
   if (declared > MAX_IMPORT_SIZE) {
-    throw new ImportError("Berkas terlalu besar (maks 4 MB)", 413);
+    throw new ImportError("Berkas terlalu besar (maks 100 MB)", 413);
   }
   const ab = await res.arrayBuffer().catch(() => null);
   if (!ab || ab.byteLength === 0) {
     throw new ImportError("Sumber kosong / tidak terbaca", 502);
   }
   if (ab.byteLength > MAX_IMPORT_SIZE) {
-    throw new ImportError("Berkas terlalu besar (maks 4 MB)", 413);
+    throw new ImportError("Berkas terlalu besar (maks 100 MB)", 413);
   }
   const mime = (res.headers.get("content-type") || "").split(";")[0].trim();
   return {
@@ -246,7 +246,7 @@ export async function importFromMount(rawPath: string): Promise<ImportedFile> {
     throw new ImportError(`Bukan berkas biasa / tidak ditemukan: ${p}`, 404);
   }
   if (st.size > MAX_IMPORT_SIZE) {
-    throw new ImportError("Berkas terlalu besar (maks 4 MB)", 413);
+    throw new ImportError("Berkas terlalu besar (maks 100 MB)", 413);
   }
   if (st.size === 0) {
     throw new ImportError("Berkas kosong", 400);

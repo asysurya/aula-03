@@ -21,7 +21,7 @@ export const maxDuration = 60;
 // POST /api/ai/attachments/import — impor LAMPIRAN MATERI dari:
 //   • cloud: body JSON { "url": "https://…" } — tautan langsung maupun
 //     tautan berbagi Google Drive/Dropbox/OneDrive/GitHub; diunduh
-//     server-side (maks 4 MB, timeout 20 dtk).
+//     server-side (maks 100 MB, timeout 120 dtk).
 //   • mount: body JSON { "path": "/mnt/aula-materi/…" } — berkas di
 //     folder server yang di-mount, dibatasi env AI_MOUNT_ROOTS.
 //   • storage: body JSON { "fileId": "…" } — berkas yang SUDAH ada di

@@ -12,6 +12,16 @@
 const MAX_TEXT_PER_FILE = 150_000; // karakter
 const MAX_ZIP_ENTRIES = 40;
 const MAX_ZIP_ENTRY_BYTES = 400_000;
+// Guard memori: berkas teks raksasa (batas lampiran 100 MB) cukup
+// didekode dari bagian awal — hasilnya di-cap ke MAX_TEXT_PER_FILE
+// karakter, jadi isi setelah batas ini tidak pernah terpakai.
+const TEXT_DECODE_LIMIT = 4 * 1024 * 1024;
+
+/** Decode utf8 dengan guard memori untuk berkas teks raksasa. */
+function decodeText(buf: Buffer): string {
+  const part = buf.length > TEXT_DECODE_LIMIT ? buf.subarray(0, TEXT_DECODE_LIMIT) : buf;
+  return part.toString("utf8");
+}
 
 export interface ExtractResult {
   kind: "PDF" | "DOCX" | "XLSX" | "ZIP" | "Teks" | "Biner";
@@ -131,14 +141,16 @@ export async function extractText(
   if (ext === "zip" || m === "application/zip" || m === "application/x-zip-compressed") {
     try {
       const { unzipSync, strFromU8 } = await import("fflate");
-      const entries = unzipSync(new Uint8Array(buf));
+      // Filter originalSize = anti "zip bomb": entri yang setelah
+      // didekompresi melebihi MAX_ZIP_ENTRY_BYTES TIDAK didekompresi
+      // sama sekali (batas 100 MB × rasio kompresi raksasa bisa
+      // meledakkan memori bila semua entri diprosah).
+      const entries = unzipSync(new Uint8Array(buf), {
+        filter: (f) => f.originalSize <= MAX_ZIP_ENTRY_BYTES,
+      });
       const names = Object.keys(entries).slice(0, MAX_ZIP_ENTRIES);
-      const parts: string[] = [`[arsip ZIP berisi ${Object.keys(entries).length} berkas]`];
+      const parts: string[] = [`[arsip ZIP berisi ${Object.keys(entries).length} berkas terbaca]`];
       for (const n of names) {
-        if (entries[n].length > MAX_ZIP_ENTRY_BYTES) {
-          parts.push(`--- ${n} (terlalu besar, dilewati) ---`);
-          continue;
-        }
         const e = extOf(n);
         if (TEXT_EXTS.has(e)) {
           try {
@@ -160,11 +172,17 @@ export async function extractText(
   if (ext === "epub" || m === "application/epub+zip") {
     try {
       const { unzipSync, strFromU8 } = await import("fflate");
-      const entries = unzipSync(new Uint8Array(buf));
+      // Anti zip-bomb + hemat memori: hanya dekompresi berkas xhtml/html
+      // yang ukuran aslinya wajar.
+      const entries = unzipSync(new Uint8Array(buf), {
+        filter: (f) =>
+          (f.name.endsWith(".xhtml") ||
+            f.name.endsWith(".html") ||
+            f.name.endsWith(".htm")) &&
+          f.originalSize <= MAX_ZIP_ENTRY_BYTES,
+      });
       const parts: string[] = [];
       for (const n of Object.keys(entries).slice(0, MAX_ZIP_ENTRIES)) {
-        if (!n.endsWith(".xhtml") && !n.endsWith(".html") && !n.endsWith(".htm")) continue;
-        if (entries[n].length > MAX_ZIP_ENTRY_BYTES) continue;
         const html = strFromU8(entries[n]);
         parts.push(html.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim());
       }
@@ -176,13 +194,13 @@ export async function extractText(
 
   // ── Teks langsung ──
   if (TEXT_EXTS.has(ext) || m.startsWith("text/") || m === "application/json") {
-    const text = buf.toString("utf8");
+    const text = decodeText(buf);
     return { kind: "Teks", text: cap(text) };
   }
 
   // ── Fallback: coba deteksi teks ──
   if (looksTextual(buf)) {
-    return { kind: "Teks", text: cap(buf.toString("utf8")) };
+    return { kind: "Teks", text: cap(decodeText(buf)) };
   }
 
   return {

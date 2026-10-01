@@ -582,3 +582,51 @@ export async function uploadAnswerFileAction(
 
   return ok({ file: cloudFile });
 }
+
+// ───────────────────────── 8. Lampiran materi AI ─────────────────────────
+// Sama dengan POST /api/ai/attachments, tapi dipanggil dari jalur chunked
+// (/api/upload/complete) untuk berkas besar (≤ 100 MB, sama dengan lampiran
+// chat). File TIDAK disimpan ke cloud — isinya di-extract teksnya lalu
+// disimpan ke AiAttachment (persis perilaku route aslinya).
+
+export async function uploadAiAttachmentAction(
+  user: SessionUser,
+  file: UploadBytes
+): Promise<ActionResult> {
+  file.mimetype = resolveMime(file.name, file.mimetype);
+  if (file.size === 0) return fail("FILE_EMPTY", 400);
+  if (file.size > MAX_FILE_SIZE) {
+    return fail(
+      `Berkas terlalu besar (maks ${Math.round(
+        MAX_FILE_SIZE / 1024 / 1024
+      )} MB): ${file.name}`,
+      413
+    );
+  }
+
+  const { extractText } = await import("@/lib/ai-extract");
+  const { kind, text } = await extractText(file.name, file.mimetype, file.bytes);
+
+  const row = await db.aiAttachment.create({
+    data: {
+      userId: user.id,
+      name: file.name || "berkas",
+      mime: file.mimetype || "",
+      size: file.size,
+      kind,
+      text,
+      chars: text.length,
+    },
+    select: { id: true, name: true, kind: true, chars: true },
+  });
+
+  return ok({
+    attachment: {
+      id: row.id,
+      name: row.name,
+      kind: row.kind,
+      chars: row.chars,
+      note: row.chars === 0 ? "teks tidak terbaca (berkas biner)" : undefined,
+    },
+  });
+}

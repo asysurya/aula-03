@@ -64,6 +64,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { FileIcon } from "@/components/cloud/file-icon";
 import { MegaLogo } from "@/components/cloud/mega-logo";
 import { mimetypeFromName, mimeToIcon } from "@/lib/cloud-format";
+import { uploadSmart } from "@/lib/upload-client";
 import { cn } from "@/lib/utils";
 
 export interface AiAttachFileMeta {
@@ -80,11 +81,22 @@ export interface AiAttachFileMeta {
   origin?: string;
 }
 
+/** Batas ukuran lampiran — SAMA dengan lampiran chat (100 MB). */
+const MAX_FILE_MB = 100;
+
+export interface AiAttachProgress {
+  name: string;
+  percent: number;
+  label: string;
+}
+
 export interface AiAttachmentsState {
   files: AiAttachFileMeta[];
   text: string;
   textOpen: boolean;
   uploading: boolean;
+  /** Progres unggah berkas aktif (null bila tidak sedang unggah). */
+  progress: AiAttachProgress | null;
   setText: (v: string) => void;
   setTextOpen: (v: boolean) => void;
   pickFiles: (fl: FileList | null) => Promise<void>;
@@ -105,6 +117,7 @@ export function useAiAttachments(): AiAttachmentsState {
   const [text, setText] = useState("");
   const [textOpen, setTextOpen] = useState(false);
   const [uploading, setUploading] = useState(false);
+  const [progress, setProgress] = useState<AiAttachProgress | null>(null);
 
   const pickFiles = useCallback(async (fl: FileList | null) => {
     if (!fl || fl.length === 0) return;
@@ -113,23 +126,38 @@ export function useAiAttachments(): AiAttachmentsState {
     const added: AiAttachFileMeta[] = [];
     try {
       for (const f of list) {
-        if (f.size > 4 * 1024 * 1024) {
-          toast.error(`"${f.name}" terlalu besar (maks 4 MB)`);
+        if (f.size > MAX_FILE_MB * 1024 * 1024) {
+          toast.error(`"${f.name}" terlalu besar (maks ${MAX_FILE_MB} MB)`);
           continue;
         }
-        const fd = new FormData();
-        fd.append("file", f);
         try {
-          const res = await fetch("/api/ai/attachments", {
-            method: "POST",
-            body: fd,
+          // SAMA dengan lampiran chat (uploadSmart): berkas kecil dikirim
+          // langsung, berkas besar dipecah chunk (±4 MB) supaya lolos
+          // batas body serverless — progres dilaporkan per berkas.
+          const res = await uploadSmart<{
+            attachment?: AiAttachFileMeta;
+            error?: string;
+          }>(f, { kind: "ai-attachment" }, {
+            onProgress: (p) => {
+              setProgress(
+                p.phase === "done"
+                  ? null
+                  : {
+                      name: f.name,
+                      percent: p.percent,
+                      label:
+                        p.phase === "finalizing"
+                          ? "Memproses & membaca teks…"
+                          : "Mengunggah…",
+                    }
+              );
+            },
           });
-          const json = await res.json().catch(() => null);
-          if (!res.ok || !json?.attachment?.id) {
-            toast.error(json?.error ?? `Gagal melampirkan "${f.name}"`);
+          if (!res.ok || !res.json?.attachment?.id) {
+            toast.error(res.json?.error ?? `Gagal melampirkan "${f.name}"`);
             continue;
           }
-          added.push(json.attachment as AiAttachFileMeta);
+          added.push(res.json.attachment);
         } catch {
           toast.error(`Gagal melampirkan "${f.name}" — coba lagi.`);
         }
@@ -149,6 +177,7 @@ export function useAiAttachments(): AiAttachmentsState {
       }
     } finally {
       setUploading(false);
+      setProgress(null);
     }
   }, []);
 
@@ -231,6 +260,7 @@ export function useAiAttachments(): AiAttachmentsState {
     text,
     textOpen,
     uploading,
+    progress,
     setText,
     setTextOpen,
     pickFiles,
@@ -1108,6 +1138,23 @@ export function AiAttachments({
         ) : null}
       </div>
 
+      {att.progress ? (
+        <div
+          data-ai-upload-progress="1"
+          role="status"
+          className="mt-1.5 flex items-center gap-2 rounded-md border border-border bg-muted/40 px-2.5 py-1.5 text-xs text-muted-foreground"
+        >
+          <Loader2 className="size-3.5 shrink-0 animate-spin" />
+          <span className="max-w-[220px] truncate font-medium text-foreground">
+            {att.progress.name}
+          </span>
+          <span>{att.progress.label}</span>
+          <span className="ml-auto tabular-nums font-medium text-foreground">
+            {att.progress.percent}%
+          </span>
+        </div>
+      ) : null}
+
       {att.files.length > 0 ? (
         <ul className="mt-1.5 space-y-1">
           {att.files.map((f) => (
@@ -1231,7 +1278,11 @@ export function AiAttachments({
                 </span>
                 <span>
                   Format apa pun (PDF, DOCX, XLSX, ZIP, EPUB, teks, kode,
-                  gambar…) — maks 4 MB per berkas
+                  gambar…) — maks 100 MB per berkas
+                </span>
+                <span className="text-[10px]">
+                  Berkas besar otomatis diunggah ter-pecah (seperti lampiran
+                  chat) — progresnya tampil di baris lampiran.
                 </span>
               </button>
             </TabsContent>
@@ -1282,7 +1333,7 @@ export function AiAttachments({
                 Mendukung tautan berbagi Google Drive, Dropbox, OneDrive,
                 berkas GitHub, maupun URL langsung. Pastikan izin berbagi
                 "siapa saja yang punya tautan". Berkas diunduh dan dibaca di
-                server (maks 4 MB).
+                server (maks 100 MB).
               </p>
             </TabsContent>
 

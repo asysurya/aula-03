@@ -10,6 +10,7 @@ import {
   uploadAvatarAction,
   uploadFormImageAction,
   uploadAnswerFileAction,
+  uploadAiAttachmentAction,
   type SessionUser,
   type UploadBytes,
 } from "@/lib/upload-actions";
@@ -21,7 +22,7 @@ import {
 //   uploadId: string,
 //   target: {
 //     kind: "cloud-file" | "submission" | "mega" | "attachment" | "avatar"
-//          | "form-image" | "answer-file",
+//          | "form-image" | "answer-file" | "ai-attachment",
 //     ...parameter khusus tujuan (folderId / assignmentId / note / dll.)
 //   }
 // }
@@ -64,6 +65,8 @@ const targetSchema = z.discriminatedUnion("kind", [
     folderId: z.string().min(1),
     questionId: z.string().min(1),
   }),
+  // Lampiran materi AI — logika sama dengan POST /api/ai/attachments.
+  z.object({ kind: z.literal("ai-attachment") }),
 ]);
 
 const completeSchema = z.object({
@@ -200,6 +203,9 @@ export async function POST(req: NextRequest) {
         folderId: target.folderId,
         questionId: target.questionId,
       });
+      break;
+    case "ai-attachment":
+      result = await uploadAiAttachmentAction(sessionUser, file);
       break;
     default:
       return NextResponse.json({ error: "UNKNOWN_TARGET" }, { status: 400 });

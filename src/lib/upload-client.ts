@@ -17,7 +17,8 @@ export type SmartUploadKind =
   | "attachment"
   | "avatar"
   | "form-image"
-  | "answer-file";
+  | "answer-file"
+  | "ai-attachment";
 
 export interface SmartUploadTarget {
   kind: SmartUploadKind;
@@ -161,6 +162,11 @@ function buildDirectRequest(file: File, target: SmartUploadTarget): { url: strin
         url: `/api/cloud/assignments/${encodeURIComponent(target.folderId)}/form/answer-file`,
         form,
       };
+    }
+    case "ai-attachment": {
+      // Lampiran materi AI — endpoint sama dengan upload langsung; tidak
+      // perlu parameter tambahan.
+      return { url: "/api/ai/attachments", form };
     }
     default:
       return { error: "Jenis upload tidak dikenal" };
