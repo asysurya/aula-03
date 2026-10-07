@@ -14,10 +14,15 @@ import {
   Trash2,
   Highlighter,
   TriangleAlert,
+  Volume2,
+  Square,
+  Loader2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { Slider } from "@/components/ui/slider";
+import { toast } from "sonner";
+import { cleanForTts, splitTtsChunks } from "@/lib/reader/tts-text";
 import {
   ANNO_COLORS,
   type AnnoTool,
@@ -61,6 +66,14 @@ export function ImageReader({
   const [color, setColor] = useState(ANNO_COLORS[0]);
   const [natural, setNatural] = useState<{ w: number; h: number } | null>(null);
   const [failed, setFailed] = useState(false);
+
+  // ── Task 29: Bacakan gambar dengan MODEL VISION ──
+  // Foto lembar soal / screenshot / materi bergambar dikirim ke
+  // /api/ai/vision/page (mode "image") → teks terparapi → TTS.
+  const [ttsPlaying, setTtsPlaying] = useState(false);
+  const [ttsLoading, setTtsLoading] = useState(false);
+  const ttsStop = useRef(false);
+  const visionText = useRef<string | null>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
   const stageRef = useRef<HTMLDivElement>(null);
   const anno = useAnnotations(storageKey);
@@ -192,6 +205,99 @@ export function ImageReader({
     setContrast(100);
   }, []);
 
+  // Reset bacaan saat file berganti.
+  useEffect(() => {
+    ttsStop.current = true;
+    if (typeof window !== "undefined") window.speechSynthesis?.cancel();
+    setTtsPlaying(false);
+    setTtsLoading(false);
+    visionText.current = null;
+  }, [url]);
+
+  useEffect(() => {
+    return () => {
+      ttsStop.current = true;
+      if (typeof window !== "undefined") window.speechSynthesis?.cancel();
+    };
+  }, []);
+
+  const toggleTts = useCallback(async () => {
+    if (ttsPlaying || ttsLoading) {
+      ttsStop.current = true;
+      window.speechSynthesis?.cancel();
+      setTtsPlaying(false);
+      setTtsLoading(false);
+      return;
+    }
+    try {
+      ttsStop.current = false;
+      let text = visionText.current;
+      if (text === null) {
+        setTtsLoading(true);
+        toast.info("Membaca gambar dengan model vision…", {
+          description: "Teks pada gambar diekstrak lalu dibacakan.",
+        });
+        // Ambil gambar sebagai data URL (unduh blob → base64).
+        const blob = await (await fetch(url)).blob();
+        const dataUrl: string = await new Promise((resolve, reject) => {
+          const r = new FileReader();
+          r.onload = () => resolve(String(r.result));
+          r.onerror = () => reject(new Error("Gagal membaca berkas gambar"));
+          r.readAsDataURL(blob);
+        });
+        const res = await fetch("/api/ai/vision/page", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ image: dataUrl, mode: "image" }),
+        });
+        const json = (await res.json().catch(() => null)) as {
+          text?: string;
+          error?: string;
+        } | null;
+        if (!res.ok || !json?.text) {
+          throw new Error(json?.error ?? "Ekstraksi vision gagal");
+        }
+        text = String(json.text);
+        visionText.current = text;
+      }
+      setTtsLoading(false);
+      const chunks = splitTtsChunks(cleanForTts(text));
+      if (!chunks.length) {
+        toast.info("Gambar ini tidak memuat teks yang bisa dibacakan.");
+        return;
+      }
+      setTtsPlaying(true);
+      let idx = 0;
+      const speakNext = () => {
+        if (ttsStop.current) {
+          setTtsPlaying(false);
+          return;
+        }
+        if (idx >= chunks.length) {
+          setTtsPlaying(false);
+          return;
+        }
+        const u = new SpeechSynthesisUtterance(chunks[idx++]);
+        const id = window.speechSynthesis
+          .getVoices()
+          .find((v) => v.lang?.toLowerCase().startsWith("id"));
+        if (id) u.voice = id;
+        u.lang = id?.lang ?? "id-ID";
+        u.rate = 1;
+        u.onend = speakNext;
+        u.onerror = () => setTtsPlaying(false);
+        window.speechSynthesis.speak(u);
+      };
+      speakNext();
+    } catch (e) {
+      setTtsLoading(false);
+      setTtsPlaying(false);
+      toast.error("Gagal membacakan gambar", {
+        description: String((e as Error)?.message ?? ""),
+      });
+    }
+  }, [ttsPlaying, ttsLoading, url]);
+
   const canPan = tool === "none";
 
   if (failed) {
@@ -257,6 +363,36 @@ export function ImageReader({
           title="Atur kecerahan & kontras"
         >
           <Sun className="size-4" />
+        </Button>
+        {/* Task 29: bacakan teks pada gambar (OCR model vision → TTS). */}
+        <Button
+          variant={ttsPlaying || ttsLoading ? "secondary" : "outline"}
+          size="icon"
+          className="h-9 w-9"
+          onClick={() => void toggleTts()}
+          disabled={ttsLoading}
+          title={
+            ttsLoading
+              ? "Membaca gambar dengan model vision…"
+              : ttsPlaying
+                ? "Hentikan bacaan"
+                : "Bacakan teks pada gambar (model vision)"
+          }
+          aria-label={
+            ttsLoading
+              ? "Membaca gambar dengan model vision"
+              : ttsPlaying
+                ? "Hentikan bacaan"
+                : "Bacakan gambar"
+          }
+        >
+          {ttsLoading ? (
+            <Loader2 className="size-4 animate-spin" />
+          ) : ttsPlaying ? (
+            <Square className="size-4" />
+          ) : (
+            <Volume2 className="size-4" />
+          )}
         </Button>
         {/* Anotasi */}
         <Button

@@ -7,110 +7,189 @@ import {
   PROVIDER_IDS,
   maskKey,
   providerLabel,
-  resolveAiConfig,
-  type AiSettingInput,
 } from "@/lib/ai-providers";
+import {
+  AI_CATEGORIES,
+  isAiCategory,
+  loadRawChain,
+  loadUserChainEntries,
+  MAX_CHAIN_ENTRIES,
+  resolveChain,
+  type AiCategory,
+  type ChainEntryStored,
+} from "@/lib/ai-config-chain";
 
 // ─────────────────────────────────────────────────────────────────────
-// GET /api/ai/settings
-// Status pengaturan Teman AI milik user + info default admin.
-// Kunci asli TIDAK PERNAH dikirim — hanya hasKey + keyMask.
+// GET /api/ai/settings — status pengaturan AI milik user.
+// PUT /api/ai/settings — simpan pengaturan.
+//
+// Task 29 — format BARU (per kategori + rantai fallback):
+//   PUT { category: "chat"|"builder"|"vision",
+//        entries: [ { provider, baseUrl?, model?, apiKey?, clearKey? }, … ],
+//        followDefault?: boolean }
+//   entries kosong / followDefault → kategori ikut default admin.
+//   Urutan array = urutan prioritas fallback.
+//
+// Format LAMA tetap diterima (kompatibilitas UI lama & tes):
+//   PUT { provider, baseUrl?, model?, apiKey?, clearKey? }
+//   → menulis AiUserSetting kategori "chat" persis perilaku lama
+//     (provider "" = hapus row = ikut default admin).
+//
+// Kunci asli TIDAK PERNAH dikirim — hanya hasKey + keyMask per entri.
 // ─────────────────────────────────────────────────────────────────────
 
-async function loadUserSetting(userId: string) {
-  return db.aiUserSetting.findUnique({ where: { userId } });
+function providerEnum() {
+  return z.enum(["", ...PROVIDER_IDS] as [string, ...string[]]);
 }
 
-async function loadAdminDefault(): Promise<AiSettingInput | null> {
-  const row = await db.appSetting.findUnique({ where: { key: "ai.default" } });
-  if (!row) return null;
-  try {
-    const parsed = JSON.parse(row.value) as {
-      provider?: string;
-      baseUrl?: string | null;
-      apiKeyEnc?: string | null;
-      model?: string | null;
-    };
-    return {
-      provider: parsed.provider ?? "",
-      baseUrl: parsed.baseUrl ?? null,
-      apiKey: decryptSecret(parsed.apiKeyEnc ?? null),
-      model: parsed.model ?? null,
-    };
-  } catch {
-    return null;
-  }
+const baseUrlSchema = z
+  .string()
+  .trim()
+  .max(300)
+  .refine((v) => v === "" || /^https?:\/\/.+/i.test(v), "Base URL harus mulai http:// atau https://");
+
+const entrySchema = z.object({
+  provider: providerEnum(),
+  baseUrl: baseUrlSchema.optional().nullable(),
+  model: z.string().trim().max(200).optional().nullable(),
+  apiKey: z.string().max(400).optional().nullable(),
+  clearKey: z.boolean().optional(),
+});
+
+const putSchema = z.union([
+  // Format baru: per kategori.
+  z.object({
+    category: z.enum(["chat", "builder", "vision"]),
+    entries: z.array(entrySchema).max(MAX_CHAIN_ENTRIES).optional(),
+    followDefault: z.boolean().optional(),
+  }),
+  // Format lama: chat tunggal.
+  z.object({
+    provider: providerEnum(),
+    baseUrl: baseUrlSchema.optional().nullable(),
+    model: z.string().trim().max(200).optional().nullable(),
+    apiKey: z.string().max(400).optional().nullable(),
+    clearKey: z.boolean().optional(),
+  }),
+]);
+
+// ── GET ───────────────────────────────────────────────────────────────
+
+interface EntryView {
+  provider: string;
+  baseUrl: string | null;
+  model: string | null;
+  hasKey: boolean;
+  keyMask: string | null;
+}
+
+function entryView(e: ChainEntryStored): EntryView {
+  const key = decryptSecret(e.apiKeyEnc ?? null);
+  return {
+    provider: e.provider,
+    baseUrl: e.baseUrl ?? null,
+    model: e.model ?? null,
+    hasKey: !!key,
+    keyMask: maskKey(key),
+  };
 }
 
 export async function GET() {
   const user = await requireUser().catch(() => null);
   if (!user) return NextResponse.json({ error: "UNAUTHORIZED" }, { status: 401 });
 
-  const [row, adminDefault] = await Promise.all([
-    loadUserSetting(user.id),
-    loadAdminDefault(),
-  ]);
+  const categories: Record<string, unknown> = {};
+  for (const cat of AI_CATEGORIES) {
+    const raw = await loadRawChain(user.id, cat);
+    const chain = await resolveChain(user.id, cat);
+    categories[cat] = {
+      // Enri milik user (kosong = ikut default admin).
+      entries: raw.source === "user" ? raw.entries.map(entryView) : [],
+      followsDefault: raw.source !== "user",
+      // Config yang benar-benar aktif utk kategori ini.
+      active: chain.length
+        ? {
+            provider: chain[0].provider,
+            baseUrl: chain[0].baseUrl,
+            model: chain[0].model,
+            source: chain[0].source,
+          }
+        : null,
+      // Apakah admin punya default utk kategori ini.
+      adminAvailable: raw.source === "admin",
+    };
+  }
 
-  const userKey = decryptSecret(row?.apiKeyEnc ?? null);
-
-  const userSetting: AiSettingInput | null = row
-    ? {
-        provider: row.provider,
-        baseUrl: row.baseUrl,
-        apiKey: userKey,
-        model: row.model,
-      }
-    : null;
-  const active = resolveAiConfig(userSetting, adminDefault);
+  // Tampilan legacy (kompatibilitas UI lama) = kategori chat.
+  const chatRaw = await loadRawChain(user.id, "chat");
+  const chatChain = await resolveChain(user.id, "chat");
+  const firstUserEntry =
+    chatRaw.source === "user" ? chatRaw.entries[0] ?? null : null;
+  const userKey = decryptSecret(firstUserEntry?.apiKeyEnc ?? null);
 
   return NextResponse.json({
     user: {
-      provider: row?.provider ?? "",
-      baseUrl: row?.baseUrl ?? null,
-      model: row?.model ?? null,
+      provider: firstUserEntry?.provider ?? "",
+      baseUrl: firstUserEntry?.baseUrl ?? null,
+      model: firstUserEntry?.model ?? null,
       hasKey: !!userKey,
       keyMask: maskKey(userKey),
     },
     default: {
-      available: !!resolveAiConfig(null, adminDefault),
-      provider: adminDefault?.provider ?? "",
-      model: adminDefault?.model ?? null,
-      sourceLabel: adminDefault?.provider
-        ? `default admin (${providerLabel(adminDefault.provider)})`
-        : "",
+      available: chatRaw.source === "admin",
+      provider:
+        chatRaw.source === "admin" ? chatRaw.entries[0]?.provider ?? "" : "",
+      model: chatRaw.source === "admin" ? chatRaw.entries[0]?.model ?? null : null,
+      sourceLabel:
+        chatRaw.source === "admin"
+          ? `default admin (${providerLabel(chatRaw.entries[0]?.provider ?? "")})`
+          : "",
     },
-    // Config yang benar-benar aktif (untuk badge di UI).
-    active: active
+    active: chatChain.length
       ? {
-          provider: active.provider,
-          baseUrl: active.baseUrl,
-          model: active.model,
-          source: active.source,
+          provider: chatChain[0].provider,
+          baseUrl: chatChain[0].baseUrl,
+          model: chatChain[0].model,
+          source: chatChain[0].source,
         }
       : null,
+    // Task 29: detail per kategori (chat/builder/vision).
+    categories,
   });
 }
 
-// ─────────────────────────────────────────────────────────────────────
-// PUT /api/ai/settings — simpan pengaturan milik user (BYOK).
-//   provider ""  = kembali ikut default admin (row dihapus).
-//   apiKey kosong/undefined = pertahankan kunci lama.
-//   clearKey = true → hapus kunci tersimpan.
-// ─────────────────────────────────────────────────────────────────────
+// ── PUT ───────────────────────────────────────────────────────────────
 
-const putSchema = z.object({
-  provider: z.enum(["", ...PROVIDER_IDS] as [string, ...string[]]),
-  baseUrl: z
-    .string()
-    .trim()
-    .max(300)
-    .refine((v) => v === "" || /^https?:\/\/.+/i.test(v), "Base URL harus mulai http:// atau https://")
-    .optional()
-    .nullable(),
-  model: z.string().trim().max(200).optional().nullable(),
-  apiKey: z.string().max(400).optional().nullable(),
-  clearKey: z.boolean().optional(),
-});
+/** Simpan entri kategori (merge kunci lama per indeks). */
+async function saveCategory(
+  userId: string,
+  category: AiCategory,
+  incoming: z.infer<typeof entrySchema>[]
+) {
+  const existing = await loadUserChainEntries(userId, category);
+  const entries: ChainEntryStored[] = incoming.slice(0, MAX_CHAIN_ENTRIES).map((e, i) => {
+    let apiKeyEnc: string | null = existing[i]?.apiKeyEnc ?? null;
+    if (e.clearKey) apiKeyEnc = null;
+    else if (e.apiKey && e.apiKey.length > 0) apiKeyEnc = encryptSecret(e.apiKey);
+    return {
+      provider: e.provider,
+      baseUrl: e.baseUrl && e.baseUrl.length > 0 ? e.baseUrl : null,
+      model: e.model && e.model.length > 0 ? e.model : null,
+      apiKeyEnc,
+    };
+  });
+
+  if (!entries.length) {
+    await db.aiCategoryConfig.deleteMany({ where: { userId, category } });
+    return { ok: true, followsDefault: true };
+  }
+  await db.aiCategoryConfig.upsert({
+    where: { userId_category: { userId, category } },
+    update: { entriesJson: JSON.stringify(entries) },
+    create: { userId, category, entriesJson: JSON.stringify(entries) },
+  });
+  return { ok: true, entries: entries.map(entryView) };
+}
 
 export async function PUT(req: NextRequest) {
   const user = await requireUser().catch(() => null);
@@ -129,13 +208,40 @@ export async function PUT(req: NextRequest) {
   }
   const d = parsed.data;
 
-  // Provider "" → ikut default admin: hapus row user.
+  // ── Format baru: per kategori + rantai fallback ──
+  if ("category" in d) {
+    const category = d.category as AiCategory;
+    if (!isAiCategory(category)) {
+      return NextResponse.json({ error: "Kategori tidak dikenal" }, { status: 400 });
+    }
+    const entries = d.entries ?? [];
+    // followDefault eksplisit / entri kosong → hapus row (ikut admin).
+    if (d.followDefault || !entries.length) {
+      await db.aiCategoryConfig.deleteMany({ where: { userId: user.id, category } });
+      return NextResponse.json({ ok: true, followsDefault: true });
+    }
+    // Validasi: entri wajib punya provider; non-ollama disarankan berkunci.
+    for (const e of entries) {
+      if (!e.provider) {
+        return NextResponse.json(
+          { error: "Setiap entri wajib memilih provider." },
+          { status: 400 }
+        );
+      }
+    }
+    const res = await saveCategory(user.id, category, entries);
+    return NextResponse.json(res);
+  }
+
+  // ── Format LAMA (chat tunggal) — perilaku persis versi sebelumnya ──
   if (!d.provider) {
+    // provider "" → ikut default admin: hapus row user (baru & lama).
+    await db.aiCategoryConfig.deleteMany({ where: { userId: user.id, category: "chat" } });
     await db.aiUserSetting.deleteMany({ where: { userId: user.id } });
     return NextResponse.json({ ok: true, followsDefault: true });
   }
 
-  const existing = await loadUserSetting(user.id);
+  const existing = await db.aiUserSetting.findUnique({ where: { userId: user.id } });
 
   // ── Resolusi kunci ──
   let apiKeyEnc: string | null = existing?.apiKeyEnc ?? null;
@@ -162,6 +268,8 @@ export async function PUT(req: NextRequest) {
       apiKeyEnc,
     },
   });
+  // Row kategori chat baru bisa menaunginya — hapus supaya tidak membayangi.
+  await db.aiCategoryConfig.deleteMany({ where: { userId: user.id, category: "chat" } });
 
   const key = decryptSecret(row.apiKeyEnc);
   return NextResponse.json({

@@ -2,10 +2,11 @@ import { NextRequest, NextResponse } from "next/server";
 import { requireUser } from "@/lib/session";
 import { db } from "@/lib/db";
 import { extractText } from "@/lib/ai-extract";
+import { makeVisionExtractor } from "@/lib/ai-vision";
 import { MAX_FILE_SIZE } from "@/lib/storage";
 
 export const runtime = "nodejs";
-export const maxDuration = 60;
+export const maxDuration = 300; // ekstraksi vision PDF scan per halaman
 
 // ─────────────────────────────────────────────────────────────────────
 // POST /api/ai/attachments — upload LAMPIRAN MATERI untuk fitur AI.
@@ -50,7 +51,9 @@ export async function POST(req: NextRequest) {
   }
 
   const buf = Buffer.from(await file.arrayBuffer());
-  const { kind, text } = await extractText(file.name, file.type, buf);
+  // Task 29: gambar & PDF hasil scan dibaca model vision (per halaman).
+  const vision = await makeVisionExtractor(user.id);
+  const { kind, text } = await extractText(file.name, file.type, buf, { vision });
 
   const row = await db.aiAttachment.create({
     data: {

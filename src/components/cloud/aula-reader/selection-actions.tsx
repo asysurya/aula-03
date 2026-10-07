@@ -9,6 +9,7 @@ import {
 } from "react";
 import { Volume2, Square, Copy, Highlighter } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { cleanForTts, splitTtsChunks } from "@/lib/reader/tts-text";
 
 // ─────────────────────────────────────────────────────────────────────────
 // Menu aksi teks terpilih (dipakai di seluruh Aula Reader).
@@ -98,15 +99,27 @@ export function useSelectionMenu({
       if (typeof window === "undefined" || !window.speechSynthesis) return;
       window.speechSynthesis.cancel();
       stopRef.current = false;
-      const u = new SpeechSynthesisUtterance(text);
+      // Task 29: rapikan dulu — rumus LaTeX, tabel, penanda footnote,
+      // simbol matematika → bentuk yang enak didengar.
+      const chunks = splitTtsChunks(cleanForTts(text));
+      if (!chunks.length) return;
       const v = pickIndonesianVoice();
-      if (v) u.voice = v;
-      u.lang = v?.lang ?? "id-ID";
-      u.rate = 1;
-      u.onend = () => setPlaying(false);
-      u.onerror = () => setPlaying(false);
+      let idx = 0;
+      const speakNext = () => {
+        if (stopRef.current || idx >= chunks.length) {
+          setPlaying(false);
+          return;
+        }
+        const u = new SpeechSynthesisUtterance(chunks[idx++]);
+        if (v) u.voice = v;
+        u.lang = v?.lang ?? "id-ID";
+        u.rate = 1;
+        u.onend = speakNext;
+        u.onerror = () => setPlaying(false);
+        window.speechSynthesis.speak(u);
+      };
       setPlaying(true);
-      window.speechSynthesis.speak(u);
+      speakNext();
     },
     []
   );

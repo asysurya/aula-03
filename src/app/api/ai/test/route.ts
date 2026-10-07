@@ -4,6 +4,7 @@ import { requireUser } from "@/lib/session";
 import { db } from "@/lib/db";
 import { decryptSecret } from "@/lib/crypto";
 import { chatEndpoint, cleanUpstreamDetail, resolveAiConfig, type AiSettingInput } from "@/lib/ai-providers";
+import { resolveChain } from "@/lib/ai-config-chain";
 
 export const runtime = "nodejs";
 export const maxDuration = 30;
@@ -77,6 +78,10 @@ const testSchema = z.object({
   // "admin" = tes default admin (panel Admin) — fallback kunci dari ai.default.
   // "builder" = tes default AI Builder — fallback kunci dari ai.builder.
   scope: z.enum(["user", "admin", "builder"]).optional(),
+  // Task 29 — tes entri rantai TERSIMPAN per kategori (index opsional;
+  // tanpa index = entri pertama / config aktif kategori itu).
+  category: z.enum(["chat", "builder", "vision"]).optional(),
+  index: z.number().int().min(0).max(5).optional(),
 });
 
 function testErrorMessage(status: number, detailRaw: string | null): string {
@@ -202,40 +207,19 @@ export async function POST(req: NextRequest) {
         { status: 400 }
       );
     }
+  } else if (d.category) {
+    // Task 29 — tes entri rantai tersimpan (kategori + index).
+    // Config diambil dari PENYIMPANAN (baseUrl & kunci tersimpan) — klien
+    // tidak bisa mengarahkan kunci admin ke URL lain (anti-eksfiltrasi).
+    tested = `chain ${d.category}${d.index !== undefined ? ` #${d.index + 1}` : ""}`;
+    const chain = await resolveChain(user.id, d.category);
+    const cfg = chain[d.index ?? 0] ?? null;
+    config = cfg;
   } else {
-    // Tes config aktif: milik user → default admin.
-    const [userRow, adminRow] = await Promise.all([
-      db.aiUserSetting.findUnique({ where: { userId: user.id } }),
-      db.appSetting.findUnique({ where: { key: "ai.default" } }),
-    ]);
-    let adminDefault: AiSettingInput | null = null;
-    if (adminRow) {
-      try {
-        const raw = JSON.parse(adminRow.value) as {
-          provider?: string;
-          baseUrl?: string | null;
-          apiKeyEnc?: string | null;
-          model?: string | null;
-        };
-        adminDefault = {
-          provider: raw.provider ?? "",
-          baseUrl: raw.baseUrl ?? null,
-          apiKey: decryptSecret(raw.apiKeyEnc ?? null),
-          model: raw.model ?? null,
-        };
-      } catch {
-        adminDefault = null;
-      }
-    }
-    const userSetting: AiSettingInput | null = userRow
-      ? {
-          provider: userRow.provider,
-          baseUrl: userRow.baseUrl,
-          apiKey: decryptSecret(userRow.apiKeyEnc),
-          model: userRow.model,
-        }
-      : null;
-    config = resolveAiConfig(userSetting, adminDefault);
+    // Tes config aktif: milik user → default admin (chain kategori chat).
+    tested = "config aktif";
+    const chain = await resolveChain(user.id, "chat");
+    config = chain[0] ?? null;
   }
 
   if (!config) {
@@ -244,7 +228,9 @@ export async function POST(req: NextRequest) {
       error:
         tested === "form"
           ? "Belum lengkap — provider, base URL, dan API key perlu diisi dulu (atau simpan dulu, lalu tes config aktif)."
-          : "Belum ada AI terpasang — isi pengaturan dulu.",
+          : tested.startsWith("chain")
+            ? `Belum ada config tersimpan untuk kategori ini (atau indeks di luar rantai) — ${tested}.`
+            : "Belum ada AI terpasang — isi pengaturan dulu.",
     });
   }
 

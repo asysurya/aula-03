@@ -21,6 +21,7 @@ import { toast } from "sonner";
 import { ANNO_COLORS, newId, useAnnotations } from "./annotations";
 import { copyTextToClipboard } from "./selection-actions";
 import { AiMarkdown } from "@/components/ai/ai-markdown";
+import { cleanForTts, splitTtsChunks } from "@/lib/reader/tts-text";
 
 // ─────────────────────────────────────────────────────────────────────────
 // Aula Reader — Teks / Markdown / kode.
@@ -64,6 +65,7 @@ export function TextReader({
   const [selTts, setSelTts] = useState(false);
   const bodyRef = useRef<HTMLDivElement>(null);
   const ttsStop = useRef(false);
+  const selTtsStop = useRef(false);
 
   const anno = useAnnotations(file.storageKey);
 
@@ -193,10 +195,12 @@ export function TextReader({
   }
 
   // TTS untuk TEKS YANG DISELEKSI (dipakai di bar stabilo).
+  // Task 29: dirapiikan dulu (rumus/tabel/footnote → bentuk terbaca).
   const speakSelection = useCallback(() => {
     if (!selRange || !text) return;
     if (selTts) {
       window.speechSynthesis.cancel();
+      selTtsStop.current = true;
       setSelTts(false);
       return;
     }
@@ -206,16 +210,27 @@ export function TextReader({
       setTtsPlaying(false);
     }
     const potongan = text.slice(selRange.start, selRange.end);
-    const u = new SpeechSynthesisUtterance(potongan);
-    const id = window.speechSynthesis
-      .getVoices()
-      .find((v) => v.lang?.toLowerCase().startsWith("id"));
-    if (id) u.voice = id;
-    u.lang = id?.lang ?? "id-ID";
-    u.onend = () => setSelTts(false);
-    u.onerror = () => setSelTts(false);
+    selTtsStop.current = false;
+    const chunks = splitTtsChunks(cleanForTts(potongan));
+    if (!chunks.length) return;
+    let idx = 0;
+    const speakNext = () => {
+      if (selTtsStop.current || idx >= chunks.length) {
+        setSelTts(false);
+        return;
+      }
+      const u = new SpeechSynthesisUtterance(chunks[idx++]);
+      const id = window.speechSynthesis
+        .getVoices()
+        .find((v) => v.lang?.toLowerCase().startsWith("id"));
+      if (id) u.voice = id;
+      u.lang = id?.lang ?? "id-ID";
+      u.onend = speakNext;
+      u.onerror = () => setSelTts(false);
+      window.speechSynthesis.speak(u);
+    };
     setSelTts(true);
-    window.speechSynthesis.speak(u);
+    speakNext();
   }, [selRange, text, selTts, ttsPlaying]);
 
   // Salin teks yang diseleksi.
@@ -227,6 +242,8 @@ export function TextReader({
   }, [selRange, text]);
 
   // TTS
+  // Task 29: teks dirapiikan dulu (LaTeX, tabel, penanda footnote,
+  // nomor halaman) → dibacakan per potongan kalimat.
   const toggleTts = useCallback(() => {
     if (ttsPlaying) {
       ttsStop.current = true;
@@ -238,18 +255,23 @@ export function TextReader({
     ttsStop.current = false;
     setTtsPlaying(true);
     // Potong per kalimat supaya mulai cepat & bisa dihentikan halus.
-    const sentences = text.replace(/\s+/g, " ").match(/[^.!?]+[.!?]*/g) ?? [text];
+    const chunks = splitTtsChunks(cleanForTts(text));
+    if (!chunks.length) {
+      setTtsPlaying(false);
+      return;
+    }
     let idx = 0;
     const speakNext = () => {
       if (ttsStop.current) return setTtsPlaying(false);
-      if (idx >= sentences.length) return setTtsPlaying(false);
-      const u = new SpeechSynthesisUtterance(sentences[idx++].trim());
+      if (idx >= chunks.length) return setTtsPlaying(false);
+      const u = new SpeechSynthesisUtterance(chunks[idx++]);
       const id = window.speechSynthesis
         .getVoices()
         .find((v) => v.lang?.toLowerCase().startsWith("id"));
       if (id) u.voice = id;
       u.lang = id?.lang ?? "id-ID";
       u.onend = speakNext;
+      u.onerror = () => setTtsPlaying(false);
       window.speechSynthesis.speak(u);
     };
     speakNext();
@@ -258,6 +280,7 @@ export function TextReader({
   useEffect(() => {
     return () => {
       ttsStop.current = true;
+      selTtsStop.current = true;
       if (typeof window !== "undefined") window.speechSynthesis?.cancel();
     };
   }, []);

@@ -2,13 +2,8 @@ import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { requireUser } from "@/lib/session";
 import { db } from "@/lib/db";
-import { decryptSecret } from "@/lib/crypto";
-import {
-  chatEndpoint,
-  providerErrorMessage,
-  resolveAiConfig,
-  type AiSettingInput,
-} from "@/lib/ai-providers";
+import { providerErrorMessage } from "@/lib/ai-providers";
+import { resolveChain, tryChatCompletion, summarizeFailures } from "@/lib/ai-config-chain";
 import {
   builderQuotaStatus,
   nextMondayJakarta,
@@ -24,8 +19,9 @@ import { resolveAttachmentContext } from "@/lib/ai-attachments";
 // AI menulis SATU dokumen HTML lengkap (CSS di <style>, JS di <script>)
 // yang langsung bisa dijalankan di pratinjau sandbox.
 //
-// Provider DIPISAH dari Teman AI: hanya membaca AppSetting "ai.builder"
-// (diatur admin di Admin Panel → tab AI Builder). Tidak ada BYOK user.
+// Provider DIPISAH dari Teman AI: hanya membaca default admin kategori
+// "builder" (fallbacks.builder → legacy "ai.builder"; diatur admin di
+// Admin Panel). Tidak ada BYOK user. Task 29: rantai fallback berurutan.
 //
 // KUOTA: 1 proyek = 1 sesi chat. Sesi BARU dicek kuota mingguan (default 5,
 // reset Senin 00:00 WIB — diatur admin, global + per orang). Sesi dicatat
@@ -203,34 +199,14 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  // ── Config aktif: HANYA default admin "ai.builder" (dipisah dari Teman AI) ──
-  const adminRow = await db.appSetting.findUnique({ where: { key: "ai.builder" } });
-  let adminDefault: AiSettingInput | null = null;
-  if (adminRow) {
-    try {
-      const raw = JSON.parse(adminRow.value) as {
-        provider?: string;
-        baseUrl?: string | null;
-        apiKeyEnc?: string | null;
-        model?: string | null;
-      };
-      adminDefault = {
-        provider: raw.provider ?? "",
-        baseUrl: raw.baseUrl ?? null,
-        apiKey: decryptSecret(raw.apiKeyEnc ?? null),
-        model: raw.model ?? null,
-      };
-    } catch {
-      adminDefault = null;
-    }
-  }
-
-  const config = resolveAiConfig(null, adminDefault);
-  if (!config) {
+  // ── Config chain kategori "builder": milik user (BYOK) → default admin ──
+  // (fallbacks.builder → legacy ai.builder)
+  const chain = await resolveChain(user.id, "builder");
+  if (!chain.length) {
     return NextResponse.json(
       {
         error:
-          "AI Builder belum diatur — hubungi admin untuk mengatur provider di Admin Panel → AI Builder.",
+          "AI Builder belum diatur — atur sendiri di Pengaturan AI (kategori Builder), atau hubungi admin untuk mengatur default.",
       },
       { status: 400 }
     );
@@ -295,64 +271,28 @@ export async function POST(req: NextRequest) {
   };
   req.signal?.addEventListener("abort", onClientAbort);
 
-  let upstream: Response;
-  try {
-    upstream = await fetch(chatEndpoint(config.baseUrl), {
-      method: "POST",
-      signal: controller.signal,
-      headers: {
-        "Content-Type": "application/json",
-        ...(config.apiKey ? { Authorization: `Bearer ${config.apiKey}` } : {}),
-      },
-      body: JSON.stringify({
-        model: config.model,
-        messages,
-        stream: true,
-        max_tokens: 8000,
-      }),
-    });
-  } catch {
-    clearTimeout(totalTimer);
-    clear(connectTimer);
-    clear(idleTimer);
-    req.signal?.removeEventListener("abort", onClientAbort);
-    const msg = timedOut
-      ? "Waktu tunggu habis — provider tidak merespons dalam waktu cukup. Coba lagi atau ganti model."
-      : "Gagal menghubungi server AI. Periksa koneksi internet.";
-    return NextResponse.json({ error: msg }, { status: 502 });
-  }
-
-  if (!upstream.ok) {
-    let detail: string | null = null;
-    try {
-      const errJson = await upstream.json().catch(() => null);
-      detail =
-        errJson?.error?.metadata?.raw ??
-        errJson?.error?.message ??
-        errJson?.message ??
-        null;
-      if (typeof detail !== "string") detail = null;
-    } catch {
-      /* abaikan */
+  let upstream: Response | null;
+  {
+    const attempt = await tryChatCompletion(
+      chain,
+      { messages, stream: true, max_tokens: 8000 },
+      { signal: controller.signal, timeoutMs: CONNECT_TIMEOUT_MS }
+    );
+    upstream = attempt.response;
+    if (!upstream || !upstream.body) {
+      clearTimeout(totalTimer);
+      clear(connectTimer);
+      clear(idleTimer);
+      req.signal?.removeEventListener("abort", onClientAbort);
+      const fails = summarizeFailures(attempt.failures);
+      const last = attempt.failures[attempt.failures.length - 1];
+      const msg =
+        `Semua config AI Builder gagal — ${fails}. ` +
+        (last?.status
+          ? providerErrorMessage(last.status, last.detail)
+          : "Gagal menghubungi server AI. Periksa koneksi internet.");
+      return NextResponse.json({ error: msg }, { status: 502 });
     }
-    clearTimeout(totalTimer);
-    clear(connectTimer);
-    clear(idleTimer);
-    req.signal?.removeEventListener("abort", onClientAbort);
-    return NextResponse.json(
-      { error: providerErrorMessage(upstream.status, detail) },
-      { status: 502 }
-    );
-  }
-  if (!upstream.body) {
-    clearTimeout(totalTimer);
-    clear(connectTimer);
-    clear(idleTimer);
-    req.signal?.removeEventListener("abort", onClientAbort);
-    return NextResponse.json(
-      { error: "Provider tidak mengirim respons yang bisa dibaca (stream kosong)." },
-      { status: 502 }
-    );
   }
 
   // Header sudah tiba → fase connect selesai, mulai jaga-jaga idle.

@@ -2,13 +2,8 @@ import { NextRequest } from "next/server";
 import { requireUser } from "@/lib/session";
 import { errorResponse } from "@/lib/cloud-utils";
 import { db } from "@/lib/db";
-import { decryptSecret } from "@/lib/crypto";
-import {
-  chatEndpoint,
-  providerErrorMessage,
-  resolveAiConfig,
-  type AiSettingInput,
-} from "@/lib/ai-providers";
+import { providerErrorMessage } from "@/lib/ai-providers";
+import { resolveChain, tryChatCompletion, summarizeFailures } from "@/lib/ai-config-chain";
 import { parseFormJson, type FormIOParsedQuestion } from "@/lib/form-io";
 import { AI_TYPE_LABELS, buildAiSystemPrompt } from "@/lib/form-ai";
 import { resolveAttachmentContext } from "@/lib/ai-attachments";
@@ -21,9 +16,10 @@ import { resolveAttachmentContext } from "@/lib/ai-attachments";
 // divalidasi ketat oleh parseFormJson sebelum dikirim ke client.
 // Draf tetap harus direview guru di builder sebelum disimpan.
 //
-// PROVIDER: default admin "ai.builder" (Admin Panel → tab AI Builder) —
-// SAMA dengan AI Builder Pusat Belajar, dipisah dari Teman AI. Bila admin
-// belum mengaturnya, guru mendapat pesan yang jelas (bukan AI internal).
+// PROVIDER: default admin kategori "builder" (fallbacks.builder → legacy
+// "ai.builder", Admin Panel) — SAMA dengan AI Builder Pusat Belajar,
+// dipisah dari Teman AI (rantai fallback berurutan). Bila admin belum
+// mengaturnya, guru mendapat pesan yang jelas (bukan AI internal).
 export const runtime = "nodejs";
 export const maxDuration = 60;
 
@@ -66,31 +62,11 @@ export async function POST(req: NextRequest) {
     : [];
   const types = requestedTypes.length > 0 ? requestedTypes : ["PG"];
 
-  // ── Config aktif: HANYA default admin "ai.builder" (sama seperti AI
-  //    Builder Pusat Belajar — dipisah dari Teman AI, tanpa BYOK guru). ──
-  const adminRow = await db.appSetting.findUnique({ where: { key: "ai.builder" } });
-  let adminDefault: AiSettingInput | null = null;
-  if (adminRow) {
-    try {
-      const raw = JSON.parse(adminRow.value) as {
-        provider?: string;
-        baseUrl?: string | null;
-        apiKeyEnc?: string | null;
-        model?: string | null;
-      };
-      adminDefault = {
-        provider: raw.provider ?? "",
-        baseUrl: raw.baseUrl ?? null,
-        apiKey: decryptSecret(raw.apiKeyEnc ?? null),
-        model: raw.model ?? null,
-      };
-    } catch {
-      adminDefault = null;
-    }
-  }
-
-  const config = resolveAiConfig(null, adminDefault);
-  if (!config) {
+  // ── Config chain kategori "builder": HANYA default admin (sama seperti
+  //    AI Builder Pusat Belajar — dipisah dari Teman AI, tanpa BYOK guru).
+  //    Task 29: fallbacks.builder → legacy ai.builder, rantai berurutan. ──
+  const chain = await resolveChain(null, "builder");
+  if (!chain.length) {
     return errorResponse(
       "AI_BUILDER_NOT_SET — admin belum mengatur AI Builder. " +
         "Hubungi admin: Admin Panel → AI Builder (provider yang sama dipakai " +
@@ -100,15 +76,10 @@ export async function POST(req: NextRequest) {
   }
 
   try {
-    // Panggil provider (kompatibel OpenAI chat completions — non-stream).
-    const upstream = await fetch(chatEndpoint(config.baseUrl), {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        ...(config.apiKey ? { Authorization: `Bearer ${config.apiKey}` } : {}),
-      },
-      body: JSON.stringify({
-        model: config.model,
+    // Panggil provider (chain fallback berurutan — non-stream).
+    const attempt = await tryChatCompletion(
+      chain,
+      {
         messages: [
           // System prompt HARUS role "system" (bukan "assistant") supaya
           // instruksi format ditaati model secara konsisten.
@@ -122,26 +93,19 @@ export async function POST(req: NextRequest) {
         ],
         stream: false,
         max_tokens: 8000,
-      }),
-    });
+      },
+      { timeoutMs: 90_000 }
+    );
+    const upstream = attempt.response;
 
-    if (!upstream.ok) {
-      let detail: string | null = null;
-      try {
-        const errJson = (await upstream.json().catch(() => null)) as {
-          error?: { metadata?: { raw?: string }; message?: string };
-          message?: string;
-        } | null;
-        detail =
-          errJson?.error?.metadata?.raw ??
-          errJson?.error?.message ??
-          errJson?.message ??
-          null;
-        if (typeof detail !== "string") detail = null;
-      } catch {
-        /* abaikan */
-      }
-      return errorResponse(providerErrorMessage(upstream.status, detail), 502);
+    if (!upstream) {
+      const fails = summarizeFailures(attempt.failures);
+      const last = attempt.failures[attempt.failures.length - 1];
+      return errorResponse(
+        `Semua config AI Builder gagal — ${fails}` +
+          (last?.status ? `. ${providerErrorMessage(last.status, last.detail)}` : ""),
+        502
+      );
     }
 
     const json = (await upstream.json().catch(() => null)) as {

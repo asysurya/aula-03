@@ -769,6 +769,24 @@ model AiUserSetting {
   user User @relation(fields: [userId], references: [id], onDelete: NoAction, onUpdate: NoAction)
 }
 
+// ───────────────── Teman AI: config per user PER KATEGORI + fallback ─────
+// Task 29: satu panel config untuk 3 kategori (chat, builder, vision) dengan
+// rantai fallback berurutan (prioritas). entriesJson = JSON array:
+//   [{ provider, baseUrl?, apiKeyEnc?, model? }, ...]  (urutan = prioritas)
+// Baris TIDAK ada untuk kategori = ikut default admin kategori itu.
+// Model lama AiUserSetting tetap dibaca sebagai fallback kompatibilitas
+// (diperlakukan sebagai rantai 1 entri untuk kategori "chat").
+model AiCategoryConfig {
+  id          String   @id @default(cuid()) @map("_id")
+  userId      String
+  category    String   // chat | builder | vision
+  entriesJson String   // JSON array entri (kunci terenkripsi di dalamnya)
+  updatedAt   DateTime @updatedAt
+
+  @@unique([userId, category])
+  @@index([userId])
+}
+
 // ───────────────── Teman AI: riwayat percakapan per user ─────────────────
 // Satu thread berjalan per user (chat tanpa judul). role: user | assistant | system.
 model AiMessage {

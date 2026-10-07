@@ -1,14 +1,19 @@
 "use client";
 
 // ─────────────────────────────────────────────────────────────────────
-// Dialog pengaturan Teman AI (BYOK per user).
-// Pilih provider, base URL, model, dan API key milik sendiri.
+// Dialog Pengaturan AI — SATU PANEL untuk 3 kategori (Task 29):
+//   • Chat    — Teman AI, Teman Belajar, Pusat Belajar
+//   • Builder — AI Builder & generator soal
+//   • Vision  — baca gambar & PDF hasil scan (per halaman)
+// Tiap kategori punya RANTAI FALLBACK berurutan (#1 utama → #2 cadangan
+// bila #1 gagal → …) yang bisa diatur prioritasnya (naik/turun).
+// BYOK per kategori; kategori tanpa entri mengikuti default admin.
 // Kunci lama tidak pernah dikirim balik — kosongkan input = pertahankan.
 // ─────────────────────────────────────────────────────────────────────
 
 import { useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
-import { Loader2, KeyRound, Trash2, Info, PlugZap } from "lucide-react";
+import { Loader2, Info, PlugZap, MessageCircle, Hammer, Eye, ShieldCheck } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -18,17 +23,36 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Switch } from "@/components/ui/switch";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
-import { PROVIDERS, PROVIDER_IDS, providerLabel } from "@/lib/ai-providers";
+  AiChainEditor,
+  newChainEntry,
+  type ChainEntryDraft,
+  type EntryTestResult,
+} from "@/components/ai/ai-chain-editor";
+import { CATEGORY_HINTS, CATEGORY_LABELS, AI_CATEGORIES, type AiCategory } from "@/lib/ai-providers";
+import { providerLabel } from "@/lib/ai-providers";
 import { cn } from "@/lib/utils";
+
+export type AiCategoryView = {
+  entries: {
+    provider: string;
+    baseUrl: string | null;
+    model: string | null;
+    hasKey: boolean;
+    keyMask: string | null;
+  }[];
+  followsDefault: boolean;
+  active: {
+    provider: string;
+    baseUrl: string;
+    model: string;
+    source: "user" | "admin";
+  } | null;
+  adminAvailable: boolean;
+};
 
 export interface AiSettingsData {
   user: {
@@ -50,6 +74,7 @@ export interface AiSettingsData {
     model: string;
     source: "user" | "admin";
   } | null;
+  categories?: Record<AiCategory, AiCategoryView>;
 }
 
 export async function fetchAiSettings(): Promise<AiSettingsData | null> {
@@ -57,6 +82,35 @@ export async function fetchAiSettings(): Promise<AiSettingsData | null> {
   if (!res.ok) return null;
   return res.json();
 }
+
+interface CategoryDraft {
+  followDefault: boolean;
+  entries: ChainEntryDraft[];
+}
+
+function draftFromView(v: AiCategoryView | undefined): CategoryDraft {
+  if (!v || v.followsDefault || !v.entries.length) {
+    return { followDefault: true, entries: [] };
+  }
+  return {
+    followDefault: false,
+    entries: v.entries.map((e) => ({
+      provider: e.provider,
+      baseUrl: e.baseUrl ?? "",
+      model: e.model ?? "",
+      apiKey: "",
+      clearKey: false,
+      hasKey: e.hasKey,
+      keyMask: e.keyMask,
+    })),
+  };
+}
+
+const TAB_META: Record<AiCategory, { icon: typeof Eye; label: string }> = {
+  chat: { icon: MessageCircle, label: "Chat" },
+  builder: { icon: Hammer, label: "Builder" },
+  vision: { icon: Eye, label: "Vision" },
+};
 
 export function AiSettingsDialog({
   open,
@@ -70,95 +124,130 @@ export function AiSettingsDialog({
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [data, setData] = useState<AiSettingsData | null>(null);
-
-  const [provider, setProvider] = useState("");
-  const [baseUrl, setBaseUrl] = useState("");
-  const [model, setModel] = useState("");
-  const [apiKey, setApiKey] = useState("");
-  const [clearKey, setClearKey] = useState(false);
-  const [testing, setTesting] = useState(false);
-  const [testResult, setTestResult] = useState<
-    { ok: boolean; text: string } | null
-  >(null);
+  const [tab, setTab] = useState<AiCategory>("chat");
+  const [drafts, setDrafts] = useState<Record<AiCategory, CategoryDraft>>({
+    chat: { followDefault: true, entries: [] },
+    builder: { followDefault: true, entries: [] },
+    vision: { followDefault: true, entries: [] },
+  });
+  const [testingActive, setTestingActive] = useState(false);
+  const [activeTest, setActiveTest] = useState<EntryTestResult | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
     const d = await fetchAiSettings();
     setData(d);
-    setProvider(d?.user.provider ?? "");
-    setBaseUrl(d?.user.baseUrl ?? "");
-    setModel(d?.user.model ?? "");
-    setApiKey("");
-    setClearKey(false);
+    if (d?.categories) {
+      setDrafts({
+        chat: draftFromView(d.categories.chat),
+        builder: draftFromView(d.categories.builder),
+        vision: draftFromView(d.categories.vision),
+      });
+    }
     setLoading(false);
   }, []);
 
   useEffect(() => {
-    if (open) void load();
+    if (open) {
+      setActiveTest(null);
+      void load();
+    }
   }, [open, load]);
 
-  function switchProvider(p: string) {
-    setProvider(p);
-    setClearKey(false);
-    setTestResult(null);
-    if (p === "") return; // ikuti default admin
-    const preset = PROVIDERS[p as keyof typeof PROVIDERS];
-    if (preset) {
-      setBaseUrl(preset.baseUrl);
-      setModel(preset.models[0] ?? "");
-    }
+  const view = data?.categories?.[tab];
+  const draft = drafts[tab];
+
+  function setDraft(next: CategoryDraft) {
+    setDrafts((d) => ({ ...d, [tab]: next }));
   }
 
-  async function testConnection() {
-    setTesting(true);
-    setTestResult(null);
+  /** Tes satu entri: spesifikasi (kunci diketik) atau entri tersimpan. */
+  const testEntry = useCallback(
+    async (index: number): Promise<EntryTestResult | null> => {
+      const d = drafts[tab];
+      const e = d.entries[index];
+      if (!e) return null;
+      try {
+        const body =
+          e.apiKey.trim() || !e.hasKey
+            ? {
+                // Spesifikasi draft (belum tentu tersimpan).
+                provider: e.provider,
+                baseUrl: e.baseUrl.trim() || undefined,
+                model: e.model.trim() || undefined,
+                apiKey: e.apiKey.trim() || undefined,
+              }
+            : {
+                // Kunci tersimpan — tes entri rantai tersimpan (index
+                // sejajar selama belum ditata ulang / ditambah).
+                category: tab,
+                index,
+              };
+        const res = await fetch("/api/ai/test", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        const json = await res.json().catch(() => ({}));
+        if (json?.ok) {
+          const reply = json.reply ? ` dan menjawab: “${json.reply}”` : "";
+          return { ok: true, text: `Tersambung! Model “${json.model ?? "?"}” berfungsi${reply}.` };
+        }
+        return { ok: false, text: json?.error ?? "Tes gagal — coba lagi." };
+      } catch {
+        return { ok: false, text: "Gagal menghubungi server untuk tes." };
+      }
+    },
+    [drafts, tab]
+  );
+
+  /** Tes config AKTIF kategori (entri pertama rantai efektif). */
+  async function testActiveCategory() {
+    setTestingActive(true);
+    setActiveTest(null);
     try {
-      const body =
-        provider === ""
-          ? {} // tes config aktif (user → default admin)
-          : {
-              provider,
-              baseUrl: baseUrl.trim() || undefined,
-              model: model.trim() || undefined,
-              apiKey: apiKey.trim() || undefined,
-            };
       const res = await fetch("/api/ai/test", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
+        body: JSON.stringify({ category: tab }),
       });
       const json = await res.json().catch(() => ({}));
       if (json?.ok) {
-        const replyTxt = json.reply ? ` dan menjawab: “${json.reply}”` : "";
-        setTestResult({
+        const reply = json.reply ? ` dan menjawab: “${json.reply}”` : "";
+        setActiveTest({
           ok: true,
-          text: `Tersambung! Model “${json.model ?? "?"}” berfungsi${replyTxt}.`,
+          text: `Tersambung! Model “${json.model ?? "?"}” berfungsi${reply}.`,
         });
-        toast.success("Sambungan Teman AI OK");
+        toast.success(`Sambungan ${CATEGORY_LABELS[tab]} OK`);
       } else {
-        setTestResult({ ok: false, text: json?.error ?? "Tes gagal — coba lagi." });
+        setActiveTest({ ok: false, text: json?.error ?? "Tes gagal — coba lagi." });
       }
     } catch {
-      setTestResult({ ok: false, text: "Gagal menghubungi server untuk tes." });
+      setActiveTest({ ok: false, text: "Gagal menghubungi server untuk tes." });
     } finally {
-      setTesting(false);
+      setTestingActive(false);
     }
   }
 
   async function save() {
-    if (provider !== "") {
-      const preset = PROVIDERS[provider as keyof typeof PROVIDERS];
-      if (!baseUrl.trim()) {
-        toast.error("Base URL wajib diisi untuk provider ini.");
-        return;
+    const d = drafts[tab];
+    if (!d.followDefault) {
+      for (const e of d.entries) {
+        if (!e.provider) {
+          toast.error("Setiap entri wajib memilih provider.");
+          return;
+        }
+        if (!e.baseUrl.trim()) {
+          toast.error("Base URL wajib diisi untuk setiap entri.");
+          return;
+        }
+        if (!/^https?:\/\/.+/i.test(e.baseUrl.trim())) {
+          toast.error("Base URL harus mulai dengan http:// atau https://.");
+          return;
+        }
       }
-      if (!/^https?:\/\/.+/i.test(baseUrl.trim())) {
-        toast.error("Base URL harus mulai dengan http:// atau https://.");
-        return;
-      }
-      // Provider selain ollama disarankan memasang kunci.
-      if (!preset?.noKeyNeeded && !apiKey.trim() && !(data?.user.hasKey && !clearKey)) {
-        toast.error("API key wajib diisi untuk provider ini.");
+      if (!d.entries.length) {
+        toast.error("Tambahkan minimal satu entri, atau aktifkan ikut default admin.");
         return;
       }
     }
@@ -167,26 +256,33 @@ export function AiSettingsDialog({
       const res = await fetch("/api/ai/settings", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          provider,
-          baseUrl: baseUrl.trim(),
-          model: model.trim(),
-          apiKey: apiKey.trim() || undefined,
-          clearKey: clearKey || undefined,
-        }),
+        body: JSON.stringify(
+          d.followDefault
+            ? { category: tab, followDefault: true }
+            : {
+                category: tab,
+                entries: d.entries.map((e) => ({
+                  provider: e.provider,
+                  baseUrl: e.baseUrl.trim(),
+                  model: e.model.trim(),
+                  apiKey: e.apiKey.trim() || undefined,
+                  clearKey: e.clearKey || undefined,
+                })),
+              }
+        ),
       });
       const json = await res.json().catch(() => ({}));
-      if (!res.ok) {
-        toast.error(json.error ?? "Gagal menyimpan pengaturan.");
+      if (!res.ok || json?.error) {
+        toast.error(json?.error ?? "Gagal menyimpan pengaturan.");
         return;
       }
       toast.success(
-        provider === ""
-          ? "Kembali mengikuti default admin."
-          : "Pengaturan Teman AI tersimpan."
+        d.followDefault
+          ? `${CATEGORY_LABELS[tab]} kini mengikuti default admin.`
+          : `Pengaturan ${CATEGORY_LABELS[tab]} tersimpan.`
       );
+      await load();
       onSaved?.();
-      onOpenChange(false);
     } catch {
       toast.error("Gagal menyimpan pengaturan.");
     } finally {
@@ -194,16 +290,16 @@ export function AiSettingsDialog({
     }
   }
 
-  const preset = provider ? PROVIDERS[provider as keyof typeof PROVIDERS] : null;
-
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-lg">
+      <DialogContent className="max-w-2xl max-h-[90vh] flex flex-col">
         <DialogHeader>
-          <DialogTitle>Pengaturan Teman AI</DialogTitle>
+          <DialogTitle>Pengaturan AI</DialogTitle>
           <DialogDescription>
-            Pakai API key milikmu sendiri (bawa kunci sendiri) atau ikuti
-            default yang diatur admin. Kunci disimpan terenkripsi di server.
+            Satu panel untuk semua fitur AI Aula. Pilih kategori (chat /
+            builder / vision) lalu susun rantai fallback: #1 dipakai duluan,
+            otomatis lanjut #2, #3… bila gagal. Kunci disimpan terenkripsi
+            di server.
           </DialogDescription>
         </DialogHeader>
 
@@ -212,178 +308,143 @@ export function AiSettingsDialog({
             <Loader2 className="h-4 w-4 animate-spin mr-2" /> Memuat…
           </div>
         ) : (
-          <div className="space-y-4">
-            {/* Default admin */}
-            <div className="rounded-md border bg-muted/40 px-3 py-2 flex items-start gap-2">
-              <Info className="h-4 w-4 mt-0.5 shrink-0 text-muted-foreground" />
-              <p className="text-xs text-muted-foreground">
-                Default admin:{" "}
-                {data?.default.available ? (
-                  <span className="font-medium text-foreground">
-                    {providerLabel(data.default.provider)}
-                    {data.default.model ? ` · ${data.default.model}` : ""}
-                  </span>
-                ) : (
-                  <span className="font-medium text-foreground">belum tersedia</span>
-                )}
-                . Pilih &quot;Ikuti default admin&quot; untuk memakainya.
-              </p>
-            </div>
+          <Tabs value={tab} onValueChange={(v) => { setTab(v as AiCategory); setActiveTest(null); }}>
+            <TabsList className="grid w-full grid-cols-3">
+              {AI_CATEGORIES.map((c) => {
+                const Icon = TAB_META[c].icon;
+                return (
+                  <TabsTrigger key={c} value={c} className="gap-1.5">
+                    <Icon className="h-3.5 w-3.5" />
+                    {TAB_META[c].label}
+                  </TabsTrigger>
+                );
+              })}
+            </TabsList>
 
-            {/* Provider */}
-            <div className="space-y-1.5">
-              <Label htmlFor="ai-provider">Provider</Label>
-              <Select value={provider || "follow"} onValueChange={(v) => switchProvider(v === "follow" ? "" : v)}>
-                <SelectTrigger id="ai-provider">
-                  <SelectValue placeholder="Pilih provider" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="follow">
-                    Ikuti default admin{data?.default.available ? "" : " (belum tersedia)"}
-                  </SelectItem>
-                  {PROVIDER_IDS.map((p) => (
-                    <SelectItem key={p} value={p}>
-                      {PROVIDERS[p].label}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-
-            {provider !== "" ? (
-              <>
-                {/* Base URL */}
-                <div className="space-y-1.5">
-                  <Label htmlFor="ai-baseurl">Base URL</Label>
-                  <Input
-                    id="ai-baseurl"
-                    value={baseUrl}
-                    onChange={(e) => setBaseUrl(e.target.value)}
-                    placeholder="https://api.provider.com/v1"
-                    autoComplete="off"
-                  />
-                  {preset?.hint ? (
-                    <p className="text-xs text-muted-foreground">{preset.hint}</p>
-                  ) : null}
-                </div>
-
-                {/* Model */}
-                <div className="space-y-1.5">
-                  <Label htmlFor="ai-model">Model</Label>
-                  <Input
-                    id="ai-model"
-                    value={model}
-                    onChange={(e) => setModel(e.target.value)}
-                    placeholder="nama model, mis. gpt-4o-mini"
-                  />
-                  {preset?.models?.length ? (
-                    <div className="flex flex-wrap gap-1.5 pt-1">
-                      {preset.models.map((m) => (
-                        <button
-                          key={m}
-                          type="button"
-                          onClick={() => setModel(m)}
-                          className={cn(
-                            "rounded-full border px-2.5 py-0.5 text-xs transition-colors",
-                            model === m
-                              ? "border-primary bg-primary text-primary-foreground"
-                              : "border-border text-muted-foreground hover:text-foreground"
-                          )}
-                        >
-                          {m}
-                        </button>
-                      ))}
+            {AI_CATEGORIES.map((c) => {
+              const dv = data?.categories?.[c];
+              const cd = drafts[c];
+              return (
+                <TabsContent key={c} value={c} className="mt-3">
+                  <div className="space-y-3 max-h-[52vh] overflow-y-auto pr-1">
+                    {/* Info kategori */}
+                    <div className="rounded-md border bg-muted/40 px-3 py-2 flex items-start gap-2">
+                      <Info className="h-4 w-4 mt-0.5 shrink-0 text-muted-foreground" />
+                      <p className="text-xs text-muted-foreground">
+                        <span className="font-medium text-foreground">
+                          {CATEGORY_LABELS[c]}.
+                        </span>{" "}
+                        {CATEGORY_HINTS[c]}
+                      </p>
                     </div>
-                  ) : null}
-                </div>
 
-                {/* API key */}
-                <div className="space-y-1.5">
-                  <Label htmlFor="ai-key" className="flex items-center gap-1.5">
-                    <KeyRound className="h-3.5 w-3.5" /> API Key
-                    {preset?.noKeyNeeded ? (
-                      <span className="text-[11px] font-normal text-muted-foreground">
-                        (opsional — provider ini bebas kunci)
-                      </span>
-                    ) : null}
-                  </Label>
-                  <Input
-                    id="ai-key"
-                    type="password"
-                    value={apiKey}
-                    onChange={(e) => {
-                      setApiKey(e.target.value);
-                      setClearKey(false);
-                    }}
-                    placeholder={
-                      data?.user.hasKey && !clearKey
-                        ? `•••••••• (tersimpan${data.user.keyMask ? `: ${data.user.keyMask}` : ""})`
-                        : "tempel API key di sini"
-                    }
-                    autoComplete="new-password"
-                  />
-                  <p className="text-xs text-muted-foreground">
-                    {data?.user.hasKey && !clearKey
-                      ? "Kosongkan untuk memakai kunci yang sudah tersimpan."
-                      : "Kunci dienkripsi (AES-256-GCM) dan tidak pernah dibaca balik."}
-                  </p>
-                  {data?.user.hasKey ? (
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="sm"
-                      className={cn(
-                        "h-7 text-destructive hover:text-destructive",
-                        clearKey && "opacity-60"
+                    {/* Status aktif */}
+                    <div className="rounded-md border px-3 py-2 flex items-center gap-2 text-xs">
+                      <ShieldCheck className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                      {dv?.active ? (
+                        <span className="text-muted-foreground">
+                          Aktif:{" "}
+                          <span className="font-medium text-foreground">
+                            {providerLabel(dv.active.provider)} · {dv.active.model || "?"}
+                          </span>{" "}
+                          <span className="text-muted-foreground/70">
+                            ({dv.active.source === "user" ? "kunci sendiri" : "default admin"})
+                          </span>
+                        </span>
+                      ) : (
+                        <span className="text-muted-foreground">
+                          Belum aktif —{" "}
+                          {dv?.adminAvailable
+                            ? "default admin tersedia."
+                            : "belum ada config (atur entri di bawah)."}
+                        </span>
                       )}
-                      onClick={() => setClearKey((c) => !c)}
-                    >
-                      <Trash2 className="h-3.5 w-3.5" />
-                      {clearKey
-                        ? "Batal hapus (kunci tetap tersimpan)"
-                        : "Hapus kunci tersimpan"}
-                    </Button>
-                  ) : null}
-                </div>
-              </>
-            ) : null}
-          </div>
+                      <div className="flex-1" />
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        className="h-7 px-2 text-xs"
+                        disabled={testingActive || !dv?.active}
+                        onClick={() => void testActiveCategory()}
+                      >
+                        {testingActive ? (
+                          <Loader2 className="h-3 w-3 animate-spin mr-1" />
+                        ) : (
+                          <PlugZap className="h-3 w-3 mr-1" />
+                        )}
+                        Tes aktif
+                      </Button>
+                    </div>
+
+                    {activeTest && tab === c ? (
+                      <div
+                        className={cn(
+                          "rounded-md border px-3 py-2 text-xs leading-relaxed",
+                          activeTest.ok
+                            ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-700 dark:text-emerald-400"
+                            : "border-destructive/40 bg-destructive/10 text-destructive"
+                        )}
+                      >
+                        {activeTest.text}
+                      </div>
+                    ) : null}
+
+                    {/* Ikut default admin */}
+                    <div className="flex items-start justify-between gap-3 rounded-md border px-3 py-2.5">
+                      <div className="space-y-0.5">
+                        <Label htmlFor={`follow-${c}`} className="text-xs">
+                          Ikuti default admin
+                        </Label>
+                        <p className="text-[11px] text-muted-foreground leading-relaxed">
+                          {dv?.adminAvailable
+                            ? `Default admin kategori ini: ${providerLabel(
+                                dv.active?.provider ?? ""
+                              )}${dv.active?.model ? ` · ${dv.active.model}` : ""}.`
+                            : "Admin belum mengatur default untuk kategori ini — susun rantai sendiri di bawah."}
+                        </p>
+                      </div>
+                      <Switch
+                        id={`follow-${c}`}
+                        checked={cd.followDefault}
+                        onCheckedChange={(v) =>
+                          setDrafts((d) => ({
+                            ...d,
+                            [c]: {
+                              followDefault: v,
+                              entries: v
+                                ? []
+                                : d[c].entries.length
+                                  ? d[c].entries
+                                  : [newChainEntry()],
+                            },
+                          }))
+                        }
+                      />
+                    </div>
+
+                    {!cd.followDefault ? (
+                      <AiChainEditor
+                        entries={cd.entries}
+                        onChange={(next) => setDraft({ followDefault: false, entries: next })}
+                        onTestEntry={testEntry}
+                        vision={c === "vision"}
+                      />
+                    ) : null}
+                  </div>
+                </TabsContent>
+              );
+            })}
+          </Tabs>
         )}
 
-        {testResult ? (
-          <div
-            className={cn(
-              "rounded-md border px-3 py-2 text-xs leading-relaxed",
-              testResult.ok
-                ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-700 dark:text-emerald-400"
-                : "border-destructive/40 bg-destructive/10 text-destructive"
-            )}
-          >
-            {testResult.text}
-          </div>
-        ) : null}
-
         <DialogFooter>
-          <Button
-            type="button"
-            variant="outline"
-            onClick={testConnection}
-            disabled={loading || saving || testing}
-          >
-            {testing ? (
-              <Loader2 className="h-4 w-4 animate-spin mr-1.5" />
-            ) : (
-              <PlugZap className="h-4 w-4 mr-1.5" />
-            )}
-            Tes sambungan
-          </Button>
-          <div className="flex-1" />
           <Button variant="outline" onClick={() => onOpenChange(false)} disabled={saving}>
-            Batal
+            Tutup
           </Button>
           <Button onClick={save} disabled={loading || saving}>
             {saving ? <Loader2 className="h-4 w-4 animate-spin mr-1.5" /> : null}
-            Simpan
+            Simpan {TAB_META[tab].label}
           </Button>
         </DialogFooter>
       </DialogContent>

@@ -41,6 +41,7 @@ import {
 import { AnnotationLayer } from "./annotation-layer";
 import { useSelectionMenu, SelectionToolbar } from "./selection-actions";
 import { useReaderUiStore } from "@/stores/reader-ui-store";
+import { cleanForTts, splitTtsChunks } from "@/lib/reader/tts-text";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -148,6 +149,8 @@ export function PdfReader({
   >(null);
   const [searching, setSearching] = useState(false);
   const [ttsPlaying, setTtsPlaying] = useState(false);
+  /** Task 29: true saat halaman scan sedang diekstrak model vision. */
+  const [ttsLoading, setTtsLoading] = useState(false);
   const [flashPage, setFlashPage] = useState<number | null>(null);
   const [viewMode, setViewMode] = useState<ViewMode>(loadViewMode);
   /** Mode fokus — bilah alat melayang (auto-hide) + header jendela
@@ -181,6 +184,8 @@ export function PdfReader({
   } | null>(null);
   const textCache = useRef<Map<number, string>>(new Map());
   const ttsStop = useRef(false);
+  /** Teks hasil OCR vision per halaman (PDF scan tanpa lapisan teks). */
+  const visionTextCache = useRef<Map<number, string>>(new Map());
   /** Sudahkah laporan perubahan halaman pertama dilewati (init/restore). */
   const pageReportInit = useRef(false);
   /** Sudahkah posisi baca tersimpan di-restore untuk file ini. */
@@ -770,6 +775,56 @@ export function PdfReader({
   }, []);
 
   // ── TTS: baca halaman, lanjut otomatis ──
+  // Task 29: halaman hasil SCAN (lapisan teks kosong) otomatis diekstrak
+  // dengan MODEL VISION — SATU HALAMAN per panggilan (bukan seluruh PDF
+  // sekaligus): render halaman → JPEG di browser → kirim ke
+  // /api/ai/vision/page → teks terparapi (tabel, catatan kaki, header/
+  // nomor halaman terfilter). Teks lapisan-PDF maupun hasil vision
+  // keduanya dirapiikan dulu oleh cleanForTts sebelum dibacakan.
+  const extractPageViaVision = useCallback(
+    async (n: number): Promise<string> => {
+      const cached = visionTextCache.current.get(n);
+      if (cached !== undefined) return cached;
+      if (!doc) return "";
+      const p = await doc.getPage(n);
+      const base = p.getViewport({ scale: 1 });
+      const scale = Math.min(
+        2.2,
+        Math.max(1, 1600 / Math.max(base.width, base.height))
+      );
+      const viewport = p.getViewport({ scale });
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.ceil(viewport.width);
+      canvas.height = Math.ceil(viewport.height);
+      const ctx = canvas.getContext("2d");
+      if (!ctx) throw new Error("Canvas tidak tersedia");
+      // Latar putih wajib (halaman scan transparan → JPEG hitam).
+      ctx.fillStyle = "#ffffff";
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      await p.render({
+        canvasContext: ctx,
+        viewport,
+      } as unknown as Parameters<typeof p.render>[0]).promise;
+      const image = canvas.toDataURL("image/jpeg", 0.82);
+      const res = await fetch("/api/ai/vision/page", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ image, mode: "page" }),
+      });
+      const json = (await res.json().catch(() => null)) as {
+        text?: string;
+        error?: string;
+      } | null;
+      if (!res.ok || !json?.text) {
+        throw new Error(json?.error ?? "Ekstraksi vision gagal");
+      }
+      const text = String(json.text);
+      visionTextCache.current.set(n, text);
+      return text;
+    },
+    [doc]
+  );
+
   const speakPage = useCallback(
     async (n: number) => {
       if (!doc) return;
@@ -785,7 +840,25 @@ export function PdfReader({
             .trim();
           textCache.current.set(n, text);
         }
-        if (!text) {
+        // PDF hasil scan (lapisan teks nyaris kosong) → OCR vision.
+        if (text.replace(/\s/g, "").length < 25) {
+          setTtsLoading(true);
+          toast.info("Halaman scan terdeteksi — membaca dengan model vision…", {
+            description: "Per halaman, jadi mohon tunggu sebentar.",
+          });
+          try {
+            text = await extractPageViaVision(n);
+          } catch (e) {
+            toast.error("Gagal membaca halaman dengan model vision", {
+              description: String((e as Error)?.message ?? ""),
+            });
+            setTtsPlaying(false);
+            return;
+          } finally {
+            setTtsLoading(false);
+          }
+        }
+        if (!text || !text.trim()) {
           if (n < numPages && !ttsStop.current) {
             setPage(n + 1);
             gotoPage(n + 1);
@@ -795,41 +868,61 @@ export function PdfReader({
           }
           return;
         }
-        const u = new SpeechSynthesisUtterance(text);
-        const voices = window.speechSynthesis.getVoices();
-        const id = voices.find((v) => v.lang?.toLowerCase().startsWith("id"));
-        if (id) u.voice = id;
-        u.lang = id?.lang ?? "id-ID";
-        u.rate = 1;
-        u.onend = () => {
-          if (ttsStop.current) return;
-          if (n < numPages) {
+        // Rapikan teks sebelum dibacakan (rumus, tabel, footnote, filter).
+        const chunks = splitTtsChunks(cleanForTts(text));
+        if (!chunks.length) {
+          if (n < numPages && !ttsStop.current) {
             setPage(n + 1);
             gotoPage(n + 1);
             void speakPage(n + 1);
           } else {
             setTtsPlaying(false);
           }
+          return;
+        }
+        let idx = 0;
+        const speakNext = () => {
+          if (ttsStop.current) return;
+          if (idx >= chunks.length) {
+            if (n < numPages) {
+              setPage(n + 1);
+              gotoPage(n + 1);
+              void speakPage(n + 1);
+            } else {
+              setTtsPlaying(false);
+            }
+            return;
+          }
+          const u = new SpeechSynthesisUtterance(chunks[idx++]);
+          const voices = window.speechSynthesis.getVoices();
+          const id = voices.find((v) => v.lang?.toLowerCase().startsWith("id"));
+          if (id) u.voice = id;
+          u.lang = id?.lang ?? "id-ID";
+          u.rate = 1;
+          u.onend = speakNext;
+          u.onerror = () => setTtsPlaying(false);
+          window.speechSynthesis.speak(u);
         };
-        window.speechSynthesis.speak(u);
+        speakNext();
       } catch {
         setTtsPlaying(false);
       }
     },
-    [doc, numPages, gotoPage]
+    [doc, numPages, gotoPage, extractPageViaVision]
   );
 
   const toggleTts = useCallback(() => {
-    if (ttsPlaying) {
+    if (ttsPlaying || ttsLoading) {
       ttsStop.current = true;
       window.speechSynthesis.cancel();
       setTtsPlaying(false);
+      setTtsLoading(false);
       return;
     }
     ttsStop.current = false;
     setTtsPlaying(true);
     void speakPage(page);
-  }, [ttsPlaying, page, speakPage]);
+  }, [ttsPlaying, ttsLoading, page, speakPage]);
 
   useEffect(() => {
     return () => {
@@ -1227,14 +1320,33 @@ export function PdfReader({
             <Search className="size-4" />
           </Button>
           <Button
-            variant={ttsPlaying ? "secondary" : "outline"}
+            variant={ttsPlaying || ttsLoading ? "secondary" : "outline"}
             size="icon"
             className="h-9 w-9"
             onClick={toggleTts}
-            title={ttsPlaying ? "Hentikan bacaan" : "Bacakan halaman (TTS)"}
-            aria-label={ttsPlaying ? "Hentikan bacaan" : "Bacakan halaman"}
+            disabled={ttsLoading}
+            title={
+              ttsLoading
+                ? "Membaca halaman dengan model vision…"
+                : ttsPlaying
+                  ? "Hentikan bacaan"
+                  : "Bacakan halaman (TTS) — halaman scan dibaca model vision"
+            }
+            aria-label={
+              ttsLoading
+                ? "Membaca halaman dengan model vision"
+                : ttsPlaying
+                  ? "Hentikan bacaan"
+                  : "Bacakan halaman"
+            }
           >
-            {ttsPlaying ? <Square className="size-4" /> : <Volume2 className="size-4" />}
+            {ttsLoading ? (
+              <Loader2 className="size-4 animate-spin" />
+            ) : ttsPlaying ? (
+              <Square className="size-4" />
+            ) : (
+              <Volume2 className="size-4" />
+            )}
           </Button>
         </div>
 

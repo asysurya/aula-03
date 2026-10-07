@@ -25,6 +25,8 @@ export interface AiProviderPreset {
   noKeyNeeded?: boolean;
   /** Catatan singkat untuk user. */
   hint: string;
+  /** Model yang bisa melihat gambar (kategori vision) — saran UI. */
+  visionModels?: string[];
 }
 
 export const PROVIDERS: Record<AiProviderId, AiProviderPreset> = {
@@ -33,6 +35,7 @@ export const PROVIDERS: Record<AiProviderId, AiProviderPreset> = {
     label: "ChatGPT (OpenAI)",
     baseUrl: "https://api.openai.com/v1",
     models: ["gpt-4o-mini", "gpt-4o", "gpt-4.1-mini"],
+    visionModels: ["gpt-4o-mini", "gpt-4o", "gpt-4.1-mini"],
     hint: "Butuh API key dari platform.openai.com.",
   },
   deepseek: {
@@ -53,6 +56,12 @@ export const PROVIDERS: Record<AiProviderId, AiProviderPreset> = {
       "meta-llama/llama-3.3-70b-instruct",
       "openai/gpt-4o-mini",
     ],
+    visionModels: [
+      "google/gemma-3-27b-it",
+      "google/gemma-3-12b-it",
+      "openai/gpt-4o-mini",
+      "qwen/qwen2.5-vl-72b-instruct",
+    ],
     hint: "Satu kunci untuk banyak model. Catatan: varian berakhiran ‘:free’ berbagi kuota publik dan sering penuh (error 429) — kalau terus error, pakai model tanpa ‘:free’ (butuh kredit).",
   },
   gemini: {
@@ -60,13 +69,15 @@ export const PROVIDERS: Record<AiProviderId, AiProviderPreset> = {
     label: "Google Gemini",
     baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai",
     models: ["gemini-2.0-flash", "gemini-2.5-flash"],
-    hint: "API key dari aistudio.google.com (tetap butuh kunci).",
+    visionModels: ["gemini-2.0-flash", "gemini-2.5-flash"],
+    hint: "API key dari aistudio.google.com (tetap butuh kunci). Semua model Gemini bisa melihat gambar.",
   },
   ollama: {
     id: "ollama",
     label: "Ollama (komputer sendiri)",
     baseUrl: "http://localhost:11434/v1",
     models: ["llama3.1", "qwen2.5"],
+    visionModels: ["llama3.2-vision", "minicpm-v", "qwen2.5vl"],
     noKeyNeeded: true,
     hint: "Gratis & tanpa kunci. Edit Base URL kalau Ollama jalan di komputer lain.",
   },
@@ -80,6 +91,35 @@ export const PROVIDERS: Record<AiProviderId, AiProviderPreset> = {
 };
 
 export const PROVIDER_IDS = Object.keys(PROVIDERS) as AiProviderId[];
+
+// ── Kategori config AI (Task 29) — aman utk client & server ───────────
+
+export const AI_CATEGORIES = ["chat", "builder", "vision"] as const;
+export type AiCategory = (typeof AI_CATEGORIES)[number];
+
+export function isAiCategory(v: unknown): v is AiCategory {
+  return typeof v === "string" && (AI_CATEGORIES as readonly string[]).includes(v);
+}
+
+/** Maks entri fallback per kategori. */
+export const MAX_CHAIN_ENTRIES = 6;
+
+/** Label kategori untuk UI. */
+export const CATEGORY_LABELS: Record<AiCategory, string> = {
+  chat: "Chat (Teman AI)",
+  builder: "Builder (AI Builder)",
+  vision: "Vision (gambar & PDF scan)",
+};
+
+/** Deskripsi kategori untuk UI. */
+export const CATEGORY_HINTS: Record<AiCategory, string> = {
+  chat:
+    "Dipakai Teman AI, Teman Belajar, dan Pusat Belajar. Model multifungsi — disarankan yang murah & cepat.",
+  builder:
+    "Dipakai AI Builder (Pusat Belajar) dan generator formulir. Disarankan model yang patuh format JSON/struktur.",
+  vision:
+    "Dipakai untuk membaca gambar & PDF hasil scan (ekstraksi per halaman) — WAJIB model multimodal (bisa melihat gambar), mis. gpt-4o-mini, gemini-2.0-flash, llama3.2-vision. Bila kosong, fitur vision nonaktif.",
+};
 
 /** Bentuk ringkas setting — sudah dalam plaintext (apiKey sudah didekripsi server). */
 export interface AiSettingInput {
@@ -101,6 +141,11 @@ function isKnownProvider(p: string): p is AiProviderId {
   return p in PROVIDERS;
 }
 
+/** Versi aman-eksport dari isKnownProvider (untuk lib lain). */
+export function isKnownProviderSafe(p: string): p is AiProviderId {
+  return isKnownProvider(p);
+}
+
 /** Setting dianggap valid bila provider diisi dan punya kunci (kecuali ollama). */
 function settingUsable(s: AiSettingInput | null | undefined): boolean {
   if (!s || !s.provider) return false;
@@ -118,6 +163,14 @@ function materialize(s: AiSettingInput, source: "user" | "admin"): ResolvedAiCon
   if (!baseUrl) return null;
   const model = (s.model && s.model.trim()) || preset.models[0] || "";
   return { provider, baseUrl: baseUrl.replace(/\/+$/, ""), apiKey: s.apiKey || null, model, source };
+}
+
+/** Versi aman-eksport dari materialize (untuk ai-config-chain). */
+export function materializeEntry(
+  s: AiSettingInput,
+  source: "user" | "admin"
+): ResolvedAiConfig | null {
+  return materialize(s, source);
 }
 
 /**

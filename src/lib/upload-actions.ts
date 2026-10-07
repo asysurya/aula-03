@@ -605,7 +605,10 @@ export async function uploadAiAttachmentAction(
   }
 
   const { extractText } = await import("@/lib/ai-extract");
-  const { kind, text } = await extractText(file.name, file.mimetype, file.bytes);
+  const { makeVisionExtractor } = await import("@/lib/ai-vision");
+  // Task 29: gambar & PDF hasil scan dibaca model vision (per halaman).
+  const vision = await makeVisionExtractor(user.id);
+  const { kind, text } = await extractText(file.name, file.mimetype, file.bytes, { vision });
 
   const row = await db.aiAttachment.create({
     data: {

@@ -2,13 +2,8 @@ import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { requireUser } from "@/lib/session";
 import { db } from "@/lib/db";
-import { decryptSecret } from "@/lib/crypto";
-import {
-  chatEndpoint,
-  providerErrorMessage,
-  resolveAiConfig,
-  type AiSettingInput,
-} from "@/lib/ai-providers";
+import { providerErrorMessage } from "@/lib/ai-providers";
+import { resolveChain, tryChatCompletion, summarizeFailures } from "@/lib/ai-config-chain";
 import { resolveAttachmentContext } from "@/lib/ai-attachments";
 
 // ─────────────────────────────────────────────────────────────────────
@@ -140,41 +135,9 @@ export async function POST(req: NextRequest) {
   }
   const { message, task, material, attachmentIds, history } = parsed.data;
 
-  // ── Config aktif: milik user → default admin (sama seperti Teman AI) ──
-  const [userRow, adminRow] = await Promise.all([
-    db.aiUserSetting.findUnique({ where: { userId: user.id } }),
-    db.appSetting.findUnique({ where: { key: "ai.default" } }),
-  ]);
-  let adminDefault: AiSettingInput | null = null;
-  if (adminRow) {
-    try {
-      const raw = JSON.parse(adminRow.value) as {
-        provider?: string;
-        baseUrl?: string | null;
-        apiKeyEnc?: string | null;
-        model?: string | null;
-      };
-      adminDefault = {
-        provider: raw.provider ?? "",
-        baseUrl: raw.baseUrl ?? null,
-        apiKey: decryptSecret(raw.apiKeyEnc ?? null),
-        model: raw.model ?? null,
-      };
-    } catch {
-      adminDefault = null;
-    }
-  }
-  const userSetting: AiSettingInput | null = userRow
-    ? {
-        provider: userRow.provider,
-        baseUrl: userRow.baseUrl,
-        apiKey: decryptSecret(userRow.apiKeyEnc),
-        model: userRow.model,
-      }
-    : null;
-
-  const config = resolveAiConfig(userSetting, adminDefault);
-  if (!config) {
+  // ── Config chain kategori "chat" (user → admin; fallback berurutan) ──
+  const chain = await resolveChain(user.id, "chat");
+  if (!chain.length) {
     return NextResponse.json(
       {
         error:
@@ -227,7 +190,7 @@ export async function POST(req: NextRequest) {
   // Task JSON (flashcards/quiz) tidak butuh history & jawabannya hanya
   // JSON — cukup satu turn, user message berisi instruksi singkat.
 
-  // ── Panggil provider (kompatibel OpenAI chat completions, SSE) ──
+  // ── Panggil provider (chain fallback berurutan, SSE) ──
   const controller = new AbortController();
   let timedOut = false;
   const timer = setTimeout(() => {
@@ -243,59 +206,30 @@ export async function POST(req: NextRequest) {
   };
   req.signal?.addEventListener("abort", onClientAbort);
 
-  let upstream: Response;
-  try {
-    upstream = await fetch(chatEndpoint(config.baseUrl), {
-      method: "POST",
-      signal: controller.signal,
-      headers: {
-        "Content-Type": "application/json",
-        ...(config.apiKey ? { Authorization: `Bearer ${config.apiKey}` } : {}),
-      },
-      body: JSON.stringify({
-        model: config.model,
-        messages,
-        stream: true,
-        max_tokens:
-          task === "chat" ? 2048 : 4096,
-      }),
-    });
-  } catch {
-    clearTimeout(timer);
-    req.signal?.removeEventListener("abort", onClientAbort);
-    const msg = timedOut
-      ? "Waktu tunggu habis — provider tidak merespons dalam waktu cukup. Coba lagi atau ganti model."
-      : "Gagal menghubungi server AI. Periksa pengaturan (dan koneksi internet).";
-    return NextResponse.json({ error: msg }, { status: 502 });
-  }
+  const attempt = await tryChatCompletion(
+    chain,
+    {
+      messages,
+      stream: true,
+      max_tokens: task === "chat" ? 2048 : 4096,
+    },
+    { signal: controller.signal, timeoutMs: TIMEOUT_MS }
+  );
+  const upstream = attempt.response;
 
-  if (!upstream.ok) {
-    let detail: string | null = null;
-    try {
-      const errJson = await upstream.json().catch(() => null);
-      detail =
-        errJson?.error?.metadata?.raw ??
-        errJson?.error?.message ??
-        errJson?.message ??
-        null;
-      if (typeof detail !== "string") detail = null;
-    } catch {
-      /* abaikan */
-    }
+  if (!upstream || !upstream.body) {
     clearTimeout(timer);
     req.signal?.removeEventListener("abort", onClientAbort);
-    return NextResponse.json(
-      { error: providerErrorMessage(upstream.status, detail) },
-      { status: 502 }
-    );
-  }
-  if (!upstream.body) {
-    clearTimeout(timer);
-    req.signal?.removeEventListener("abort", onClientAbort);
-    return NextResponse.json(
-      { error: "Provider tidak mengirim respons yang bisa dibaca (stream kosong)." },
-      { status: 502 }
-    );
+    const fails = summarizeFailures(attempt.failures);
+    const last = attempt.failures[attempt.failures.length - 1];
+    const msg =
+      `Semua config AI (kategori Chat) gagal — ${fails}. ` +
+      (last?.status
+        ? providerErrorMessage(last.status, last.detail)
+        : timedOut
+          ? "Waktu tunggu habis — provider tidak merespons dalam waktu cukup. Coba lagi atau ganti model."
+          : "Gagal menghubungi server AI. Periksa pengaturan (dan koneksi internet).");
+    return NextResponse.json({ error: msg }, { status: 502 });
   }
 
   const encoder = new TextEncoder();

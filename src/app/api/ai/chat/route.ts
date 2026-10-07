@@ -2,33 +2,56 @@ import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { requireUser } from "@/lib/session";
 import { db } from "@/lib/db";
-import { decryptSecret } from "@/lib/crypto";
-import { chatEndpoint, providerErrorMessage, resolveAiConfig, type AiSettingInput } from "@/lib/ai-providers";
+import { providerErrorMessage } from "@/lib/ai-providers";
 import { resolveAttachmentContext } from "@/lib/ai-attachments";
+import {
+  resolveChain,
+  tryChatCompletion,
+  summarizeFailures,
+} from "@/lib/ai-config-chain";
+import { webSearchForContext, MAX_QUERY_LEN } from "@/lib/ddg-search";
 
 export const runtime = "nodejs";
-export const maxDuration = 60;
+export const maxDuration = 120;
 
 // ─────────────────────────────────────────────────────────────────────
-// POST /api/ai/chat — chat streaming Teman AI (BYOK / default admin).
+// POST /api/ai/chat — chat streaming Teman AI.
 //
 // Protokol response: NDJSON (satu event JSON per baris):
 //   {"type":"chunk","text":"..."}  → potongan jawaban
 //   {"type":"error","message":"..."} → error saat streaming
 //   {"type":"done"}                 → selesai sukses
 // Error sebelum stream mulai dikirim sebagai status HTTP + JSON biasa.
+//
+// Task 29:
+//   • Config kategori "chat" dengan RANTAI FALLBACK berurutan —
+//     entri #1 gagal (jaringan/HTTP) → otomatis coba entri #2, dst.
+//   • Lampiran materi & hasil pencarian web disisipkan sebagai PESAN
+//     USER (pola user→assistant ack) — jauh lebih andal dibaca model
+//     daripada ditempel di system prompt (bug "aku suruh kerjain
+//     nomor 16 dia gak tau apa-apa soalnya").
+//   • Pencarian web DuckDuckGo: perintah "/cari …" "/search …" "/web …"
+//     atau deteksi otomatis (berita terbaru, googling, dsb.).
+//   • Prompt sistem menyuruh model menulis rumus dalam LaTeX.
 // ─────────────────────────────────────────────────────────────────────
 
 const SYSTEM_PROMPT =
   "Kamu adalah Teman AI Aula — teman belajar yang ramah untuk siswa Indonesia. " +
   "Jawab ringkas dan jelas. Gunakan Bahasa Indonesia, kecuali pengguna memakai bahasa lain. " +
   "Bantu mengerjakan dan menjelaskan materi sekolah dengan sabar (jangan hanya memberi jawaban akhir, " +
-  "jelaskan langkahnya). Format jawaban dengan markdown bila membantu (daftar, tebal, blok kode).";
+  "jelaskan langkahnya). Format jawaban dengan markdown bila membantu (daftar, tebal, tabel, blok kode).\n\n" +
+  "RUMUS: tulis setiap rumus matematika/fisika/kimia dalam LaTeX — inline dengan $...$ " +
+  "(mis. $V_p I_p = V_s I_s$, $x^2 + 2x + 1$, $\\frac{1}{2}gt^2$, $H_2O$, $\\sqrt{a^2+b^2}$) " +
+  "dan rumus besar/tampil dengan $$...$$. JANGAN menulis rumus sebagai teks polos seperti V_p I_p tanpa tanda $.\n\n" +
+  "MATERI LAMPIRAN: pesan yang memuat blok === MATERI LAMPIRAN === adalah materi/soal yang dilampirkan " +
+  "pengguna (bisa soal ujian bernomor). BACA dan GUNAKAN isinya untuk menjawab — kalau pengguna minta " +
+  "'kerjakan nomor 16', cari soal bernomor 16 di materi itu lalu kerjakan; JANGAN bilang tidak tahu " +
+  "sebelum mencari di materi lampiran.\n\n" +
+  "PENCARIAN WEB: pesan yang memuat blok === HASIL PENCARIAN WEB === adalah hasil pencarian terkini. " +
+  "Gunakan sebagai rujukan utama untuk hal terkini dan sebut sumbernya dengan [1], [2], dsb.";
 
-const TIMEOUT_MS = 55_000; // abort upstream — HARUS < maxDuration (60 dtk);
-                       // dulu 90 dtk: platform memotong duluan di 60 dtk →
-                       // stream terputus tanpa event error/done & jawaban
-                       // parsial tak pernah tersimpan.
+const TIMEOUT_MS = 50_000; // per entri fallback
+const OVERALL_TIMEOUT_MS = 110_000; // total — HARUS < maxDuration (120 dtk)
 const HISTORY_LIMIT = 20;
 
 // Rate limit sederhana per user (in-memory; best-effort lintas instance
@@ -55,6 +78,31 @@ const bodySchema = z.object({
   attachmentIds: z.array(z.string()).max(8).optional(),
   materialText: z.string().max(20_000).optional(),
 });
+
+// ── Deteksi maksud pencarian web (DDG) ────────────────────────────────
+
+/** Perintah eksplisit: "/cari …", "/search …", "/web …", "/google …". */
+const SEARCH_CMD = /^\/(?:cari|search|web|google|googling)\s+([\s\S]+)/i;
+
+/** Sinyal otomatis (berita terkini, suruh googling, dsb.). */
+const SEARCH_AUTO =
+  /\b(?:cari(?:kan)?\s+(?:di\s+)?(?:google|internet|web|online|net)|googling(?:kan)?|search\s+(?:di\s+)?(?:web|internet|online)|berita\s+(?:terbaru|terkini|hari\s+ini)|hari\s+ini\s+(?:apa|siapa|berapa)|tren\s+(?:sekarang|terbaru)|sedang\s+tren|kapan\s+(?:sekarang|tahun\s+ini)\b.*\?)/i;
+
+interface SearchIntent {
+  active: boolean;
+  query: string;
+}
+
+function detectSearchIntent(message: string): SearchIntent {
+  const cmd = SEARCH_CMD.exec(message);
+  if (cmd) {
+    return { active: true, query: cmd[1].trim().slice(0, MAX_QUERY_LEN) };
+  }
+  if (SEARCH_AUTO.test(message)) {
+    return { active: true, query: message.trim().slice(0, MAX_QUERY_LEN) };
+  }
+  return { active: false, query: "" };
+}
 
 export async function POST(req: NextRequest) {
   const user = await requireUser().catch(() => null);
@@ -87,45 +135,19 @@ export async function POST(req: NextRequest) {
     parsed.data.materialText
   ).catch(() => null);
 
-  // ── Config aktif: milik user → default admin ──
-  const [userRow, adminRow] = await Promise.all([
-    db.aiUserSetting.findUnique({ where: { userId: user.id } }),
-    db.appSetting.findUnique({ where: { key: "ai.default" } }),
-  ]);
-  let adminDefault: AiSettingInput | null = null;
-  if (adminRow) {
-    try {
-      const raw = JSON.parse(adminRow.value) as {
-        provider?: string;
-        baseUrl?: string | null;
-        apiKeyEnc?: string | null;
-        model?: string | null;
-      };
-      adminDefault = {
-        provider: raw.provider ?? "",
-        baseUrl: raw.baseUrl ?? null,
-        apiKey: decryptSecret(raw.apiKeyEnc ?? null),
-        model: raw.model ?? null,
-      };
-    } catch {
-      adminDefault = null;
-    }
-  }
-  const userSetting: AiSettingInput | null = userRow
-    ? {
-        provider: userRow.provider,
-        baseUrl: userRow.baseUrl,
-        apiKey: decryptSecret(userRow.apiKeyEnc),
-        model: userRow.model,
-      }
+  // ── Pencarian web DuckDuckGo (perintah /cari + deteksi otomatis) ──
+  const intent = detectSearchIntent(message);
+  const search = intent.active
+    ? await webSearchForContext(intent.query).catch(() => null)
     : null;
 
-  const config = resolveAiConfig(userSetting, adminDefault);
-  if (!config) {
+  // ── Config chain kategori chat (user → admin; fallback berurutan) ──
+  const chain = await resolveChain(user.id, "chat");
+  if (!chain.length) {
     return NextResponse.json(
       {
         error:
-          "Belum ada AI terpasang — buka Pengaturan Teman AI untuk memasang kunci API milikmu, atau hubungi admin agar mengatur default.",
+          "Belum ada AI terpasang — buka Pengaturan AI untuk memasang kunci API milikmu (kategori Chat), atau hubungi admin agar mengatur default.",
       },
       { status: 400 }
     );
@@ -147,13 +169,41 @@ export async function POST(req: NextRequest) {
     data: { userId: user.id, role: "user", content: message },
   });
 
-  // ── Panggil provider (kompatibel OpenAI chat completions, SSE) ──
+  // ── Susun pesan: pola user→assistant ack untuk lampiran & pencarian ──
+  // (dulu konteks lampiran ditempel di system prompt — model lemah kerap
+  // mengabaikannya; pola pesan eksplisit terbaca jauh lebih konsisten)
+  type Msg = { role: "system" | "user" | "assistant"; content: string };
+  const msgs: Msg[] = [{ role: "system", content: SYSTEM_PROMPT }, ...history];
+  if (attachCtx) {
+    msgs.push({
+      role: "user",
+      content: `Aku melampirkan materi berikut:\n\n${attachCtx}`,
+    });
+    msgs.push({
+      role: "assistant",
+      content:
+        "Materi lampiran diterima. Aku akan membaca isinya dulu sebelum menjawab.",
+    });
+  }
+  if (search) {
+    msgs.push({
+      role: "user",
+      content: `Cari info terbaru di web. Ini hasil pencariannya:\n\n${search.block}`,
+    });
+    msgs.push({
+      role: "assistant",
+      content: "Hasil pencarian diterima. Aku akan merujuk sumbernya bila relevan.",
+    });
+  }
+  msgs.push({ role: "user", content: message });
+
+  // ── Panggil provider (fallback berurutan, SSE) ──
   const controller = new AbortController();
   let timedOut = false;
   const timer = setTimeout(() => {
     timedOut = true;
     controller.abort();
-  }, TIMEOUT_MS);
+  }, OVERALL_TIMEOUT_MS);
 
   // User menekan Stop / menutup halaman → hentikan upstream.
   let clientAborted = false;
@@ -163,72 +213,35 @@ export async function POST(req: NextRequest) {
   };
   req.signal?.addEventListener("abort", onClientAbort);
 
-  let upstream: Response;
-  try {
-    upstream = await fetch(chatEndpoint(config.baseUrl), {
-      method: "POST",
-      signal: controller.signal,
-      headers: {
-        "Content-Type": "application/json",
-        ...(config.apiKey ? { Authorization: `Bearer ${config.apiKey}` } : {}),
-      },
-      body: JSON.stringify({
-        model: config.model,
-        messages: [
-          {
-            role: "system",
-            content: attachCtx
-              ? `${SYSTEM_PROMPT}\n\n${attachCtx}`
-              : SYSTEM_PROMPT,
-          },
-          ...history,
-          { role: "user", content: message },
-        ],
-        stream: true,
-        max_tokens: 2048,
-      }),
-    });
-  } catch (err) {
+  const attempt = await tryChatCompletion(
+    chain,
+    { messages: msgs, stream: true, max_tokens: 3000 },
+    { signal: controller.signal, timeoutMs: TIMEOUT_MS }
+  );
+  const upstream = attempt.response;
+
+  if (!upstream || !upstream.body) {
     clearTimeout(timer);
     req.signal?.removeEventListener("abort", onClientAbort);
-    const msg = timedOut
-      ? "Waktu tunggu habis — provider tidak merespons dalam waktu cukup. Coba lagi atau ganti model."
+    if (clientAborted) {
+      return new Response(null, { status: 499 });
+    }
+    const fails = summarizeFailures(attempt.failures);
+    const last = attempt.failures[attempt.failures.length - 1];
+    const friendly = last?.status
+      ? providerErrorMessage(last.status, last.detail)
       : "Gagal menghubungi server AI. Periksa Base URL di pengaturan (dan koneksi internet).";
-    return NextResponse.json({ error: msg, detail: String((err as Error)?.name ?? "") }, { status: 502 });
+    return NextResponse.json(
+      {
+        error:
+          `Semua config AI (kategori Chat) gagal — ${fails}. ` +
+          `${friendly} ${timedOut ? "(waktu tunggu habis)" : ""}`.trim(),
+      },
+      { status: 502 }
+    );
   }
 
-  // Error sebelum stream mulai → balas sebagai status HTTP (bukan stream).
-  // Timer TIDAK di-clear sebelum body error terbaca — dulu: upstream.json()
-  // tanpa batas waktu bisa menggantung sampai platform memotong (60 dtk).
-  if (!upstream.ok) {
-    let detail: string | null = null;
-    try {
-      const errJson = await upstream.json().catch(() => null);
-      // OpenRouter menyimpan alasan asli di error.metadata.raw — pakai itu dulu.
-      detail =
-        errJson?.error?.metadata?.raw ??
-        errJson?.error?.message ??
-        errJson?.message ??
-        null;
-      if (typeof detail !== "string") detail = null;
-    } catch {
-      /* abaikan */
-    }
-    clearTimeout(timer);
-    req.signal?.removeEventListener("abort", onClientAbort);
-    return NextResponse.json(
-      { error: providerErrorMessage(upstream.status, detail) },
-      { status: 502 }
-    );
-  }
-  if (!upstream.body) {
-    clearTimeout(timer);
-    req.signal?.removeEventListener("abort", onClientAbort);
-    return NextResponse.json(
-      { error: "Provider tidak mengirim respons yang bisa dibaca (stream kosong)." },
-      { status: 502 }
-    );
-  }
+  const config = attempt.config!;
 
   const encoder = new TextEncoder();
   const decoder = new TextDecoder();
@@ -341,6 +354,9 @@ export async function POST(req: NextRequest) {
       "Cache-Control": "no-cache, no-transform",
       "X-Accel-Buffering": "no",
       "X-Ai-Message-Id": saved.id,
+      // Entri chain mana yang menjawab (transparansi fallback).
+      "X-Ai-Provider": config.provider,
+      "X-Ai-Model": config.model,
     },
   });
 }

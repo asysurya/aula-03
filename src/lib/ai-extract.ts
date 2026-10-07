@@ -1,12 +1,16 @@
 // ── Ekstraksi teks dari lampiran materi (server-side) ──────────────────
 // Dipakai endpoint upload /api/ai/attachments. File format APA PUN
 // diterima; teksnya diambil best-effort:
-//   PDF   → pdfjs-dist legacy (getTextContent per halaman)
+//   PDF   → pdfjs-dist legacy (getTextContent per halaman);
+//           bila TANPA lapisan teks (hasil scan) & model vision terpasang
+//           → render tiap halaman jadi JPEG → OCR model vision per halaman
 //   DOCX  → mammoth (extractRawText)
 //   XLSX/ODS → sheetjs (sheet_to_csv per lembar)
 //   ZIP   → fflate (daftar isi + file teks di dalamnya)
 //   teks  (txt/md/csv/json/kode/…& text/*) → decode utf-8
-//   lain  (gambar/audio/video/biner) → "[berkas biner]" (nama+tipe+ukuran)
+//   gambar (png/jpg/webp/…) → OCR model vision (bila terpasang),
+//           tanpa itu dicatat sebagai biner
+//   lain  (audio/video/biner) → "[berkas biner]" (nama+tipe+ukuran)
 // Hasil di-cap per berkas supaya konteks AI tetap terkendali.
 
 const MAX_TEXT_PER_FILE = 150_000; // karakter
@@ -17,6 +21,24 @@ const MAX_ZIP_ENTRY_BYTES = 400_000;
 // karakter, jadi isi setelah batas ini tidak pernah terpakai.
 const TEXT_DECODE_LIMIT = 4 * 1024 * 1024;
 
+// Task 29: extractor vision opsional (gambar asli + PDF scan).
+// Di-inject sebagai TYPE-only import supaya ai-extract tetap murni
+// (tanpa dependensi db/crypto) dan mudah diuji.
+import type { VisionExtractor } from "@/lib/ai-vision";
+
+export interface ExtractOptions {
+  /** OCR model vision untuk gambar & PDF hasil scan (opsional). */
+  vision?: VisionExtractor;
+}
+
+/** Ekstensi gambar yang bisa dibaca model vision. */
+const IMAGE_EXTS = new Set([
+  "png", "jpg", "jpeg", "webp", "gif", "bmp", "avif", "tif", "tiff",
+]);
+
+/** Rata-rata karakter non-spasi per halaman di bawah ini → dianggap scan. */
+const SCANNED_CHARS_PER_PAGE = 25;
+
 /** Decode utf8 dengan guard memori untuk berkas teks raksasa. */
 function decodeText(buf: Buffer): string {
   const part = buf.length > TEXT_DECODE_LIMIT ? buf.subarray(0, TEXT_DECODE_LIMIT) : buf;
@@ -24,7 +46,7 @@ function decodeText(buf: Buffer): string {
 }
 
 export interface ExtractResult {
-  kind: "PDF" | "DOCX" | "XLSX" | "ZIP" | "Teks" | "Biner";
+  kind: "PDF" | "DOCX" | "XLSX" | "ZIP" | "Teks" | "Biner" | "Gambar";
   text: string;
 }
 
@@ -66,10 +88,28 @@ function looksTextual(buf: Buffer): boolean {
 export async function extractText(
   name: string,
   mime: string,
-  buf: Buffer
+  buf: Buffer,
+  opts: ExtractOptions = {}
 ): Promise<ExtractResult> {
   const ext = extOf(name);
   const m = (mime || "").toLowerCase();
+
+  // ── Gambar → OCR model vision (Task 29) ──
+  if (
+    IMAGE_EXTS.has(ext) ||
+    m.startsWith("image/")
+  ) {
+    if (opts.vision) {
+      const visionText = await opts.vision({ type: "image", data: buf, mime: m || `image/${ext}` });
+      if (visionText && visionText.trim()) {
+        return { kind: "Gambar", text: cap(visionText.trim()) };
+      }
+    }
+    return {
+      kind: "Biner",
+      text: `[berkas gambar "${name}"${m ? ` (${m})` : ""}, ${buf.length} byte — pasang model Vision di Pengaturan AI (kategori Vision) agar isinya bisa dibaca]`,
+    };
+  }
 
   // ── PDF ──
   if (ext === "pdf" || m === "application/pdf") {
@@ -98,6 +138,25 @@ export async function extractText(
         const page = await doc.getPage(i);
         const tc = await page.getTextContent();
         out += tc.items.map((it) => it.str ?? "").join(" ") + "\n";
+      }
+      const textLayer = out.replace(/\s+/g, "").length;
+      // PDF hasil scan: lapisan teks kosong/nyaris kosong → OCR vision
+      // PER HALAMAN (bukan seluruh PDF sekaligus — akurasi & memori).
+      if (opts.vision && textLayer < SCANNED_CHARS_PER_PAGE * Math.max(1, pages)) {
+        const visionText = await opts.vision({ type: "pdf", data: buf });
+        if (visionText && visionText.trim()) {
+          return { kind: "PDF", text: cap(visionText.trim()) };
+        }
+        return {
+          kind: "Biner",
+          text: `[berkas PDF "${name}" hasil scan — ekstraksi vision gagal; pastikan model Vision di Pengaturan AI bisa melihat gambar]`,
+        };
+      }
+      if (textLayer < SCANNED_CHARS_PER_PAGE * Math.max(1, pages)) {
+        return {
+          kind: "Biner",
+          text: `[berkas PDF "${name}" tampaknya hasil scan (tanpa lapisan teks) — pasang model Vision di Pengaturan AI (kategori Vision) agar bisa dibaca per halaman]`,
+        };
       }
       return { kind: "PDF", text: cap(out.trim()) };
     } catch {
