@@ -5,8 +5,9 @@
 // - remark-gfm: TABEL |…|, ~~coret~~, task list - [x], autolink —
 //   tanpa ini semuanya tampil sebagai teks mentah (bug lama).
 // - remark-math + rehype-katex: RUMUS ($…$ inline, $$…$$ tampil) —
-//   model disuruh menulis LaTeX; rumus polos ala "V_p I_p = V_s I_s"
-//   otomatis dibungkus $…$ oleh preprocessor (Task 29).
+//   model disuruh menulis LaTeX; Task 30: preprocessor juga menormalkan
+//   pembatas aneh model — \[…\], \(…\), dan rumus dalam kurung siku
+//   [ Q = I^{2} R t = … ] → semuanya jadi $…$/$$…$$ (ai-math-preprocess).
 // - Aman: semua dirender sebagai React element (tanpa innerHTML).
 // - Blok kode: label bahasa + tombol SALIN + tanpa "kotak dalam kotak".
 // - Streaming: fence ``` yang belum tertutup otomatis ditutup sementara
@@ -25,6 +26,7 @@ import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
 import { Check, Copy } from "lucide-react";
 import "katex/dist/katex.min.css";
+import { preprocessMath } from "@/lib/ai-math-preprocess";
 
 /** Tutup fence ``` yang belum selesai (hanya saat streaming). */
 function balanceFences(s: string): string {
@@ -38,112 +40,6 @@ function balanceFences(s: string): string {
 function balanceMath(s: string): string {
   const n = (s.match(/\$\$/g) ?? []).length;
   return n % 2 === 1 ? s + "\n$$" : s;
-}
-
-// ── Preprocessor rumus polos → LaTeX ─────────────────────────────────
-// Model kadang tetap menulis rumus tanpa tanda $ (mis. "V_p I_p = V_s I_s"
-// atau "x^2 + 2x + 1 = 0"). Deteksi konservatif:
-//   token sub/superskrip = 1 karakter + _ atau ^ + 1-2 karakter lalu
-//   batas kata (menolak snake_case/identifier panjang seperti file_name).
-//   segmen dibungkus $…$ bila: ≥2 token, ATAU 1 token + operator
-//   matematika (= + - ± × ÷ · / ≈ ≤ ≥) — dan bukan kode/URL.
-const SUBSUP_TOKEN = /[A-Za-z0-9)\]}][_^][A-Za-z0-9]{1,2}(?![A-Za-z0-9])/g;
-const MATH_OP = /[=+\-−±×÷·≈≤≥^]/;
-
-function countSubsupTokens(text: string): number {
-  const m = text.match(SUBSUP_TOKEN);
-  return m ? m.length : 0;
-}
-
-/** Bungkus bagian baris yang tampak seperti rumus dengan $…$ (per kata). */
-function wrapBareFormulas(text: string): string {
-  if (!text || text.includes("$")) return text; // sudah ada LaTeX — jangan ganggu
-  if (!/[_^]/.test(text)) return text;
-  return text
-    .split("\n")
-    .map((line) => {
-      if (!/[_^]/.test(line) || line.includes("$")) return line;
-
-      // pecah baris jadi kata + pemisah (spasi dipertahankan)
-      const rawParts = line.split(/(\s+)/);
-      type W = { text: string; token: boolean; op: boolean; block: boolean; numeric: boolean };
-      const words: W[] = rawParts
-        .filter((p) => p.length > 0 && !/^\s+$/.test(p))
-        .map((w) => {
-          const clean = w.replace(/^[([{"'“—-]+|[)\]}"'”.,;:!?-]+$/g, "");
-          const block =
-            clean.includes("://") || /^(https?:|www\.|data:)/i.test(clean);
-          return {
-            text: w,
-            token: !block && countSubsupTokens(clean) > 0,
-            op: !block && MATH_OP.test(clean),
-            block,
-            numeric: /^[0-9][0-9.,%°]*$/.test(clean),
-          };
-        });
-
-      const interesting = (w: W) => w.token || w.op;
-      let out = "";
-      let i = 0;
-      const n = words.length;
-      while (i < n) {
-        if (!interesting(words[i])) {
-          out += words[i].text + " ";
-          i++;
-          continue;
-        }
-        // cluster: dari kata menarik pertama sampai terakhir, blok URL
-        // / kata prosa murni (>2 huruf a-z tanpa angka/op) memutus cluster.
-        let j = i;
-        let last = i;
-        for (let k = i + 1; k < n; k++) {
-          const w = words[k];
-          if (w.block) break;
-          if (interesting(w)) {
-            last = k;
-            j = k;
-            continue;
-          }
-          // kata interior: numerik / pendek → masih bagian rumus; prosa
-          // murni panjang → putus.
-          if (w.numeric || /^[a-zA-Z]{1,2}$/.test(w.text.replace(/[^\w]/g, ""))) {
-            continue;
-          }
-          break;
-        }
-        // perluas ke numerik tepian (mis. "= 220" di "V_p = 220 V")
-        let end = last;
-        while (end + 1 < n && words[end + 1].numeric) end++;
-        let start = i;
-        while (start - 1 >= 0 && words[start - 1].numeric) start--;
-
-        const cluster = words.slice(start, end + 1);
-        const tokenCount = cluster.filter((w) => w.token).length;
-        const hasOp = cluster.some((w) => w.op);
-        const joined = cluster.map((w) => w.text).join(" ");
-        const isShort = joined.length <= 200;
-        if (tokenCount >= 1 && (tokenCount >= 2 || hasOp) && isShort) {
-          out += `$${joined}$ `;
-        } else {
-          out += joined + " ";
-        }
-        i = end + 1;
-      }
-      return out.replace(/[ ]+$/g, "").replace(/[ ]{2,}/g, " ");
-    })
-    .join("\n");
-}
-
-/**
- * Preprocess konten markdown: bungkus rumus polos menjadi LaTeX.
- * Blok kode ``` … ``` dan inline code ` … ` DILEWATI (jangan sentuh kode).
- */
-export function preprocessMath(content: string): string {
-  if (!content || !/[_^]/.test(content)) return content;
-  const parts = content.split(/(```[\s\S]*?```|`[^`\n]*`)/g);
-  return parts
-    .map((p, i) => (i % 2 === 1 ? p : wrapBareFormulas(p)))
-    .join("");
 }
 
 /** Ambil teks mentah dari tree React (dipakai tombol salin blok kode). */

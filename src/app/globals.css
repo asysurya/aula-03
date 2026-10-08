@@ -253,3 +253,21 @@
   border: 1px solid #d4d4d8;
   padding: 4px 6px;
 }
+
+/* ── Animasi pencarian web Teman AI (Task 30) ─────────────────────────
+ * Kaca pembesar bergoyang + bar progres "menyapu" — dipakai komponen
+ * WebSearchIndicator saat Teman AI sedang menelusuri web. */
+@keyframes ai-search-magnify {
+  0%, 100% { transform: translateX(0) rotate(-10deg) scale(1); }
+  50% { transform: translateX(5px) rotate(12deg) scale(1.12); }
+}
+.ai-search-magnify {
+  animation: ai-search-magnify 0.9s ease-in-out infinite;
+}
+@keyframes ai-search-sweep {
+  0% { left: -40%; }
+  100% { left: 110%; }
+}
+.ai-search-sweep {
+  animation: ai-search-sweep 1.15s ease-in-out infinite;
+}

@@ -24,6 +24,8 @@ import {
   AlertTriangle,
   KeyRound,
   Paperclip,
+  Search,
+  Globe,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -48,6 +50,10 @@ import {
   type AiSettingsData,
 } from "@/components/ai/ai-settings-dialog";
 import { AiMarkdown } from "@/components/ai/ai-markdown";
+import {
+  detectSearchIntent,
+  SEARCH_ENGINE_LABELS,
+} from "@/lib/web-search-intent";
 
 interface ChatMsg {
   id: string;
@@ -58,6 +64,12 @@ interface ChatMsg {
   streaming?: boolean;
   /** Nama berkas yang dilampirkan pada pesan ini (chip kecil). */
   attachNames?: string[];
+  /** Status pencarian web untuk pesan ini (Task 30). */
+  webSearch?: {
+    state: "searching" | "ok" | "fail";
+    engine?: string | null;
+    n?: number;
+  };
 }
 
 export function TemanAiView({ me }: { me: MeResponse }) {
@@ -136,6 +148,10 @@ export function TemanAiView({ me }: { me: MeResponse }) {
 
     const userId = `u-${Date.now()}`;
     const aiId = `a-${Date.now()}`;
+    // Deteksi pencarian web di KLIEN (regex sama dengan server) supaya
+    // animasi "Mencari di web…" tampil SEGERA saat pesan dikirim —
+    // sebelum respons server mulai mengalir (Task 30).
+    const willSearch = detectSearchIntent(text).active;
     setMessages((prev) => [
       ...prev,
       {
@@ -144,7 +160,13 @@ export function TemanAiView({ me }: { me: MeResponse }) {
         content: text,
         attachNames: attachNames.length ? attachNames : undefined,
       },
-      { id: aiId, role: "assistant", content: "", streaming: true },
+      {
+        id: aiId,
+        role: "assistant",
+        content: "",
+        streaming: true,
+        ...(willSearch ? { webSearch: { state: "searching" as const } } : {}),
+      },
     ]);
     setStreaming(true);
 
@@ -182,13 +204,29 @@ export function TemanAiView({ me }: { me: MeResponse }) {
         for (const line of lines) {
           const trimmed = line.trim();
           if (!trimmed) continue;
-          let ev: { type?: string; text?: string; message?: string };
+          let ev: {
+            type?: string;
+            text?: string;
+            message?: string;
+            ok?: boolean;
+            engine?: string | null;
+            n?: number;
+          };
           try {
             ev = JSON.parse(trimmed);
           } catch {
             continue;
           }
-          if (ev.type === "chunk" && ev.text) {
+          if (ev.type === "search") {
+            // Task 30: status pencarian web dari server (event pertama).
+            patchMsg(aiId, {
+              webSearch: {
+                state: ev.ok ? "ok" : "fail",
+                engine: ev.engine ?? null,
+                n: ev.n ?? 0,
+              },
+            });
+          } else if (ev.type === "chunk" && ev.text) {
             got += ev.text;
             patchMsg(aiId, { content: got, streaming: true });
           } else if (ev.type === "error") {
@@ -395,6 +433,28 @@ export function TemanAiView({ me }: { me: MeResponse }) {
                     </p>
                   ) : (
                     <div className="text-sm min-w-0 break-words [&>*:first-child]:mt-0 [&>*:last-child]:mb-0">
+                      {/* Status pencarian web (Task 30) — kecil, di atas isi. */}
+                      {m.webSearch?.state === "ok" ? (
+                        <p
+                          className="mb-1.5 flex items-center gap-1 text-[11px] text-muted-foreground"
+                          data-ai-web-ok="true"
+                        >
+                          <Globe className="size-3 shrink-0 text-emerald-600 dark:text-emerald-400" />
+                          Pencarian web: {m.webSearch.n ?? 0} hasil
+                          {m.webSearch.engine
+                            ? ` · ${SEARCH_ENGINE_LABELS[m.webSearch.engine] ?? m.webSearch.engine}`
+                            : ""}
+                        </p>
+                      ) : null}
+                      {m.webSearch?.state === "fail" ? (
+                        <p
+                          className="mb-1.5 flex items-center gap-1 text-[11px] text-amber-600 dark:text-amber-400"
+                          data-ai-web-fail="true"
+                        >
+                          <Globe className="size-3 shrink-0" />
+                          Pencarian web gagal — dijawab tanpa data web
+                        </p>
+                      ) : null}
                       {/* GFM (tabel/coret/task list) + blok kode dengan tombol
                        * salin — komponen memo: streaming tidak me-render
                        * ulang seluruh riwayat. */}
@@ -402,14 +462,20 @@ export function TemanAiView({ me }: { me: MeResponse }) {
                     </div>
                   )}
                   {m.streaming && !m.content ? (
-                    <div className="flex items-center gap-1.5 text-xs text-muted-foreground py-1">
-                      <span className="inline-flex gap-1">
-                        <Dot delay="0ms" />
-                        <Dot delay="150ms" />
-                        <Dot delay="300ms" />
-                      </span>
-                      Teman AI sedang mengetik…
-                    </div>
+                    m.webSearch?.state === "searching" ? (
+                      /* Animasi "Mencari di web…" (Task 30) — tampil sejak pesan
+                       * dikirim sampai status pencarian/jawaban datang. */
+                      <WebSearchIndicator />
+                    ) : (
+                      <div className="flex items-center gap-1.5 text-xs text-muted-foreground py-1">
+                        <span className="inline-flex gap-1">
+                          <Dot delay="0ms" />
+                          <Dot delay="150ms" />
+                          <Dot delay="300ms" />
+                        </span>
+                        Teman AI sedang mengetik…
+                      </div>
+                    )
                   ) : null}
                   {m.stopped && m.content ? (
                     <p className="text-[11px] text-muted-foreground mt-1">
@@ -512,5 +578,29 @@ function Dot({ delay }: { delay: string }) {
       className="inline-block h-1.5 w-1.5 rounded-full bg-muted-foreground/70 animate-bounce"
       style={{ animationDelay: delay }}
     />
+  );
+}
+
+/** Indikator animasi "Mencari di web…" (Task 30) — kaca pembesar
+ *  bergoyang + bar progres menyapu; dipakai saat Teman AI sedang
+ *  menelusuri web sebelum menjawab. */
+function WebSearchIndicator() {
+  return (
+    <div className="flex flex-col gap-2 py-1.5" data-ai-searching="true">
+      <div className="flex items-center gap-2 text-xs text-muted-foreground">
+        <span className="inline-flex items-center justify-center">
+          <Search className="h-3.5 w-3.5 text-primary ai-search-magnify" />
+        </span>
+        <span>Mencari di web</span>
+        <span className="inline-flex gap-1">
+          <Dot delay="0ms" />
+          <Dot delay="150ms" />
+          <Dot delay="300ms" />
+        </span>
+      </div>
+      <div className="relative h-1 w-44 overflow-hidden rounded-full bg-muted">
+        <div className="ai-search-sweep absolute inset-y-0 w-1/3 rounded-full bg-primary/60" />
+      </div>
+    </div>
   );
 }

@@ -9,7 +9,8 @@ import {
   tryChatCompletion,
   summarizeFailures,
 } from "@/lib/ai-config-chain";
-import { webSearchForContext, MAX_QUERY_LEN } from "@/lib/ddg-search";
+import { webSearchForContext } from "@/lib/ddg-search";
+import { detectSearchIntent } from "@/lib/web-search-intent";
 
 export const runtime = "nodejs";
 export const maxDuration = 120;
@@ -30,8 +31,14 @@ export const maxDuration = 120;
 //     USER (pola user→assistant ack) — jauh lebih andal dibaca model
 //     daripada ditempel di system prompt (bug "aku suruh kerjain
 //     nomor 16 dia gak tau apa-apa soalnya").
-//   • Pencarian web DuckDuckGo: perintah "/cari …" "/search …" "/web …"
-//     atau deteksi otomatis (berita terbaru, googling, dsb.).
+//   • Pencarian web: perintah "/cari …" "/search …" "/web …" atau
+//     deteksi otomatis (berita terbaru, googling, dsb.).
+// Task 30:
+//   • Pencarian web MULTI-MESIN (DDG diblok dari banyak IP server →
+//     fallback Brave/Bing/DDG-API; lihat ddg-core.mjs).
+//   • Event NDJSON PERTAMA {"type":"search",…} memberi tahu klien hasil
+//     pencarian (ok/engine/n) + header X-Ai-Search — UI menampilkan
+//     animasi "Mencari di web…" & status sukses/gagal.
 //   • Prompt sistem menyuruh model menulis rumus dalam LaTeX.
 // ─────────────────────────────────────────────────────────────────────
 
@@ -42,7 +49,8 @@ const SYSTEM_PROMPT =
   "jelaskan langkahnya). Format jawaban dengan markdown bila membantu (daftar, tebal, tabel, blok kode).\n\n" +
   "RUMUS: tulis setiap rumus matematika/fisika/kimia dalam LaTeX — inline dengan $...$ " +
   "(mis. $V_p I_p = V_s I_s$, $x^2 + 2x + 1$, $\\frac{1}{2}gt^2$, $H_2O$, $\\sqrt{a^2+b^2}$) " +
-  "dan rumus besar/tampil dengan $$...$$. JANGAN menulis rumus sebagai teks polos seperti V_p I_p tanpa tanda $.\n\n" +
+  "dan rumus besar/tampil dengan $$...$$. JANGAN menulis rumus sebagai teks polos seperti V_p I_p tanpa tanda $, " +
+  "dan JANGAN membungkus rumus dengan kurung siku [ ... ] atau \\[ ... \\] — selalu pakai $ / $$.\n\n" +
   "MATERI LAMPIRAN: pesan yang memuat blok === MATERI LAMPIRAN === adalah materi/soal yang dilampirkan " +
   "pengguna (bisa soal ujian bernomor). BACA dan GUNAKAN isinya untuk menjawab — kalau pengguna minta " +
   "'kerjakan nomor 16', cari soal bernomor 16 di materi itu lalu kerjakan; JANGAN bilang tidak tahu " +
@@ -79,30 +87,9 @@ const bodySchema = z.object({
   materialText: z.string().max(20_000).optional(),
 });
 
-// ── Deteksi maksud pencarian web (DDG) ────────────────────────────────
-
-/** Perintah eksplisit: "/cari …", "/search …", "/web …", "/google …". */
-const SEARCH_CMD = /^\/(?:cari|search|web|google|googling)\s+([\s\S]+)/i;
-
-/** Sinyal otomatis (berita terkini, suruh googling, dsb.). */
-const SEARCH_AUTO =
-  /\b(?:cari(?:kan)?\s+(?:di\s+)?(?:google|internet|web|online|net)|googling(?:kan)?|search\s+(?:di\s+)?(?:web|internet|online)|berita\s+(?:terbaru|terkini|hari\s+ini)|hari\s+ini\s+(?:apa|siapa|berapa)|tren\s+(?:sekarang|terbaru)|sedang\s+tren|kapan\s+(?:sekarang|tahun\s+ini)\b.*\?)/i;
-
-interface SearchIntent {
-  active: boolean;
-  query: string;
-}
-
-function detectSearchIntent(message: string): SearchIntent {
-  const cmd = SEARCH_CMD.exec(message);
-  if (cmd) {
-    return { active: true, query: cmd[1].trim().slice(0, MAX_QUERY_LEN) };
-  }
-  if (SEARCH_AUTO.test(message)) {
-    return { active: true, query: message.trim().slice(0, MAX_QUERY_LEN) };
-  }
-  return { active: false, query: "" };
-}
+// Deteksi maksud pencarian web dipindah ke modul bersama
+// (src/lib/web-search-intent.ts) — dipakai juga UI untuk animasi
+// "Mencari di web…" yang muncul SEBELUM respons server mulai mengalir.
 
 export async function POST(req: NextRequest) {
   const user = await requireUser().catch(() => null);
@@ -280,6 +267,17 @@ export async function POST(req: NextRequest) {
           /* stream sudah ditutup client */
         }
       };
+      // Task 30: event PERTAMA = status pencarian web (bila pesan memicu
+      // pencarian) supaya klien tahu hasilnya (ok / mesin / jumlah) —
+      // UI mengganti animasi "Mencari di web…" dengan status singkat.
+      if (intent.active) {
+        send({
+          type: "search",
+          ok: search?.ok ?? false,
+          engine: search?.engine ?? null,
+          n: search?.results.length ?? 0,
+        });
+      }
       const reader = upstream.body!.getReader();
       let buf = "";
       try {
@@ -357,6 +355,14 @@ export async function POST(req: NextRequest) {
       // Entri chain mana yang menjawab (transparansi fallback).
       "X-Ai-Provider": config.provider,
       "X-Ai-Model": config.model,
+      // Task 30: status pencarian web — "<mesin>:<n>" sukses / "gagal".
+      ...(intent.active
+        ? {
+            "X-Ai-Search": search?.ok
+              ? `${search.engine}:${search.results.length}`
+              : "gagal",
+          }
+        : {}),
     },
   });
 }

@@ -1,11 +1,14 @@
 #!/usr/bin/env node
 // ─────────────────────────────────────────────────────────────────────
-// MCP SERVER — DuckDuckGo Web Search (Task 29).
+// MCP SERVER — Web Search Multi-Mesin (Task 29; upgrade Task 30).
 //
 // Protokol: Model Context Protocol (JSON-RPC 2.0, stdio newline-delimited).
 // Tools yang diekspos:
 //   • web_search  { query: string, max_results?: number }
-//       → cari web dengan DuckDuckGo (tanpa API key).
+//       → cari web dengan RANTAI FALLBACK: provider ber-kunci (env,
+//         opsional) → DuckDuckGo html/lite → Brave → Bing → DDG API.
+//         Mesin pertama yang mengembalikan hasil menang; mesin yang
+//         gagal diberi cooldown 10 menit.
 //   • read_page   { url: string, max_length?: number }
 //       → ambil isi halaman sebagai teks polos (cap 20.000 karakter).
 //
@@ -23,15 +26,22 @@
 //   }
 //
 // Env:
-//   DDG_BASE_URL — override endpoint DDG (default html.duckduckgo.com;
-//                  berguna untuk proxy/testing).
+//   DDG_BASE_URL            — override endpoint DDG (testing/mock).
+//   WEB_SEARCH_ENGINES      — pin daftar mesin (mis. "ddg-html,ddg-lite").
+//   WEB_SEARCH_TIMEOUT_MS   — batas waktu per mesin (default 6000).
+//   WEB_SEARCH_SERPER_KEY / WEB_SEARCH_BRAVE_KEY / WEB_SEARCH_TAVILY_KEY /
+//   WEB_SEARCH_SEARX_URL    — provider ber-kunci opsional (produksi).
 //
-// Nol dependensi: hanya API standar Node ≥ 18 (fetch, readline, fetch).
+// Nol dependensi: hanya API standar Node ≥ 18 (fetch, readline).
 // Logika pencarian dibagikan dengan aplikasi lewat src/lib/ddg-core.mjs.
 // ─────────────────────────────────────────────────────────────────────
 
 import { createInterface } from "node:readline";
-import { ddgWebSearch, readPageText } from "../src/lib/ddg-core.mjs";
+import {
+  webSearchMulti,
+  readPageText,
+  ENGINE_LABELS,
+} from "../src/lib/ddg-core.mjs";
 
 const PROTOCOL_VERSION = "2024-11-05";
 const SERVER_INFO = { name: "ddg-search", version: "1.0.0" };
@@ -40,9 +50,10 @@ const TOOLS = [
   {
     name: "web_search",
     description:
-      "Cari di web dengan DuckDuckGo (tanpa API key). Mengembalikan daftar " +
-      "hasil: judul, URL, dan ringkasan. Cocok untuk pertanyaan berita, " +
-      "hal terkini, atau topik di luar pengetahuan model.",
+      "Cari di web dengan rantai fallback multi-mesin (provider ber-kunci " +
+      "opsional via env → DuckDuckGo → Brave → Bing; tanpa API key). " +
+      "Mengembalikan daftar hasil: judul, URL, dan ringkasan. Cocok untuk " +
+      "pertanyaan berita, hal terkini, atau topik di luar pengetahuan model.",
     inputSchema: {
       type: "object",
       properties: {
@@ -94,27 +105,32 @@ async function callWebSearch(args) {
     throw new McpError(-32602, "Parameter 'query' wajib berupa string tak kosong.");
   }
   const max = Number.isInteger(args.max_results) ? args.max_results : 6;
-  try {
-    const results = await ddgWebSearch(args.query, { max });
-    const lines = results.map(
-      (r, i) => `[${i + 1}] ${r.title}\n    ${r.url}${r.snippet ? `\n    ${r.snippet}` : ""}`
-    );
+  const { results, engine, errors } = await webSearchMulti(args.query, { max });
+  if (!results.length) {
+    const tried = errors.map(([id, msg]) => `${id}: ${msg}`).join("; ");
     return {
-      content: [
-        {
-          type: "text",
-          text: lines.length
-            ? `Hasil pencarian DuckDuckGo untuk "${args.query}":\n\n${lines.join("\n\n")}`
-            : `Tidak ada hasil untuk "${args.query}".`,
-        },
-      ],
-    };
-  } catch (e) {
-    return {
-      content: [{ type: "text", text: `Pencarian gagal: ${e?.message ?? e}` }],
+      content: [{
+        type: "text",
+        text:
+          `Pencarian gagal — semua mesin penelusuran tidak dapat dihubungi (${tried}). ` +
+          "Kalau ini terus terjadi, pasang provider ber-API-key via env " +
+          "(WEB_SEARCH_SERPER_KEY / WEB_SEARCH_BRAVE_KEY / WEB_SEARCH_TAVILY_KEY / WEB_SEARCH_SEARX_URL).",
+      }],
       isError: true,
     };
   }
+  const label = ENGINE_LABELS[engine] ?? engine;
+  const lines = results.map(
+    (r, i) => `[${i + 1}] ${r.title}\n    ${r.url}${r.snippet ? `\n    ${r.snippet}` : ""}`
+  );
+  return {
+    content: [
+      {
+        type: "text",
+        text: `Hasil pencarian (${label}) untuk "${args.query}":\n\n${lines.join("\n\n")}`,
+      },
+    ],
+  };
 }
 
 async function callReadPage(args) {
