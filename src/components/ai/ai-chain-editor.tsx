@@ -57,11 +57,13 @@ export interface AiChainEditorProps {
   entries: ChainEntryDraft[];
   onChange: (next: ChainEntryDraft[]) => void;
   /** Kategori untuk tombol tes entri TERSIMPAN (user & admin panel). */
-  testCategory?: "chat" | "builder" | "vision";
+  testCategory?: "chat" | "builder" | "vision" | "tts";
   /** Tes entri indeks ke-i lewat spesifikasi (belum tersimpan). */
   onTestEntry?: (index: number) => Promise<EntryTestResult | null>;
   /** Tampilkan saran model vision (kategori vision). */
   vision?: boolean;
+  /** Tampilkan saran model TTS (kategori tts — /audio/speech). */
+  tts?: boolean;
   /** Label ringkas tiap entri: "#1 Utama", "#2 Cadangan"… */
   maxEntries?: number;
   disabled?: boolean;
@@ -75,6 +77,7 @@ export function AiChainEditor({
   onChange,
   onTestEntry,
   vision = false,
+  tts = false,
   maxEntries = 6,
   disabled = false,
 }: AiChainEditorProps) {
@@ -90,7 +93,7 @@ export function AiChainEditor({
     patch(i, {
       provider: p,
       baseUrl: preset?.baseUrl ?? "",
-      model: (vision ? preset?.visionModels?.[0] : preset?.models?.[0]) ?? "",
+      model: (tts ? preset?.ttsModels?.[0] : vision ? preset?.visionModels?.[0] : preset?.models?.[0]) ?? "",
       clearKey: false,
     });
     setTestResults((r) => ({ ...r, [i]: undefined as never }));
@@ -125,7 +128,11 @@ export function AiChainEditor({
     <div className="space-y-3">
       {entries.map((e, i) => {
         const preset = PROVIDERS[e.provider as keyof typeof PROVIDERS];
-        const models = vision ? preset?.visionModels ?? preset?.models ?? [] : preset?.models ?? [];
+        const models = tts
+          ? preset?.ttsModels ?? []
+          : vision
+            ? preset?.visionModels ?? preset?.models ?? []
+            : preset?.models ?? [];
         const res = testResults[i];
         const testing = testingIdx === i;
         return (
@@ -211,13 +218,19 @@ export function AiChainEditor({
 
             <div className="space-y-1.5">
               <Label className="text-xs">
-                Model{vision ? " (wajib bisa melihat gambar)" : ""}
+                Model{vision ? " (wajib bisa melihat gambar)" : tts ? " (model suara / audio)" : ""}
               </Label>
               <Input
                 className="h-9"
                 value={e.model}
                 onChange={(ev) => patch(i, { model: ev.target.value })}
-                placeholder={vision ? "mis. gpt-4o-mini / gemini-2.0-flash" : "mis. gpt-4o-mini"}
+                placeholder={
+                  tts
+                    ? "mis. gpt-4o-mini-tts / tts-1"
+                    : vision
+                      ? "mis. gpt-4o-mini / gemini-2.0-flash"
+                      : "mis. gpt-4o-mini"
+                }
                 autoComplete="off"
                 disabled={disabled}
               />

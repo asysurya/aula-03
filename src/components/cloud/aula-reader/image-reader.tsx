@@ -22,7 +22,8 @@ import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { Slider } from "@/components/ui/slider";
 import { toast } from "sonner";
-import { cleanForTts, splitTtsChunks } from "@/lib/reader/tts-text";
+import { cleanForTts, buildTtsChunks } from "@/lib/reader/tts-text";
+import { useAulaTts, TtsModeToggle } from "./tts-player";
 import {
   ANNO_COLORS,
   type AnnoTool,
@@ -70,7 +71,9 @@ export function ImageReader({
   // ── Task 29: Bacakan gambar dengan MODEL VISION ──
   // Foto lembar soal / screenshot / materi bergambar dikirim ke
   // /api/ai/vision/page (mode "image") → teks terparapi → TTS.
-  const [ttsPlaying, setTtsPlaying] = useState(false);
+  /** Task 31: pemutar 2 mode (perangkat / Suara AI). */
+  const tts = useAulaTts();
+  const ttsPlaying = tts.playing || tts.loading;
   const [ttsLoading, setTtsLoading] = useState(false);
   const ttsStop = useRef(false);
   const visionText = useRef<string | null>(null);
@@ -208,11 +211,10 @@ export function ImageReader({
   // Reset bacaan saat file berganti.
   useEffect(() => {
     ttsStop.current = true;
-    if (typeof window !== "undefined") window.speechSynthesis?.cancel();
-    setTtsPlaying(false);
+    tts.stop();
     setTtsLoading(false);
     visionText.current = null;
-  }, [url]);
+  }, [url, tts]);
 
   useEffect(() => {
     return () => {
@@ -222,10 +224,9 @@ export function ImageReader({
   }, []);
 
   const toggleTts = useCallback(async () => {
-    if (ttsPlaying || ttsLoading) {
+    if (tts.playing || tts.loading || ttsLoading) {
       ttsStop.current = true;
-      window.speechSynthesis?.cancel();
-      setTtsPlaying(false);
+      tts.stop();
       setTtsLoading(false);
       return;
     }
@@ -261,42 +262,19 @@ export function ImageReader({
         visionText.current = text;
       }
       setTtsLoading(false);
-      const chunks = splitTtsChunks(cleanForTts(text));
+      const chunks = buildTtsChunks(cleanForTts(text));
       if (!chunks.length) {
         toast.info("Gambar ini tidak memuat teks yang bisa dibacakan.");
         return;
       }
-      setTtsPlaying(true);
-      let idx = 0;
-      const speakNext = () => {
-        if (ttsStop.current) {
-          setTtsPlaying(false);
-          return;
-        }
-        if (idx >= chunks.length) {
-          setTtsPlaying(false);
-          return;
-        }
-        const u = new SpeechSynthesisUtterance(chunks[idx++]);
-        const id = window.speechSynthesis
-          .getVoices()
-          .find((v) => v.lang?.toLowerCase().startsWith("id"));
-        if (id) u.voice = id;
-        u.lang = id?.lang ?? "id-ID";
-        u.rate = 1;
-        u.onend = speakNext;
-        u.onerror = () => setTtsPlaying(false);
-        window.speechSynthesis.speak(u);
-      };
-      speakNext();
+      tts.speakChunks(chunks);
     } catch (e) {
       setTtsLoading(false);
-      setTtsPlaying(false);
       toast.error("Gagal membacakan gambar", {
         description: String((e as Error)?.message ?? ""),
       });
     }
-  }, [ttsPlaying, ttsLoading, url]);
+  }, [tts, ttsLoading, url]);
 
   const canPan = tool === "none";
 
@@ -364,6 +342,14 @@ export function ImageReader({
         >
           <Sun className="size-4" />
         </Button>
+        {/* Task 31: pilih mode suara — perangkat (lama) / Suara AI. */}
+        <TtsModeToggle
+          mode={tts.mode}
+          onChange={tts.setMode}
+          preparing={tts.aiPreparing}
+          progress={tts.aiProgress}
+          stage={tts.aiStage}
+        />
         {/* Task 29: bacakan teks pada gambar (OCR model vision → TTS). */}
         <Button
           variant={ttsPlaying || ttsLoading ? "secondary" : "outline"}

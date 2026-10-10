@@ -1,19 +1,21 @@
 "use client";
 
 // ─────────────────────────────────────────────────────────────────────
-// Dialog Pengaturan AI — SATU PANEL untuk 3 kategori (Task 29):
+// Dialog Pengaturan AI — SATU PANEL untuk 4 kategori (Task 29 + Task 31):
 //   • Chat    — Teman AI, Teman Belajar, Pusat Belajar
 //   • Builder — AI Builder & generator soal
 //   • Vision  — baca gambar & PDF hasil scan (per halaman)
+//   • Suara   — TTS mode "Suara AI" Aula Reader (provider /audio/speech)
 // Tiap kategori punya RANTAI FALLBACK berurutan (#1 utama → #2 cadangan
 // bila #1 gagal → …) yang bisa diatur prioritasnya (naik/turun).
-// BYOK per kategori; kategori tanpa entri mengikuti default admin.
+// BYOK per kategori; kategori tanpa entri mengikuti default admin
+// (khusus Suara: bila kosong total, otomatis memakai suara lokal Piper).
 // Kunci lama tidak pernah dikirim balik — kosongkan input = pertahankan.
 // ─────────────────────────────────────────────────────────────────────
 
 import { useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
-import { Loader2, Info, PlugZap, MessageCircle, Hammer, Eye, ShieldCheck } from "lucide-react";
+import { Loader2, Info, PlugZap, MessageCircle, Hammer, Eye, ShieldCheck, Volume2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -110,6 +112,7 @@ const TAB_META: Record<AiCategory, { icon: typeof Eye; label: string }> = {
   chat: { icon: MessageCircle, label: "Chat" },
   builder: { icon: Hammer, label: "Builder" },
   vision: { icon: Eye, label: "Vision" },
+  tts: { icon: Volume2, label: "Suara" },
 };
 
 export function AiSettingsDialog({
@@ -129,6 +132,7 @@ export function AiSettingsDialog({
     chat: { followDefault: true, entries: [] },
     builder: { followDefault: true, entries: [] },
     vision: { followDefault: true, entries: [] },
+    tts: { followDefault: true, entries: [] },
   });
   const [testingActive, setTestingActive] = useState(false);
   const [activeTest, setActiveTest] = useState<EntryTestResult | null>(null);
@@ -142,6 +146,7 @@ export function AiSettingsDialog({
         chat: draftFromView(d.categories.chat),
         builder: draftFromView(d.categories.builder),
         vision: draftFromView(d.categories.vision),
+        tts: draftFromView(d.categories.tts),
       });
     }
     setLoading(false);
@@ -309,7 +314,7 @@ export function AiSettingsDialog({
           </div>
         ) : (
           <Tabs value={tab} onValueChange={(v) => { setTab(v as AiCategory); setActiveTest(null); }}>
-            <TabsList className="grid w-full grid-cols-3">
+            <TabsList className="grid w-full grid-cols-4">
               {AI_CATEGORIES.map((c) => {
                 const Icon = TAB_META[c].icon;
                 return (
@@ -429,6 +434,7 @@ export function AiSettingsDialog({
                         onChange={(next) => setDraft({ followDefault: false, entries: next })}
                         onTestEntry={testEntry}
                         vision={c === "vision"}
+                        tts={c === "tts"}
                       />
                     ) : null}
                   </div>

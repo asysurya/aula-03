@@ -59,7 +59,7 @@ const entrySchema = z.object({
 const putSchema = z.union([
   // Format baru: per kategori.
   z.object({
-    category: z.enum(["chat", "builder", "vision"]),
+    category: z.enum(["chat", "builder", "vision", "tts"]),
     entries: z.array(entrySchema).max(MAX_CHAIN_ENTRIES).optional(),
     followDefault: z.boolean().optional(),
   }),

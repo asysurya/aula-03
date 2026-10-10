@@ -109,6 +109,7 @@ interface AdminFallbacksShape {
   chat?: ChainEntryStored[];
   builder?: ChainEntryStored[];
   vision?: ChainEntryStored[];
+  tts?: ChainEntryStored[];
 }
 
 async function loadAdminFallbacks(): Promise<AdminFallbacksShape> {

@@ -158,7 +158,7 @@ const entrySchema = z.object({
 const putSchema = z.union([
   // Format baru: default per kategori (rantai fallback).
   z.object({
-    category: z.enum(["chat", "builder", "vision"]),
+    category: z.enum(["chat", "builder", "vision", "tts"]),
     entries: z.array(entrySchema).max(MAX_CHAIN_ENTRIES).optional(),
     disabled: z.boolean().optional(), // true → hapus default kategori ini
   }),

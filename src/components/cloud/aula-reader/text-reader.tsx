@@ -21,7 +21,8 @@ import { toast } from "sonner";
 import { ANNO_COLORS, newId, useAnnotations } from "./annotations";
 import { copyTextToClipboard } from "./selection-actions";
 import { AiMarkdown } from "@/components/ai/ai-markdown";
-import { cleanForTts, splitTtsChunks } from "@/lib/reader/tts-text";
+import { cleanForTts, buildTtsChunks } from "@/lib/reader/tts-text";
+import { useAulaTts, TtsModeToggle } from "./tts-player";
 
 // ─────────────────────────────────────────────────────────────────────────
 // Aula Reader — Teks / Markdown / kode.
@@ -58,7 +59,9 @@ export function TextReader({
   const [fontSize, setFontSize] = useState(15);
   const [theme, setTheme] = useState<"light" | "paper" | "dark">("paper");
   const [mono, setMono] = useState(false);
-  const [ttsPlaying, setTtsPlaying] = useState(false);
+  /** Task 31: pemutar 2 mode (perangkat / Suara AI). */
+  const tts = useAulaTts();
+  const ttsPlaying = tts.playing || tts.loading;
   const [selRange, setSelRange] = useState<{ start: number; end: number } | null>(null);
   const [selColor, setSelColor] = useState(ANNO_COLORS[0]);
   const [showHlBar, setShowHlBar] = useState(false);
@@ -195,43 +198,29 @@ export function TextReader({
   }
 
   // TTS untuk TEKS YANG DISELEKSI (dipakai di bar stabilo).
-  // Task 29: dirapiikan dulu (rumus/tabel/footnote → bentuk terbaca).
+  // Task 29: dirapiikan dulu (rumus/tabel/footnote → bentuk terbaca);
+  // Task 31: diputar lewat pemutar 2 mode + jeda judul/paragraf.
   const speakSelection = useCallback(() => {
     if (!selRange || !text) return;
     if (selTts) {
-      window.speechSynthesis.cancel();
       selTtsStop.current = true;
+      tts.stop();
       setSelTts(false);
       return;
     }
     if (ttsPlaying) {
       ttsStop.current = true;
-      window.speechSynthesis.cancel();
-      setTtsPlaying(false);
+      tts.stop();
     }
     const potongan = text.slice(selRange.start, selRange.end);
     selTtsStop.current = false;
-    const chunks = splitTtsChunks(cleanForTts(potongan));
+    const chunks = buildTtsChunks(cleanForTts(potongan));
     if (!chunks.length) return;
-    let idx = 0;
-    const speakNext = () => {
-      if (selTtsStop.current || idx >= chunks.length) {
-        setSelTts(false);
-        return;
-      }
-      const u = new SpeechSynthesisUtterance(chunks[idx++]);
-      const id = window.speechSynthesis
-        .getVoices()
-        .find((v) => v.lang?.toLowerCase().startsWith("id"));
-      if (id) u.voice = id;
-      u.lang = id?.lang ?? "id-ID";
-      u.onend = speakNext;
-      u.onerror = () => setSelTts(false);
-      window.speechSynthesis.speak(u);
-    };
     setSelTts(true);
-    speakNext();
-  }, [selRange, text, selTts, ttsPlaying]);
+    tts.speakChunks(chunks, {
+      onFinish: () => setSelTts(false),
+    });
+  }, [selRange, text, selTts, ttsPlaying, tts]);
 
   // Salin teks yang diseleksi.
   const copySelection = useCallback(async () => {
@@ -244,38 +233,20 @@ export function TextReader({
   // TTS
   // Task 29: teks dirapiikan dulu (LaTeX, tabel, penanda footnote,
   // nomor halaman) → dibacakan per potongan kalimat.
+  // Task 31: potongan ber-jeda (judul 700 ms / paragraf 450 ms) + mode
+  // Suara AI (server) atau suara perangkat.
   const toggleTts = useCallback(() => {
     if (ttsPlaying) {
       ttsStop.current = true;
-      window.speechSynthesis.cancel();
-      setTtsPlaying(false);
+      tts.stop();
       return;
     }
     if (!text) return;
     ttsStop.current = false;
-    setTtsPlaying(true);
-    // Potong per kalimat supaya mulai cepat & bisa dihentikan halus.
-    const chunks = splitTtsChunks(cleanForTts(text));
-    if (!chunks.length) {
-      setTtsPlaying(false);
-      return;
-    }
-    let idx = 0;
-    const speakNext = () => {
-      if (ttsStop.current) return setTtsPlaying(false);
-      if (idx >= chunks.length) return setTtsPlaying(false);
-      const u = new SpeechSynthesisUtterance(chunks[idx++]);
-      const id = window.speechSynthesis
-        .getVoices()
-        .find((v) => v.lang?.toLowerCase().startsWith("id"));
-      if (id) u.voice = id;
-      u.lang = id?.lang ?? "id-ID";
-      u.onend = speakNext;
-      u.onerror = () => setTtsPlaying(false);
-      window.speechSynthesis.speak(u);
-    };
-    speakNext();
-  }, [ttsPlaying, text]);
+    const chunks = buildTtsChunks(cleanForTts(text));
+    if (!chunks.length) return;
+    tts.speakChunks(chunks);
+  }, [ttsPlaying, text, tts]);
 
   useEffect(() => {
     return () => {
@@ -365,6 +336,14 @@ export function TextReader({
         >
           {theme === "dark" ? <Moon className="size-4" /> : <Sun className="size-4" />}
         </Button>
+        {/* Task 31: pilih mode suara — perangkat (lama) / Suara AI. */}
+        <TtsModeToggle
+          mode={tts.mode}
+          onChange={tts.setMode}
+          preparing={tts.aiPreparing}
+          progress={tts.aiProgress}
+          stage={tts.aiStage}
+        />
         <Button
           variant="outline"
           size="icon"

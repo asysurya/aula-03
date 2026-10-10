@@ -20,16 +20,30 @@
 //      WEB_SEARCH_TAVILY_KEY   → api.tavily.com
 //      WEB_SEARCH_SEARX_URL    → instans SearXNG sendiri (format=json)
 //   2. ddg-html   → POST html.duckduckgo.com/html/  (hasil lengkap)
-//   3. ddg-lite   → POST lite.duckduckgo.com/lite/  (fallback DDG)
+//   3. jina       → GET  s.jina.ai/<query> (mesin server-friendly —
+//      dirancang untuk dipanggil dari server/agent; tanpa kunci tetap
+//      jalan dengan batas laju; WEB_SEARCH_JINA_KEY utk kuota lebih)
 //   4. brave      → GET  search.brave.com/search?q= (HTML, tanpa kunci)
 //   5. bing       → GET  www.bing.com/search?q=     (HTML, tanpa kunci)
-//   6. ddg-api    → GET  api.duckduckgo.com (Instant Answer JSON resmi)
+//   6. mojeek     → GET  www.mojeek.com/search?q=   (indeks sendiri,
+//      paling toleran terhadap IP datacenter)
+//   7. ecosia     → GET  www.ecosia.org/search?q=   (indeks Bing, HTML)
+//   8. wikipedia  → API resmi id.wikipedia.org (→ en bila kosong) —
+//      SELALU bisa dihubungi dari mana pun; bagus utk materi pelajaran
+//   9. ddg-lite   → POST lite.duckduckgo.com/lite/  (fallback DDG)
+//  10. ddg-api    → GET  api.duckduckgo.com (Instant Answer JSON resmi)
 //
 // Env:
 //   DDG_BASE_URL            — override endpoint DDG (testing/mock).
+//   JINA_BASE_URL           — override endpoint s.jina.ai (testing/mock).
+//   WIKIPEDIA_BASE_URL      — override id.wikipedia.org (testing/mock).
+//   MOJEEK_BASE_URL         — override www.mojeek.com (testing/mock).
+//   ECOSIA_BASE_URL         — override www.ecosia.org (testing/mock).
 //   WEB_SEARCH_ENGINES      — daftar id mesin dipisah koma (pin untuk
 //                             testing, mis. "ddg-html,ddg-lite").
 //   WEB_SEARCH_TIMEOUT_MS   — batas waktu per mesin (default 6000).
+//   WEB_SEARCH_BUDGET_MS    — anggaran waktu TOTAL seluruh rantai
+//                             (default 45000; mesin sisanya dilewati).
 // ─────────────────────────────────────────────────────────────────────
 
 export const DEFAULT_DDG_BASE =
@@ -41,6 +55,12 @@ const UA =
 const ENGINE_TIMEOUT_MS = (() => {
   const n = Number(process.env.WEB_SEARCH_TIMEOUT_MS);
   return Number.isFinite(n) && n >= 500 ? n : 6000;
+})();
+
+/** Anggaran waktu TOTAL seluruh rantai (bukan per mesin). */
+const CHAIN_BUDGET_MS = (() => {
+  const n = Number(process.env.WEB_SEARCH_BUDGET_MS);
+  return Number.isFinite(n) && n >= 2000 ? n : 45_000;
 })();
 
 /** Mesin yang gagal keras (jaringan/HTTP/timeout) dijeda 10 menit. */
@@ -121,6 +141,35 @@ function anchorsWithClass(html, cls) {
     const attrs = m[1] ?? "";
     const classAttr = attrOf(attrs, "class") ?? "";
     if (classAttr.split(/\s+/).includes(cls)) {
+      out.push({ href: attrOf(attrs, "href") ?? "", inner: m[2] ?? "", start: m.index, end: m.index + m[0].length });
+    }
+  }
+  return out;
+}
+
+/** Cari semua tag <p …> dengan class tertentu — urutan atribut bebas. */
+function paragraphsByClass(html, cls) {
+  const out = [];
+  const re = /<p\b([^>]*)>([\s\S]*?)<\/p>/gi;
+  let m;
+  while ((m = re.exec(html)) !== null) {
+    const classAttr = attrOf(m[1] ?? "", "class") ?? "";
+    if (classAttr.split(/\s+/).includes(cls)) {
+      out.push(htmlToText(m[2] ?? ""));
+    }
+  }
+  return out;
+}
+
+/** Cari semua anchor <a …> dengan data-test-id tertentu (Ecosia). */
+function anchorsByDataTestId(html, testId) {
+  const out = [];
+  const re = /<a\b([^>]*)>([\s\S]*?)<\/a>/gi;
+  let m;
+  while ((m = re.exec(html)) !== null) {
+    const attrs = m[1] ?? "";
+    const tid = attrOf(attrs, "data-test-id");
+    if (tid === testId) {
       out.push({ href: attrOf(attrs, "href") ?? "", inner: m[2] ?? "", start: m.index, end: m.index + m[0].length });
     }
   }
@@ -345,6 +394,205 @@ export function parseDdgApi(data, max = 6) {
   return out;
 }
 
+// ── Parser Jina (s.jina.ai — server-friendly, tanpa kunci opsional) ──
+
+const JINA_INTERNAL = /(^|\.)(jina\.ai|jina-ai\.com)$/i;
+
+/** Parse respons s.jina.ai — bisa JSON {data:[…]} ATAU markdown link. */
+export function parseJinaSearch(text, max = 6) {
+  const out = [];
+  const seen = new Set();
+  const push = (title, url, snippet) => {
+    if (out.length >= max) return;
+    const t = String(title ?? "").replace(/^[\[\d.\]\s]+/, "").replace(/\*+/g, "").trim();
+    const u = String(url ?? "").trim();
+    if (!t || !isHttpUrl(u) || seen.has(u)) return;
+    let host = "";
+    try {
+      host = new URL(u).hostname;
+    } catch {
+      return;
+    }
+    if (JINA_INTERNAL.test(host)) return;
+    seen.add(u);
+    out.push({ title: t.slice(0, 160), url: u, snippet: String(snippet ?? "").slice(0, 240) });
+  };
+
+  // Bentuk 1: JSON {"data":[{"title","url","snippet"|"content"}]}.
+  try {
+    const j = JSON.parse(text);
+    const arr = Array.isArray(j) ? j : (j?.data ?? j?.results);
+    if (Array.isArray(arr)) {
+      for (const r of arr) {
+        push(r?.title ?? r?.title ?? r?.name, r?.url ?? r?.link, r?.snippet ?? r?.content ?? r?.description);
+      }
+      if (out.length) return out;
+    }
+  } catch {
+    /* bukan JSON — lanjut markdown */
+  }
+
+  // Bentuk 2: markdown link [judul](url) — snippet = teks di antara link.
+  const links = [];
+  const re = /\[(?:\[(\d+)\]\s*)?([^\]\n]+)\]\((https?:\/\/[^)\s]+)\)/g;
+  let m;
+  while ((m = re.exec(text)) !== null) {
+    links.push({ title: m[2], url: m[3], end: m.index + m[0].length });
+  }
+  for (let i = 0; i < links.length && out.length < max; i++) {
+    const nextStart = links[i + 1]?.end ?? text.length;
+    const snippet = text.slice(links[i].end, Math.min(nextStart, links[i].end + 400)).replace(/\s+/g, " ").trim();
+    push(links[i].title, links[i].url, snippet);
+  }
+
+  // Bentuk 3: daftar bernomor "[1] Judul\nhttps://url\nsnippet".
+  if (out.length < max) {
+    const re2 = /^\s*\[\d+\]\s*([^\n]{8,200})\n\s*(https?:\/\/\S+)\n?\s*([^\n]{0,300})/gm;
+    let m2;
+    while ((m2 = re2.exec(text)) !== null) {
+      push(m2[1], m2[2], m2[3]);
+    }
+  }
+  return out;
+}
+
+// ── Parser Wikipedia (API resmi — selalu bisa dihubungi) ─────────────
+
+/** Parse JSON MediaWiki list=search → daftar hasil. */
+export function parseWikipediaApi(data, base, max = 6) {
+  const out = [];
+  const search = data?.query?.search;
+  if (!Array.isArray(search)) return out;
+  for (const s of search) {
+    if (out.length >= max) break;
+    if (!s?.title) continue;
+    const url = `${base}/wiki/${encodeURIComponent(String(s.title).replace(/ /g, "_"))}`;
+    const snippet = htmlToText(String(s.snippet ?? ""));
+    out.push({ title: String(s.title).slice(0, 160), url, snippet: snippet.slice(0, 240) });
+  }
+  return out;
+}
+
+// ── Parser Mojeek (indeks sendiri — toleran IP datacenter) ─────────────
+
+const MOJEEK_INTERNAL = /(^|\.)mojeek\.com$/i;
+
+/** Parse halaman hasil Mojeek → daftar hasil. */
+export function parseMojeekHtml(html, max = 6) {
+  let links = anchorsWithClass(html, "ob"); // judul hasil
+  if (!links.length) links = anchorsWithClass(html, "title");
+  const snippets = paragraphsByClass(html, "s");
+  const out = [];
+  const seen = new Set();
+
+  if (links.length) {
+    let idx = 0;
+    for (const a of links) {
+      if (out.length >= max) break;
+      let host = "";
+      try {
+        host = new URL(a.href).hostname;
+      } catch {
+        idx++;
+        continue;
+      }
+      if (!isHttpUrl(a.href) || MOJEEK_INTERNAL.test(host)) {
+        idx++;
+        continue;
+      }
+      const title = htmlToText(a.inner);
+      if (title.length < 6) {
+        idx++;
+        continue;
+      }
+      const noFrag = a.href.split("#")[0];
+      if (seen.has(noFrag)) {
+        idx++;
+        continue;
+      }
+      seen.add(noFrag);
+      out.push({ title: title.slice(0, 160), url: noFrag, snippet: (snippets[out.length] ?? "").slice(0, 240) });
+      idx++;
+    }
+    if (out.length) return out;
+  }
+
+  // Fallback generik: anchor eksternal pertama di tiap blok hasil.
+  const anchors = [];
+  const re = /<a\b([^>]*)>([\s\S]*?)<\/a>/gi;
+  let m;
+  while ((m = re.exec(html)) !== null) {
+    const href = attrOf(m[1] ?? "", "href") ?? "";
+    if (!isHttpUrl(href)) continue;
+    let host = "";
+    try {
+      host = new URL(href).hostname;
+    } catch {
+      continue;
+    }
+    if (MOJEEK_INTERNAL.test(host)) continue;
+    anchors.push({ href, inner: m[2] ?? "" });
+  }
+  for (const a of anchors) {
+    if (out.length >= max) break;
+    const title = htmlToText(a.inner);
+    if (title.length < 10) continue;
+    const noFrag = a.href.split("#")[0];
+    if (seen.has(noFrag)) continue;
+    seen.add(noFrag);
+    out.push({ title: title.slice(0, 160), url: noFrag, snippet: "" });
+  }
+  return out;
+}
+
+// ── Parser Ecosia (indeks Bing, HTML tanpa kunci) ─────────────────────
+
+const ECOSIA_INTERNAL = /(^|\.)(ecosia\.org|ecosia\.net)$/i;
+
+/** Parse halaman hasil Ecosia → daftar hasil (a[data-test-id=result-link]). */
+export function parseEcosiaHtml(html, max = 6) {
+  const out = [];
+  const seen = new Set();
+  const links = anchorsByDataTestId(html, "result-link");
+  const snippets = [];
+  const re = /<p\b([^>]*)>([\s\S]*?)<\/p>/gi;
+  let m;
+  while ((m = re.exec(html)) !== null) {
+    if (attrOf(m[1] ?? "", "data-test-id") === "result-snippet") {
+      snippets.push(htmlToText(m[2] ?? ""));
+    }
+  }
+  let idx = 0;
+  for (const a of links) {
+    if (out.length >= max) break;
+    let host = "";
+    try {
+      host = new URL(a.href).hostname;
+    } catch {
+      idx++;
+      continue;
+    }
+    if (!isHttpUrl(a.href) || ECOSIA_INTERNAL.test(host)) {
+      idx++;
+      continue;
+    }
+    const title = htmlToText(a.inner).replace(/\s+/g, " ").trim();
+    if (title.length < 6) {
+      idx++;
+      continue;
+    }
+    const noFrag = a.href.split("#")[0];
+    if (seen.has(noFrag)) {
+      idx++;
+      continue;
+    }
+    seen.add(noFrag);
+    out.push({ title: title.slice(0, 160), url: noFrag, snippet: (snippets[out.length] ?? "").slice(0, 240) });
+    idx++;
+  }
+  return out;
+}
+
 // ── Mesin scraping gratis ──────────────────────────────────────────────
 // NOTE: mesin mengembalikan ARRAY hasil (boleh kosong); keputusan
 // "0 hasil → lanjut mesin berikutnya" dan cooldown ada di webSearchMulti.
@@ -446,6 +694,100 @@ async function searchDdgApi(q, max, o) {
   return parseDdgApi(j, max);
 }
 
+async function searchJina(q, max, o) {
+  const base = (o?.jinaBase || process.env.JINA_BASE_URL || "https://s.jina.ai").replace(/\/+$/, "");
+  const headers = {
+    Accept: "application/json",
+    "X-Retain-Images": "none",
+    "User-Agent": UA,
+  };
+  const key = process.env.WEB_SEARCH_JINA_KEY;
+  if (key) headers.Authorization = `Bearer ${key}`;
+  const r = await fetchEngText(
+    `${base}/${encodeURIComponent(q)}`,
+    { headers, redirect: "follow" },
+    o
+  );
+  return parseJinaSearch(r.text, max);
+}
+
+async function searchWikipedia(q, max, o) {
+  const base = (
+    o?.wikipediaBase ||
+    process.env.WIKIPEDIA_BASE_URL ||
+    "https://id.wikipedia.org"
+  ).replace(/\/+$/, "");
+  // CATATAN: base boleh ber-path (mis. mock http://host/wikipedia) →
+  // path endpoint digabung STRING (new URL absolut akan membuang prefix).
+  const run = async (host) => {
+    const u = new URL(host + "/w/api.php");
+    u.searchParams.set("action", "query");
+    u.searchParams.set("list", "search");
+    u.searchParams.set("srsearch", q);
+    u.searchParams.set("srlimit", String(max));
+    u.searchParams.set("format", "json");
+    u.searchParams.set("origin", "*");
+    const j = await fetchEngJson(
+      u.toString(),
+      { headers: { "User-Agent": UA, Accept: "application/json" } },
+      o
+    );
+    return parseWikipediaApi(j, host, max);
+  };
+  let results = await run(base);
+  // Indonesian Wikipedia kosong → coba English (hanya saat base default).
+  if (!results.length && base === "https://id.wikipedia.org") {
+    results = await run("https://en.wikipedia.org");
+  }
+  return results;
+}
+
+async function searchMojeek(q, max, o) {
+  const base = (
+    o?.mojeekBase ||
+    process.env.MOJEEK_BASE_URL ||
+    "https://www.mojeek.com"
+  ).replace(/\/+$/, "");
+  const u = new URL(base + "/search");
+  u.searchParams.set("q", q);
+  const r = await fetchEngText(
+    u.toString(),
+    {
+      headers: {
+        "User-Agent": UA,
+        Accept: "text/html,application/xhtml+xml",
+        "Accept-Language": "id,en;q=0.8",
+      },
+      redirect: "follow",
+    },
+    o
+  );
+  return parseMojeekHtml(r.text, max);
+}
+
+async function searchEcosia(q, max, o) {
+  const base = (
+    o?.ecosiaBase ||
+    process.env.ECOSIA_BASE_URL ||
+    "https://www.ecosia.org"
+  ).replace(/\/+$/, "");
+  const u = new URL(base + "/search");
+  u.searchParams.set("q", q);
+  const r = await fetchEngText(
+    u.toString(),
+    {
+      headers: {
+        "User-Agent": UA,
+        Accept: "text/html,application/xhtml+xml",
+        "Accept-Language": "id,en;q=0.8",
+      },
+      redirect: "follow",
+    },
+    o
+  );
+  return parseEcosiaHtml(r.text, max);
+}
+
 // ── Provider ber-API-key (opsional — paling andal untuk produksi) ─────
 
 async function searchSerper(q, max, key, o) {
@@ -513,9 +855,13 @@ export const ENGINE_LABELS = {
   tavily: "Tavily",
   searx: "SearXNG",
   "ddg-html": "DuckDuckGo",
-  "ddg-lite": "DuckDuckGo Lite",
+  jina: "Jina",
   brave: "Brave",
   bing: "Bing",
+  mojeek: "Mojeek",
+  ecosia: "Ecosia",
+  wikipedia: "Wikipedia",
+  "ddg-lite": "DuckDuckGo Lite",
   "ddg-api": "DuckDuckGo (Instant Answer)",
 };
 
@@ -531,9 +877,13 @@ function engineFactories() {
   if (process.env.WEB_SEARCH_SEARX_URL)
     add("searx", (q, max, o) => searchSearx(q, max, process.env.WEB_SEARCH_SEARX_URL, o));
   add("ddg-html", searchDdgHtml);
-  add("ddg-lite", searchDdgLite);
+  add("jina", searchJina);
   add("brave", searchBraveHtml);
   add("bing", searchBingHtml);
+  add("mojeek", searchMojeek);
+  add("ecosia", searchEcosia);
+  add("wikipedia", searchWikipedia);
+  add("ddg-lite", searchDdgLite);
   add("ddg-api", searchDdgApi);
   return list;
 }
@@ -562,7 +912,13 @@ export async function webSearchMulti(query, opts = {}) {
 
   const errors = [];
   const now = Date.now();
+  const budget = opts.budgetMs ?? CHAIN_BUDGET_MS;
+  const startedAt = Date.now();
   for (const eng of engines) {
+    if (Date.now() - startedAt > budget && errors.length) {
+      errors.push([eng.id, "dilewati — anggaran waktu rantai habis"]);
+      continue;
+    }
     const deadUntil = engineDeadUntil.get(eng.id);
     if (deadUntil && deadUntil > now && !opts.noCooldown) {
       errors.push([eng.id, "dilewati (cooldown 10 mnt setelah gagal)"]);
@@ -582,7 +938,9 @@ export async function webSearchMulti(query, opts = {}) {
     });
     try {
       results = await Promise.race([
-        eng.run(q, max, { timeoutMs, signal: opts.signal ?? null, base: opts.base }),
+        // Teruskan seluruh opts (base per-mesin utk testing: jinaBase,
+        // wikipediaBase, mojeekBase, ecosiaBase, base utk DDG).
+        eng.run(q, max, { ...opts, timeoutMs, signal: opts.signal ?? null }),
         guardPromise,
       ]);
     } catch (e) {

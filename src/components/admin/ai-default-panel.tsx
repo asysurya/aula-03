@@ -49,6 +49,7 @@ const TAB_LABEL: Record<AiCategory, string> = {
   chat: "Chat",
   builder: "Builder",
   vision: "Vision",
+  tts: "Suara",
 };
 
 function draftsFrom(entries: AdminEntryView[]): ChainEntryDraft[] {
@@ -64,7 +65,7 @@ function draftsFrom(entries: AdminEntryView[]): ChainEntryDraft[] {
 }
 
 export function AiDefaultPanel({ variant = "teman" }: { variant?: "teman" | "builder" }) {
-  const cats: AiCategory[] = variant === "builder" ? ["builder"] : ["chat", "builder", "vision"];
+  const cats: AiCategory[] = variant === "builder" ? ["builder"] : ["chat", "builder", "vision", "tts"];
   const [tab, setTab] = useState<AiCategory>(cats[0]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -72,11 +73,13 @@ export function AiDefaultPanel({ variant = "teman" }: { variant?: "teman" | "bui
     chat: [],
     builder: [],
     vision: [],
+    tts: [],
   });
   const [dirty, setDirty] = useState<Record<AiCategory, boolean>>({
     chat: false,
     builder: false,
     vision: false,
+    tts: false,
   });
 
   const load = useCallback(async () => {
@@ -89,8 +92,9 @@ export function AiDefaultPanel({ variant = "teman" }: { variant?: "teman" | "bui
         chat: draftsFrom(json.categories?.chat?.entries ?? []),
         builder: draftsFrom(json.categories?.builder?.entries ?? []),
         vision: draftsFrom(json.categories?.vision?.entries ?? []),
+        tts: draftsFrom(json.categories?.tts?.entries ?? []),
       });
-      setDirty({ chat: false, builder: false, vision: false });
+      setDirty({ chat: false, builder: false, vision: false, tts: false });
     } catch {
       toast.error("Gagal memuat default AI.");
     } finally {
@@ -240,7 +244,7 @@ export function AiDefaultPanel({ variant = "teman" }: { variant?: "teman" | "bui
 
       <Tabs value={tab} onValueChange={(v) => setTab(v as AiCategory)}>
         {cats.length > 1 ? (
-          <TabsList className={cn("grid w-full", cats.length === 3 && "grid-cols-3")}>
+          <TabsList className={cn("grid w-full", cats.length === 4 && "grid-cols-4", cats.length === 3 && "grid-cols-3")}>
             {cats.map((c) => (
               <TabsTrigger key={c} value={c}>
                 {TAB_LABEL[c]}
@@ -267,6 +271,7 @@ export function AiDefaultPanel({ variant = "teman" }: { variant?: "teman" | "bui
               }}
               onTestEntry={testEntry}
               vision={c === "vision"}
+              tts={c === "tts"}
             />
 
             {!drafts[c].length ? (

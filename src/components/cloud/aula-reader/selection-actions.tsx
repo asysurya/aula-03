@@ -9,7 +9,8 @@ import {
 } from "react";
 import { Volume2, Square, Copy, Highlighter } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { cleanForTts, splitTtsChunks } from "@/lib/reader/tts-text";
+import { cleanForTts, buildTtsChunks } from "@/lib/reader/tts-text";
+import { useAulaTts } from "./tts-player";
 
 // ─────────────────────────────────────────────────────────────────────────
 // Menu aksi teks terpilih (dipakai di seluruh Aula Reader).
@@ -29,14 +30,7 @@ export interface SelMenuState {
   rects?: [number, number, number, number][];
 }
 
-function pickIndonesianVoice(): SpeechSynthesisVoice | null {
-  if (typeof window === "undefined" || !window.speechSynthesis) return null;
-  return (
-    window.speechSynthesis.getVoices().find((v) =>
-      v.lang?.toLowerCase().startsWith("id")
-    ) ?? null
-  );
-}
+// (pemilihan suara Indonesia kini ditangani tts-player.tsx)
 
 /** Salin teks ke clipboard dengan fallback execCommand (untuk konteks tanpa izin Clipboard API). */
 export async function copyTextToClipboard(text: string): Promise<boolean> {
@@ -77,6 +71,8 @@ export function useSelectionMenu({
   const [menu, setMenu] = useState<SelMenuState | null>(null);
   const [playing, setPlaying] = useState(false);
   const stopRef = useRef(false);
+  /** Task 31: Bacakan seleksi ikut mode suara aktif (perangkat / AI). */
+  const tts = useAulaTts();
 
   const closeMenu = useCallback(() => setMenu(null), []);
 
@@ -90,38 +86,24 @@ export function useSelectionMenu({
 
   const stopSpeak = useCallback(() => {
     stopRef.current = true;
-    window.speechSynthesis?.cancel();
+    tts.stop();
     setPlaying(false);
-  }, []);
+  }, [tts]);
 
   const speak = useCallback(
     (text: string) => {
-      if (typeof window === "undefined" || !window.speechSynthesis) return;
-      window.speechSynthesis.cancel();
       stopRef.current = false;
       // Task 29: rapikan dulu — rumus LaTeX, tabel, penanda footnote,
       // simbol matematika → bentuk yang enak didengar.
-      const chunks = splitTtsChunks(cleanForTts(text));
+      // Task 31: potongan ber-jeda + mode Suara AI bila dipilih.
+      const chunks = buildTtsChunks(cleanForTts(text));
       if (!chunks.length) return;
-      const v = pickIndonesianVoice();
-      let idx = 0;
-      const speakNext = () => {
-        if (stopRef.current || idx >= chunks.length) {
-          setPlaying(false);
-          return;
-        }
-        const u = new SpeechSynthesisUtterance(chunks[idx++]);
-        if (v) u.voice = v;
-        u.lang = v?.lang ?? "id-ID";
-        u.rate = 1;
-        u.onend = speakNext;
-        u.onerror = () => setPlaying(false);
-        window.speechSynthesis.speak(u);
-      };
       setPlaying(true);
-      speakNext();
+      tts.speakChunks(chunks, {
+        onFinish: () => setPlaying(false),
+      });
     },
-    []
+    [tts]
   );
 
   // Deteksi seleksi (pointer & keyboard) — defer 1 tick agar selection final.

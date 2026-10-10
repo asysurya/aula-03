@@ -3,7 +3,14 @@ import { z } from "zod";
 import { requireUser } from "@/lib/session";
 import { db } from "@/lib/db";
 import { decryptSecret } from "@/lib/crypto";
-import { chatEndpoint, cleanUpstreamDetail, resolveAiConfig, type AiSettingInput } from "@/lib/ai-providers";
+import {
+  chatEndpoint,
+  ttsEndpoint,
+  cleanUpstreamDetail,
+  resolveAiConfig,
+  PROVIDERS,
+  type AiSettingInput,
+} from "@/lib/ai-providers";
 import { resolveChain } from "@/lib/ai-config-chain";
 
 export const runtime = "nodejs";
@@ -80,7 +87,7 @@ const testSchema = z.object({
   scope: z.enum(["user", "admin", "builder"]).optional(),
   // Task 29 — tes entri rantai TERSIMPAN per kategori (index opsional;
   // tanpa index = entri pertama / config aktif kategori itu).
-  category: z.enum(["chat", "builder", "vision"]).optional(),
+  category: z.enum(["chat", "builder", "vision", "tts"]).optional(),
   index: z.number().int().min(0).max(5).optional(),
 });
 
@@ -235,6 +242,62 @@ export async function POST(req: NextRequest) {
   }
 
   // ── Ping provider dengan pesan mini (non-streaming, murah) ──
+  // Task 31 — kategori "tts": uji endpoint /audio/speech (bukan chat).
+  if (d.category === "tts" || (d.provider && tested === "form" && d.model && /^(?:gpt-4o-mini-tts|tts-1|tts-1-hd|playai-tts)/.test(d.model))) {
+    const ttsModel = (() => {
+      const preset = PROVIDERS[config.provider as keyof typeof PROVIDERS];
+      return preset?.ttsModels?.[0] && (!config.model || preset?.models?.includes(config.model))
+        ? preset.ttsModels[0]
+        : config.model;
+    })();
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 25_000);
+    try {
+      const res = await fetch(ttsEndpoint(config.baseUrl), {
+        method: "POST",
+        signal: controller.signal,
+        headers: {
+          "Content-Type": "application/json",
+          ...(config.apiKey ? { Authorization: `Bearer ${config.apiKey}` } : {}),
+        },
+        body: JSON.stringify({
+          model: ttsModel,
+          input: "Halo, ini uji suara.",
+          voice: "alloy",
+          response_format: "mp3",
+        }),
+      });
+      clearTimeout(timer);
+      if (!res.ok) {
+        let detail: string | null = null;
+        try {
+          const errJson = await res.json().catch(() => null);
+          detail = errJson?.error?.message ?? errJson?.message ?? null;
+          if (typeof detail !== "string") detail = null;
+        } catch {
+          /* abaikan */
+        }
+        return NextResponse.json({ ok: false, error: testErrorMessage(res.status, detail) });
+      }
+      const buf = await res.arrayBuffer();
+      if (!buf.byteLength) {
+        return NextResponse.json({ ok: false, error: "Provider menjawab OK tapi audionya kosong." });
+      }
+      return NextResponse.json({
+        ok: true,
+        model: ttsModel,
+        source: config.source,
+        reply: `${(buf.byteLength / 1024).toFixed(0)} KB audio`,
+      });
+    } catch {
+      clearTimeout(timer);
+      return NextResponse.json({
+        ok: false,
+        error: "Gagal menghubungi server suara AI — periksa Base URL / kunci / koneksi (timeout 25 detik).",
+      });
+    }
+  }
+
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 20_000);
   try {

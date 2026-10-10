@@ -41,7 +41,8 @@ import {
 import { AnnotationLayer } from "./annotation-layer";
 import { useSelectionMenu, SelectionToolbar } from "./selection-actions";
 import { useReaderUiStore } from "@/stores/reader-ui-store";
-import { cleanForTts, splitTtsChunks } from "@/lib/reader/tts-text";
+import { cleanForTts, buildTtsChunks, groupPdfTextItems } from "@/lib/reader/tts-text";
+import { useAulaTts, TtsModeToggle } from "./tts-player";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -148,7 +149,10 @@ export function PdfReader({
     { page: number; snippet: string }[] | null
   >(null);
   const [searching, setSearching] = useState(false);
-  const [ttsPlaying, setTtsPlaying] = useState(false);
+  /** Task 31: pemutar TTS 2 mode (perangkat / Suara AI) — state playing
+   *  & loading audio ada di hook ini; ttsLoading lokal khusus OCR vision. */
+  const tts = useAulaTts();
+  const ttsPlaying = tts.playing || tts.loading;
   /** Task 29: true saat halaman scan sedang diekstrak model vision. */
   const [ttsLoading, setTtsLoading] = useState(false);
   const [flashPage, setFlashPage] = useState<number | null>(null);
@@ -833,11 +837,12 @@ export function PdfReader({
         if (!text) {
           const p = await doc.getPage(n);
           const tc = await p.getTextContent();
-          text = (tc.items as { str?: string }[])
-            .map((it) => it.str ?? "")
-            .join(" ")
-            .replace(/\s+/g, " ")
-            .trim();
+          // Task 31: susun item teks jadi BARIS (per koordinat-y) — bukan
+          // digabung rata. Tanpa ini seluruh halaman jadi satu baris:
+          // nomor halaman tak terfilter & judul "nyambung" ke paragraf.
+          text = groupPdfTextItems(
+            tc.items as { str?: string; transform?: number[]; hasEOL?: boolean }[]
+          );
           textCache.current.set(n, text);
         }
         // PDF hasil scan (lapisan teks nyaris kosong) → OCR vision.
@@ -852,7 +857,6 @@ export function PdfReader({
             toast.error("Gagal membaca halaman dengan model vision", {
               description: String((e as Error)?.message ?? ""),
             });
-            setTtsPlaying(false);
             return;
           } finally {
             setTtsLoading(false);
@@ -863,66 +867,46 @@ export function PdfReader({
             setPage(n + 1);
             gotoPage(n + 1);
             void speakPage(n + 1);
-          } else {
-            setTtsPlaying(false);
           }
           return;
         }
-        // Rapikan teks sebelum dibacakan (rumus, tabel, footnote, filter).
-        const chunks = splitTtsChunks(cleanForTts(text));
+        // Rapikan teks + susun potongan dengan JEDA (judul/paragraf/list)
+        // → diputar lewat pemutar 2 mode (perangkat / Suara AI).
+        const chunks = buildTtsChunks(cleanForTts(text));
         if (!chunks.length) {
           if (n < numPages && !ttsStop.current) {
             setPage(n + 1);
             gotoPage(n + 1);
             void speakPage(n + 1);
-          } else {
-            setTtsPlaying(false);
           }
           return;
         }
-        let idx = 0;
-        const speakNext = () => {
-          if (ttsStop.current) return;
-          if (idx >= chunks.length) {
-            if (n < numPages) {
+        tts.speakChunks(chunks, {
+          onFinish: () => {
+            if (n < numPages && !ttsStop.current) {
               setPage(n + 1);
               gotoPage(n + 1);
               void speakPage(n + 1);
-            } else {
-              setTtsPlaying(false);
             }
-            return;
-          }
-          const u = new SpeechSynthesisUtterance(chunks[idx++]);
-          const voices = window.speechSynthesis.getVoices();
-          const id = voices.find((v) => v.lang?.toLowerCase().startsWith("id"));
-          if (id) u.voice = id;
-          u.lang = id?.lang ?? "id-ID";
-          u.rate = 1;
-          u.onend = speakNext;
-          u.onerror = () => setTtsPlaying(false);
-          window.speechSynthesis.speak(u);
-        };
-        speakNext();
+          },
+        });
       } catch {
-        setTtsPlaying(false);
+        tts.stop();
       }
     },
-    [doc, numPages, gotoPage, extractPageViaVision]
+    [doc, numPages, gotoPage, extractPageViaVision, tts]
   );
 
   const toggleTts = useCallback(() => {
     if (ttsPlaying || ttsLoading) {
       ttsStop.current = true;
-      window.speechSynthesis.cancel();
-      setTtsPlaying(false);
+      tts.stop();
       setTtsLoading(false);
       return;
     }
     ttsStop.current = false;
-    setTtsPlaying(true);
     void speakPage(page);
-  }, [ttsPlaying, ttsLoading, page, speakPage]);
+  }, [ttsPlaying, ttsLoading, page, speakPage, tts]);
 
   useEffect(() => {
     return () => {
@@ -944,20 +928,22 @@ export function PdfReader({
         if (!text) {
           const p = await doc.getPage(i);
           const tc = await p.getTextContent();
-          text = (tc.items as { str?: string }[])
-            .map((it) => it.str ?? "")
-            .join(" ")
-            .replace(/\s+/g, " ")
-            .trim();
+          // Task 31: cache menyimpan teks PER BARIS (dipakai TTS) — untuk
+          // pencarian, diratakan spasi agar frasa lintas baris tetap ketemu.
+          text = groupPdfTextItems(
+            tc.items as { str?: string; transform?: number[]; hasEOL?: boolean }[]
+          );
           textCache.current.set(i, text);
         }
-        const idx = text.toLowerCase().indexOf(q);
+        const disp = text.replace(/\s+/g, " ");
+        const flat = disp.toLowerCase();
+        const idx = flat.indexOf(q);
         if (idx >= 0) {
           out.push({
             page: i,
             snippet:
               (idx > 40 ? "…" : "") +
-              text.slice(Math.max(0, idx - 40), idx + q.length + 60) +
+              disp.slice(Math.max(0, idx - 40), idx + q.length + 60) +
               "…",
           });
           if (out.length >= 50) break;
@@ -997,17 +983,16 @@ export function PdfReader({
     activeColor: color,
   });
 
-  // TTS seleksi & TTS halaman berbagi speechSynthesis → hentikan yang lain.
+  // TTS seleksi & TTS halaman berbagi pemutar → hentikan yang lain.
   const speakSelection = useCallback(
     (text: string) => {
       if (ttsPlaying) {
         ttsStop.current = true;
-        window.speechSynthesis.cancel();
-        setTtsPlaying(false);
+        tts.stop();
       }
       sel.speak(text);
     },
-    [ttsPlaying, sel]
+    [ttsPlaying, sel, tts]
   );
 
   // ── Keyboard (remote TV / keyboard / alat bantu) ──
@@ -1299,6 +1284,14 @@ export function PdfReader({
         </div>
 
         <div className="flex items-center gap-1 shrink-0">
+          {/* Task 31: pilih mode suara — perangkat (lama) / Suara AI. */}
+          <TtsModeToggle
+            mode={tts.mode}
+            onChange={tts.setMode}
+            preparing={tts.aiPreparing}
+            progress={tts.aiProgress}
+            stage={tts.aiStage}
+          />
           <Button
             variant="outline"
             size="icon"

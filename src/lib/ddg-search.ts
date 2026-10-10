@@ -80,4 +80,8 @@ export async function webSearchForContext(
   };
 }
 
+/** Saran peningkatan keandalan pencarian utk admin (dipakai UI/status). */
+export const WEB_SEARCH_HINT_ENV =
+  "Untuk keandalan 100%, pasang salah satu env di server: WEB_SEARCH_SERPER_KEY / WEB_SEARCH_BRAVE_KEY / WEB_SEARCH_TAVILY_KEY / WEB_SEARCH_SEARX_URL / WEB_SEARCH_JINA_KEY.";
+
 export { readPageText, ENGINE_LABELS };

@@ -27,6 +27,8 @@ export interface AiProviderPreset {
   hint: string;
   /** Model yang bisa melihat gambar (kategori vision) — saran UI. */
   visionModels?: string[];
+  /** Model text-to-speech (kategori tts) — POST /audio/speech. */
+  ttsModels?: string[];
 }
 
 export const PROVIDERS: Record<AiProviderId, AiProviderPreset> = {
@@ -36,6 +38,7 @@ export const PROVIDERS: Record<AiProviderId, AiProviderPreset> = {
     baseUrl: "https://api.openai.com/v1",
     models: ["gpt-4o-mini", "gpt-4o", "gpt-4.1-mini"],
     visionModels: ["gpt-4o-mini", "gpt-4o", "gpt-4.1-mini"],
+    ttsModels: ["gpt-4o-mini-tts", "tts-1", "tts-1-hd"],
     hint: "Butuh API key dari platform.openai.com.",
   },
   deepseek: {
@@ -92,9 +95,9 @@ export const PROVIDERS: Record<AiProviderId, AiProviderPreset> = {
 
 export const PROVIDER_IDS = Object.keys(PROVIDERS) as AiProviderId[];
 
-// ── Kategori config AI (Task 29) — aman utk client & server ───────────
+// ── Kategori config AI (Task 29 → Task 31 + TTS) — aman utk client ─────
 
-export const AI_CATEGORIES = ["chat", "builder", "vision"] as const;
+export const AI_CATEGORIES = ["chat", "builder", "vision", "tts"] as const;
 export type AiCategory = (typeof AI_CATEGORIES)[number];
 
 export function isAiCategory(v: unknown): v is AiCategory {
@@ -109,6 +112,7 @@ export const CATEGORY_LABELS: Record<AiCategory, string> = {
   chat: "Chat (Teman AI)",
   builder: "Builder (AI Builder)",
   vision: "Vision (gambar & PDF scan)",
+  tts: "Suara AI (bacakan)",
 };
 
 /** Deskripsi kategori untuk UI. */
@@ -119,6 +123,8 @@ export const CATEGORY_HINTS: Record<AiCategory, string> = {
     "Dipakai AI Builder (Pusat Belajar) dan generator formulir. Disarankan model yang patuh format JSON/struktur.",
   vision:
     "Dipakai untuk membaca gambar & PDF hasil scan (ekstraksi per halaman) — WAJIB model multimodal (bisa melihat gambar), mis. gpt-4o-mini, gemini-2.0-flash, llama3.2-vision. Bila kosong, fitur vision nonaktif.",
+  tts:
+    "Dipakai mode bacakan ‘Suara AI’ di Aula Reader (tempo & intonasi enak didengar). Provider yang mendukung /audio/speech (mis. OpenAI tts-1 / gpt-4o-mini-tts). Bila kosong, otomatis memakai suara AI LOKAL (Piper) yang diunduh sekali oleh server.",
 };
 
 /** Bentuk ringkas setting — sudah dalam plaintext (apiKey sudah didekripsi server). */
@@ -190,6 +196,14 @@ export function resolveAiConfig(
 export function chatEndpoint(baseUrl: string): string {
   return baseUrl.replace(/\/+$/, "") + "/chat/completions";
 }
+
+/** URL text-to-speech dari base URL (OpenAI-compatible /audio/speech). */
+export function ttsEndpoint(baseUrl: string): string {
+  return baseUrl.replace(/\/+$/, "") + "/audio/speech";
+}
+
+/** Suara (voice) TTS OpenAI-compatible yang dikenal. */
+export const TTS_VOICES = ["alloy", "echo", "fable", "onyx", "nova", "shimmer", "coral", "verse"] as const;
 
 /**
  * Rapikan detail error upstream utk ditampilkan ke user.

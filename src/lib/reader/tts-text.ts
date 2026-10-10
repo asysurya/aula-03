@@ -19,7 +19,49 @@
 
 /** Baris yang HANYA nomor halaman (arab / romawi / "Halaman 12"). */
 const PAGE_NUM_LINE =
-  /^\s*(?:hal(?:aman)?\.?\s*)?(?:\d{1,4}|[ivxlcdm]{1,6}|[IVXLCDM]{1,6})\s*[.\-–]?\s*$/i;
+  /^\s*(?:hal(?:aman)?\.?\s*)?(?:\d{1,4}|[ivxlcdm]{1,6}|[IVXLCDM]{1,6})\s*[.\-–—]?\s*$/i;
+
+/** Nomor halaman dengan peluru di kiri-kanan (khas footer buku: "• 12 •"). */
+const PAGE_NUM_BULLETS =
+  /^\s*[•·|–—-]?\s*(?:\d{1,4}|[ivxlcdm]{1,6})\s*[•·|–—-]?\s*$/i;
+
+/** "Halaman 12 dari 120" / "hal. 12" utuh di satu baris. */
+const PAGE_NUM_RANGE =
+  /^\s*hal(?:aman|\.)?\s+\d{1,4}\s+(?:dari|of|\/)\s+\d{1,4}\s*\.?\s*$/i;
+
+/** Nomor subbab sendirian: "3.2", "A.1", "12.3.4". */
+const SECTION_NUM_LINE =
+  /^\s*(?:\d+(?:\.\d+){1,3}|[A-Ga-g][.)])\s*\.?\s*$/;
+
+/** Lepas token nomor halaman yang MENEMPel di awal/akhir baris teks
+ *  (gaya "136 | Fisika SMA Kelas X" / "Kata Pengantar 136"). */
+function stripInlinePageNum(line: string): string {
+  let t = line;
+  t = t.replace(/^\s*(?:\d{1,4}|[ivxlcdm]{1,6})\s*[|·•]\s*(?=\S)/i, "");
+  t = t.replace(/\s*[|·•]\s*(?:\d{1,4}|[ivxlcdm]{1,6})\s*$/i, "");
+  // "— 128 —" gaya em-dash di awal baris.
+  t = t.replace(/^\s*[—–-]\s*\d{1,4}\s*[—–-]\s*/, "");
+  return t;
+}
+
+/** Baris terlihat seperti JUDUL (heading) → dibacakan dengan jeda. */
+function isHeadingLine(line: string): boolean {
+  const t = line.trim();
+  if (t.length < 4 || t.length > 70) return false;
+  if (!/[a-zA-Zà-ÿ]/.test(t)) return false; // harus ada huruf
+  if (/[.!?;:]$/.test(t)) return false; // kalimat berakhir normal → bukan judul
+  const words = t.split(/\s+/);
+  if (words.length > 10) return false; // terlalu panjang utk judul
+  if (/^(?:bab|unit|kegiatan|latihan|ringkasan|rangkuman|tujuan|soal|ujian|evaluasi|kesimpulan|peta\s+konsep|ulasan|tugas)\b/i.test(t))
+    return true;
+  // HURUF KAPITAL SEMUA (judul bab khas buku pelajaran).
+  const letters = t.replace(/[^a-zA-Zà-ÿ]/g, "");
+  if (letters.length >= 4 && letters === letters.toUpperCase()) return true;
+  // Kapital di tiap kata penting (Title Case) & pendek.
+  const capWords = words.filter((w) => /^[A-ZÀ-Ý]/.test(w));
+  if (t.length <= 60 && capWords.length >= Math.max(2, Math.ceil(words.length * 0.6))) return true;
+  return false;
+}
 
 /** Pola running header/footer buku pelajaran umum (konservatif). */
 const RUNNING_HEAD =
@@ -156,6 +198,18 @@ export function cleanForTtsParts(raw: string): CleanedTts {
 
     // Nomor halaman sendirian / pola running header-footer buku.
     if (PAGE_NUM_LINE.test(trimmed)) continue;
+    if (PAGE_NUM_BULLETS.test(trimmed)) continue;
+    if (PAGE_NUM_RANGE.test(trimmed)) continue;
+    if (SECTION_NUM_LINE.test(trimmed)) continue;
+    // Nomor halaman menempel di awal baris ("136 | Fisika …") → lepas
+    // dulu, lalu uji ulang sebagai nomor murni / running header.
+    const stripped = stripInlinePageNum(trimmed);
+    if (stripped !== trimmed) {
+      if (!stripped.trim()) continue; // ternyata murni nomor halaman
+      if (PAGE_NUM_LINE.test(stripped)) continue;
+      if (RUNNING_HEAD.test(stripped)) continue;
+      line = stripped;
+    }
     if (RUNNING_HEAD.test(trimmed)) continue;
 
     // Baris catatan kaki di bagian bawah: "1) penjelasan",
@@ -250,4 +304,159 @@ export function splitTtsChunks(
   }
   if (cur.trim()) out.push(cur.trim());
   return out;
+}
+
+// ── Task 31: potongan dengan JEDA + grouping baris lapisan teks PDF ──
+
+export interface TtsChunk {
+  /** Teks yang diucapkan. */
+  text: string;
+  /** Jeda SETELAH potongan ini selesai (ms) — judul/paragraf/list. */
+  pauseAfterMs?: number;
+}
+
+/** Jeda setelah potongan yang merupakan JUDUL (bab/subbab). */
+const HEADING_PAUSE_MS = 700;
+/** Jeda antar paragraf (baris kosong). */
+const PARAGRAPH_PAUSE_MS = 450;
+/** Jeda antar butir daftar (• / 1. / a. — satu baris satu butir). */
+const LIST_PAUSE_MS = 280;
+
+/** Butir daftar: "• teks", "1. teks", "a. teks", "- teks". */
+const LIST_ITEM = /^\s*(?:[•·*-]|\d{1,2}[.)]|[a-g][.)])\s+\S/;
+
+/**
+ * Susun potongan TTS dengan JEDA NATURAL:
+ *   • baris JUDUL → potongan sendiri + jeda 700 ms (judul TIDAK
+ *     "nyambung" dibacakan dengan paragraf di bawahnya);
+ *   • akhir paragraf → jeda 450 ms;
+ *   • butir daftar → jeda 280 ms antar butir.
+ * Input adalah hasil cleanForTts (baris dipertahankan dengan \n).
+ */
+export function buildTtsChunks(raw: string, max = 220): TtsChunk[] {
+  const lines = String(raw ?? "").split(/\r?\n/);
+  const out: TtsChunk[] = [];
+  let paraBuf: string[] = [];
+  let paraIsHeading = false;
+  let paraIsList = false;
+
+  const flushParagraph = () => {
+    if (!paraBuf.length) return;
+    const para = paraBuf.join(" ").replace(/\s+/g, " ").trim();
+    paraBuf = [];
+    if (!para) return;
+    // Kalimat-kalimat paragraf → potongan ≤ max.
+    const sentences = para.match(/[^.!?…]+[.!?…]*\s*/g) ?? [para];
+    let cur = "";
+    const pushCur = (pause?: number) => {
+      const t = cur.trim();
+      cur = "";
+      if (t) out.push(pause ? { text: t, pauseAfterMs: pause } : { text: t });
+    };
+    for (const s of sentences) {
+      const piece = s.trim();
+      if (!piece) continue;
+      if ((cur + " " + piece).trim().length > max && cur) {
+        pushCur();
+        cur = piece;
+      } else {
+        cur = (cur + " " + piece).trim();
+      }
+      while (cur.length > max) {
+        let cut = cur.lastIndexOf(",", max);
+        if (cut < max * 0.5) cut = max;
+        const t = cur.slice(0, cut).trim();
+        if (t) out.push({ text: t });
+        cur = cur.slice(cut).replace(/^,\s*/, "").trim();
+      }
+    }
+    pushCur(
+      paraIsHeading
+        ? HEADING_PAUSE_MS
+        : paraIsList
+          ? LIST_PAUSE_MS
+          : PARAGRAPH_PAUSE_MS
+    );
+    paraIsHeading = false;
+    paraIsList = false;
+  };
+
+  for (const line of lines) {
+    const t = line.trim();
+    if (!t) {
+      flushParagraph();
+      continue;
+    }
+    const heading = isHeadingLine(t);
+    if (heading) {
+      flushParagraph(); // judul selalu potongan sendiri
+      out.push({ text: t, pauseAfterMs: HEADING_PAUSE_MS });
+      continue;
+    }
+    if (LIST_ITEM.test(t) && t.length <= max) {
+      // Satu baris = satu butir — jeda kecil antar butir.
+      flushParagraph();
+      out.push({ text: t, pauseAfterMs: LIST_PAUSE_MS });
+      paraIsList = true;
+      continue;
+    }
+    paraIsList = paraIsList || LIST_ITEM.test(t);
+    paraBuf.push(t);
+    // Baris panjang (tanpa baris kosong pemisah — khas PDF) → anggap
+    // pergantian paragraf bila baris berakhiran tanda baca lengkap.
+    if (paraBuf.length > 1 && /[.!?:]$/.test(t)) {
+      flushParagraph();
+    }
+  }
+  flushParagraph();
+
+  // Jeda terakhir tidak perlu.
+  if (out.length) {
+    const last = out[out.length - 1];
+    delete last.pauseAfterMs;
+  }
+  return out.filter((c) => c.text);
+}
+
+/** Antarmuka item teks pdf.js (str + posisi y di transform). */
+export interface PdfTextItemLike {
+  str?: string;
+  hasEOL?: boolean;
+  transform?: number[];
+}
+
+/**
+ * Susun item teks pdf.js menjadi BARIS teks (dipisah "\n") berdasarkan
+ * koordinat-y transform — BUKAN digabung rata dengan spasi. Tanpa ini
+ * seluruh halaman jadi SATU baris panjang: nomor halaman, judul bab,
+ * running header tidak pernah cocok dengan filter baris, dan judul
+ * "menyambung" dibacakan dengan paragraf (bug Task 31).
+ */
+export function groupPdfTextItems(items: PdfTextItemLike[]): string {
+  const lines: string[] = [];
+  let cur = "";
+  let curY: number | null = null;
+  for (const it of items) {
+    const s = it.str ?? "";
+    const y = Array.isArray(it.transform) && it.transform.length >= 6
+      ? it.transform[5]
+      : null;
+    if (curY !== null && y !== null && Math.abs(y - curY) > 2.5) {
+      if (cur.trim()) lines.push(cur.trim());
+      cur = "";
+      curY = y;
+    } else if (y !== null) {
+      curY = y;
+    }
+    // Spasi antar item di baris yang sama (pdf.js kadang tanpa spasi).
+    if (cur && s && !/\s$/.test(cur) && !/^\s/.test(s)) cur += " ";
+    cur += s;
+    if (it.hasEOL) {
+      if (cur.trim()) lines.push(cur.trim());
+      cur = "";
+      curY = null;
+    }
+  }
+  if (cur.trim()) lines.push(cur.trim());
+  return lines.join("\n");
 }

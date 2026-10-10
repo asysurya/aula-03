@@ -26,7 +26,7 @@ import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
 import { Check, Copy } from "lucide-react";
 import "katex/dist/katex.min.css";
-import { preprocessMath } from "@/lib/ai-math-preprocess";
+import { preprocessMath, mathTailNeedsClosing } from "@/lib/ai-math-preprocess";
 
 /** Tutup fence ``` yang belum selesai (hanya saat streaming). */
 function balanceFences(s: string): string {
@@ -36,10 +36,12 @@ function balanceFences(s: string): string {
   return fences % 2 === 1 ? s + "\n```" : s;
 }
 
-/** Tutup $$…$$ yang belum selesai (hanya saat streaming). */
+/** Tutup $$…$$ yang belum selesai (hanya saat streaming).
+ *  Task 31: hanya bila $$ terakhir memang PEMBUKA — kalau ia penutup
+ *  orphan (pembuka hilang dari model), jangan ditambah penutup palsu;
+ *  biarkan repairMathDelimiters yang membetulkan pasangannya. */
 function balanceMath(s: string): string {
-  const n = (s.match(/\$\$/g) ?? []).length;
-  return n % 2 === 1 ? s + "\n$$" : s;
+  return mathTailNeedsClosing(s) ? s + "\n$$" : s;
 }
 
 /** Ambil teks mentah dari tree React (dipakai tombol salin blok kode). */

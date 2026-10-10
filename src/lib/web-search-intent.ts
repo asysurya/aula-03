@@ -12,7 +12,7 @@ export const SEARCH_CMD = /^\/(?:cari|search|web|google|googling)\s+([\s\S]+)/i;
 
 /** Sinyal otomatis (berita terkini, suruh googling, dsb.). */
 export const SEARCH_AUTO =
-  /\b(?:cari(?:kan)?\s+(?:di\s+)?(?:google|internet|web|online|net)|googling(?:kan)?|search\s+(?:di\s+)?(?:web|internet|online)|berita\s+(?:terbaru|terkini|hari\s+ini)|hari\s+ini\s+(?:apa|siapa|berapa)|tren\s+(?:sekarang|terbaru)|sedang\s+tren|kapan\s+(?:sekarang|tahun\s+ini)\b.*\?)/i;
+  /\b(?:cari(?:kan|in)?\s+(?:di\s+)?(?:google|internet|web|online|net|mbah\s+google)|googling(?:kan)?|search(?:in)?\s+(?:di\s+)?(?:web|internet|online)|browsing(?:in)?\s+(?:di\s+)?(?:internet|web)\b|berita\s+(?:terbaru|terkini|hari\s+ini)|hari\s+ini\s+(?:apa|siapa|berapa)|tren\s+(?:sekarang|terbaru)|sedang\s+tren|kapan\s+(?:sekarang|tahun\s+ini)\b.*\?)/i;
 
 export interface SearchIntent {
   active: boolean;
@@ -39,7 +39,11 @@ export const SEARCH_ENGINE_LABELS: Record<string, string> = {
   searx: "SearXNG",
   "ddg-html": "DuckDuckGo",
   "ddg-lite": "DuckDuckGo",
+  "ddg-api": "DuckDuckGo",
+  jina: "Jina",
   brave: "Brave",
   bing: "Bing",
-  "ddg-api": "DuckDuckGo",
+  mojeek: "Mojeek",
+  ecosia: "Ecosia",
+  wikipedia: "Wikipedia",
 };
