@@ -10,7 +10,9 @@ const nextConfig: NextConfig = {
   // dibundel webpack (worker/fs dinamis pecah saat dibundle).
   // @napi-rs/canvas: binding native .node (render halaman PDF → JPEG
   // untuk OCR vision) — tidak bisa dibundel ke chunk ESM.
-  serverExternalPackages: ["pdfjs-dist", "@napi-rs/canvas"],
+  // tar: ekstraksi arsip Piper TTS — pakai require runtime agar dinamis
+  // internalnya (minizlib dkk.) tidak pecah saat dibundel.
+  serverExternalPackages: ["pdfjs-dist", "@napi-rs/canvas", "tar"],
 };
 
 export default nextConfig;

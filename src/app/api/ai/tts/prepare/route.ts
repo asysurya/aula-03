@@ -31,10 +31,17 @@ export async function POST() {
       { status: 503 }
     );
   }
-  if (status.ready) {
-    return NextResponse.json({ ...getPiperStatus(), started: false });
+  // Task 32: TUNGGU unduhan selesai di respons ini (bukan sekadar memicu
+  // latar). Di hosting serverless proses dibekukan setelah respons terkirim
+  // — unduhan "latar" tidak pernah maju & polling GET tak pernah selesai.
+  // Dengan menunggu, unduhan benar-benar berjalan dalam masa hidup fungsi;
+  // klien tetap mem-polling GET utk progres (self-host) sambil menunggu.
+  // Status.ready TIDAK dipercaya utk early-return: ensurePiperAssets
+  // memverifikasi aset di DISK (aset terhapus setelah ready → unduh ulang).
+  try {
+    await ensurePiperAssets();
+  } catch {
+    /* status memuat pesan galat yang ramah */
   }
-  // Jalankan unduhan di latar — jangan ditunggu di respons ini.
-  void ensurePiperAssets().catch(() => undefined);
   return NextResponse.json({ ...getPiperStatus(), started: true });
 }

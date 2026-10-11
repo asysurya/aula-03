@@ -42,6 +42,8 @@ bunx prisma db push
 3. Deploy. Build command default (`next build`) sudah menjalankan `prisma generate` via `postinstall`.
 4. Buka app → login `admin / admin123` → **WAJIB ganti password**.
 
+> **Suara AI "Bacakan" di Vercel**: mode *Suara AI* punya dua jalur — (1) **provider TTS cloud** (kategori *Suara* di **Pengaturan AI**, kompatibel endpoint OpenAI `/audio/speech`) dan (2) **Piper lokal** yang diunduh otomatis (±90 MB) ke penyimpanan server. Di Vercel, filesystem read-only kecuali `/tmp` — Piper otomatis fallback ke `/tmp` (aset hilang saat instance dingin kembali, jadi unduhan bisa diulang) dan unduhan ±90 MB bisa terpotong batas durasi function (Hobby 60 dtk). **Rekomendasi di Vercel**: isi kategori *Suara* di Pengaturan AI dengan provider TTS cloud — jalur Piper lokal paling andal di **self-host** (VPS/Render/docker, set `AI_TTS_PIPER_DIR` ke volume permanen supaya aset tidak diunduh ulang). Keduanya gagal? Reader otomatis melanjutkan dengan suara perangkat (browser), jadi fitur Bacakan tidak pernah mati total.
+
 ### 4. Sambungkan MEGA / S3 (storage file cloud & lampiran)
 
 1. Login sebagai **admin** → **Admin Panel → Data & Cloud → Cloud Storage Accounts**.

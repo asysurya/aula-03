@@ -15,13 +15,19 @@
 //
 // Env:
 //   AI_TTS_PIPER_DISABLE=1      — matikan jalur Piper (hanya provider).
-//   AI_TTS_PIPER_DIR            — dir aset Piper (default .tts-piper).
+//   AI_TTS_PIPER_DIR            — dir aset Piper (default: dir writable
+//                                 pertama dari <cwd>/.tts-piper lalu
+//                                 <tmpdir>/.tts-piper — Task 32: cwd di
+//                                 hosting serverless = /var/task read-only,
+//                                 fallback ke /tmp WAJIB, tanpa ENOENT mentah).
 //   AI_TTS_PIPER_VOICE          — voice Piper (default id_ID-arifi-medium;
 //                                 nama lain: lihat rhasspy/piper-voices).
 //   AI_TTS_PIPER_BIN_URL        — override URL tar.gz biner Piper.
 //   AI_TTS_PIPER_MODEL_URL      — override URL .onnx voice.
 //   AI_TTS_PIPER_MODEL_URL_JSON — override URL .onnx.json (config voice).
-//   AI_TTS_CACHE_DIR            — dir cache audio (default .tts-cache).
+//   AI_TTS_PIPER_TIMEOUT_MS     — batas unduh per berkas (default 90 dtk).
+//   AI_TTS_CACHE_DIR            — dir cache audio (default .tts-cache,
+//                                 resolusi writable sama seperti Piper).
 // ─────────────────────────────────────────────────────────────────────
 
 import { createWriteStream, promises as fsp } from "fs";
@@ -30,20 +36,40 @@ import { createHash } from "crypto";
 import path from "path";
 import { Readable } from "stream";
 import { pipeline } from "stream/promises";
+import * as tar from "tar";
 
 import { resolveChain } from "@/lib/ai-config-chain";
 import { PROVIDERS, ttsEndpoint, type ResolvedAiConfig } from "@/lib/ai-providers";
+import {
+  NO_WRITABLE_DIR_MESSAGE,
+  friendlyPiperError,
+  piperExecErrorMessage,
+  resolveWritableBase,
+  type ResolvedWritableDir,
+} from "@/lib/tts-piper-paths";
 
 export const MAX_TTS_TEXT = 3000;
 export const DEFAULT_TTS_VOICE = "alloy";
 
-// ── Direktori ─────────────────────────────────────────────────────────
+// ── Direktori (Task 32: resolusi WRITABLE dgn fallback) ──────────────
+// Urutan: env eksplisit → <cwd>/<nama> (self-host) → <tmpdir>/<nama>
+// (serverless). Setiap kandidat lolos UJI TULIS sebelum dipakai, jadi
+// hosting read-only (/var/task) tidak pernah lagi menghasilkan ENOENT.
 
-function piperDir(): string {
-  return process.env.AI_TTS_PIPER_DIR || path.join(process.cwd(), ".tts-piper");
+let piperDirMemo: ResolvedWritableDir | null | undefined;
+let cacheDirMemo: ResolvedWritableDir | null | undefined;
+
+function piperDirInfo(): ResolvedWritableDir | null {
+  if (piperDirMemo === undefined) {
+    piperDirMemo = resolveWritableBase(process.env.AI_TTS_PIPER_DIR, ".tts-piper");
+  }
+  return piperDirMemo;
 }
-function cacheDir(): string {
-  return process.env.AI_TTS_CACHE_DIR || path.join(process.cwd(), ".tts-cache");
+function cacheDirInfo(): ResolvedWritableDir | null {
+  if (cacheDirMemo === undefined) {
+    cacheDirMemo = resolveWritableBase(process.env.AI_TTS_CACHE_DIR, ".tts-cache");
+  }
+  return cacheDirMemo;
 }
 
 // ── Status unduhan Piper (dibagikan ke route /prepare) ────────────────
@@ -57,6 +83,10 @@ export interface PiperStatus {
   stage: string;
   voice: string;
   error: string | null;
+  /** Direktori aset yang DIPILIH (null = tak ada yang writable). */
+  dir: string | null;
+  /** Asal direktori: env | app (cwd) | tmp (fallback serverless). */
+  dirSource: "env" | "app" | "tmp" | null;
 }
 
 const piperState: PiperStatus = {
@@ -68,17 +98,38 @@ const piperState: PiperStatus = {
   // Voice Indonesia resmi piper-voices (id/id_ID/news_tts/medium).
   voice: process.env.AI_TTS_PIPER_VOICE || "id_ID-news_tts-medium",
   error: null,
+  dir: null,
+  dirSource: null,
 };
 
 export function getPiperStatus(): PiperStatus {
-  return { ...piperState, voice: piperState.voice };
+  const info = piperDirInfo();
+  return {
+    ...piperState,
+    voice: piperState.voice,
+    dir: info?.dir ?? null,
+    dirSource: info?.source ?? null,
+  };
 }
 
 // ── Unduh file dengan progres (tanpa dependensi) ─────────────────────
 
 async function downloadToFile(url: string, dest: string, label: string): Promise<void> {
-  const res = await fetch(url, { redirect: "follow" });
+  const timeoutMs = Math.max(5_000, Number(process.env.AI_TTS_PIPER_TIMEOUT_MS) || 90_000);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  let res: Response;
+  try {
+    res = await fetch(url, { redirect: "follow", signal: controller.signal });
+  } catch (e) {
+    clearTimeout(timer);
+    const cause = (e as Error & { cause?: { message?: string } })?.cause?.message;
+    throw new Error(
+      `Gagal terhubung saat mengunduh ${label}: ${String(cause ?? (e as Error)?.message ?? e).slice(0, 120)}`
+    );
+  }
   if (!res.ok || !res.body) {
+    clearTimeout(timer);
     throw new Error(`Gagal mengunduh ${label} (HTTP ${res.status})`);
   }
   const total = Number(res.headers.get("content-length")) || 0;
@@ -99,17 +150,17 @@ async function downloadToFile(url: string, dest: string, label: string): Promise
       piperState.stage = `mengunduh ${label} — ${(received / 1_048_576).toFixed(1)} MB`;
     }
   });
-  await pipeline(body, createWriteStream(dest));
+  try {
+    await pipeline(body, createWriteStream(dest));
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
-/** Ekstrak tar.gz dengan perintah `tar` sistem (tersedia di Linux/macOS). */
+/** Ekstrak tar.gz lewat pustaka `tar` npm — TANPA perintah sistem (Task 32:
+ * runtime serverless minimalis bisa saja tanpa biner `tar`). */
 function extractTarGz(tarPath: string, destDir: string): Promise<void> {
-  return new Promise((resolve, reject) => {
-    execFile("tar", ["-xzf", tarPath, "-C", destDir], { timeout: 120_000 }, (err) => {
-      if (err) reject(new Error(`Gagal mengekstrak arsip Piper: ${String(err)}`));
-      else resolve();
-    });
-  });
+  return tar.x({ file: tarPath, cwd: destDir, strict: true });
 }
 
 // ── Pastikan aset Piper ada (single-flight) ───────────────────────────
@@ -140,7 +191,16 @@ function piperVoiceUrls(voice: string): { onnx: string; json: string } {
 }
 
 async function ensurePiperAssetsInner(): Promise<void> {
-  const dir = piperDir();
+  // Task 32: pastikan ada direktori WRITABLE sebelum menyentuh jaringan —
+  // hosting read-only (/var/task) harus gagal dengan pesan ramah, bukan
+  // ENOENT mentah dari mkdir di tengah unduhan.
+  const info = piperDirInfo();
+  if (!info) {
+    piperState.error = NO_WRITABLE_DIR_MESSAGE;
+    piperState.stage = "tidak ada direktori writable";
+    throw new Error(NO_WRITABLE_DIR_MESSAGE);
+  }
+  const dir = info.dir;
   const binPath = path.join(dir, "piper", "piper");
   const voice = piperState.voice;
   const voiceDir = path.join(dir, "voice");
@@ -155,11 +215,16 @@ async function ensurePiperAssetsInner(): Promise<void> {
     .access(modelPath)
     .then(() => false)
     .catch(() => true);
+  const needJson = await fsp
+    .access(modelJsonPath)
+    .then(() => false)
+    .catch(() => true);
 
-  if (!needBin && !needVoice) {
+  if (!needBin && !needVoice && !needJson) {
     piperState.ready = true;
     piperState.pct = 100;
     piperState.stage = "siap";
+    piperState.error = null;
     return;
   }
 
@@ -171,12 +236,11 @@ async function ensurePiperAssetsInner(): Promise<void> {
       piperState.stage = "mengunduh mesin suara Piper (±30 MB)…";
       const tarPath = path.join(dir, "piper.tar.gz");
       await downloadToFile(PIPER_BIN_URL, tarPath, "mesin Piper");
-      await fsp.mkdir(dir, { recursive: true });
       piperState.stage = "mengekstrak mesin Piper…";
       await extractTarGz(tarPath, dir);
       await fsp.rm(tarPath, { force: true });
     }
-    if (needVoice) {
+    if (needVoice || needJson) {
       piperState.pct = Math.min(piperState.pct, 45);
       piperState.stage = `mengunduh voice ${voice} (±60 MB)…`;
       const urls = piperVoiceUrls(voice);
@@ -188,9 +252,11 @@ async function ensurePiperAssetsInner(): Promise<void> {
     piperState.pct = 100;
     piperState.stage = "siap";
   } catch (e) {
-    piperState.error = String((e as Error)?.message ?? e);
+    // Task 32: simpan pesan RAMAH (bukan galat mentah) — status ini yang
+    // dibaca polling klien dan ditampilkan di toast pengguna.
+    piperState.error = friendlyPiperError(e);
     piperState.ready = false;
-    throw e;
+    throw new Error(piperState.error);
   } finally {
     piperState.downloading = false;
   }
@@ -210,18 +276,22 @@ export function ensurePiperAssets(): Promise<void> {
 
 // ── Sintesis Piper ────────────────────────────────────────────────────
 
-function piperBinPath(): string {
-  return path.join(piperDir(), "piper", "piper");
-}
-
 async function synthesizePiper(text: string): Promise<{ buffer: Buffer; mime: string }> {
-  const bin = piperBinPath();
-  const modelPath = path.join(piperDir(), "voice", "model.onnx");
-  const modelJsonPath = path.join(piperDir(), "voice", "model.onnx.json");
+  const info = piperDirInfo();
+  if (!info) {
+    // Tak seharusnya sampai sini (aset sudah diverifikasi), tapi tetap aman.
+    throw new Error(NO_WRITABLE_DIR_MESSAGE);
+  }
+  const bin = path.join(info.dir, "piper", "piper");
+  const modelPath = path.join(info.dir, "voice", "model.onnx");
+  const modelJsonPath = path.join(info.dir, "voice", "model.onnx.json");
   await fsp.access(bin);
   await fsp.access(modelPath);
 
-  const outPath = path.join(cacheDir(), `piper-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.wav`);
+  // WAV keluaran: pakai cache dir bila writable, selain itu dir Piper
+  // (pasti writable — aset barusan diunduh/diextract ke sana).
+  const outDir = cacheDirInfo()?.dir ?? info.dir;
+  const outPath = path.join(outDir, `piper-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.wav`);
   await fsp.mkdir(path.dirname(outPath), { recursive: true });
 
   // Piper membaca stdin baris-per-baris → satu utas kalimat.
@@ -231,7 +301,7 @@ async function synthesizePiper(text: string): Promise<{ buffer: Buffer; mime: st
       bin,
       ["-m", modelPath, "-c", modelJsonPath, "-f", outPath],
       { timeout: 60_000, maxBuffer: 1024 * 1024 },
-      (err) => (err ? reject(new Error(`Piper gagal: ${String(err)}`)) : resolve())
+      (err) => (err ? reject(new Error(piperExecErrorMessage(err))) : resolve())
     );
     if (child.stdin) {
       child.stdin.on("error", () => undefined); // EPIPE bila piper mati lebih dulu
@@ -333,10 +403,12 @@ interface CacheMeta {
 async function readCache(
   key: string
 ): Promise<{ buffer: Buffer; meta: CacheMeta } | null> {
+  const dir = cacheDirInfo()?.dir;
+  if (!dir) return null;
   try {
     const [buffer, metaRaw] = await Promise.all([
-      fsp.readFile(path.join(cacheDir(), `${key}.bin`)),
-      fsp.readFile(path.join(cacheDir(), `${key}.json`), "utf8"),
+      fsp.readFile(path.join(dir, `${key}.bin`)),
+      fsp.readFile(path.join(dir, `${key}.json`), "utf8"),
     ]);
     if (!buffer.length) return null;
     return { buffer, meta: JSON.parse(metaRaw) as CacheMeta };
@@ -347,7 +419,8 @@ async function readCache(
 
 async function writeCache(key: string, buffer: Buffer, meta: CacheMeta): Promise<void> {
   try {
-    const dir = cacheDir();
+    const dir = cacheDirInfo()?.dir;
+    if (!dir) return; // tanpa dir writable → cache dilewati (bukan fatal)
     await fsp.mkdir(dir, { recursive: true });
     await fsp.writeFile(path.join(dir, `${key}.bin`), buffer);
     await fsp.writeFile(path.join(dir, `${key}.json`), JSON.stringify(meta));
@@ -414,44 +487,70 @@ export async function synthesizeSpeech(
     }
   }
 
-  // 2) Piper lokal — unduh aset bila perlu.
+  // 2) Piper lokal — unduh aset bila perlu. (Task 32: semua kegagalan
+  //    Piper dibungkus pesan ramah — tidak ada galat mentah yang bocor.)
   if (!piperState.disabled) {
-    const piperReady = await fsp
-      .access(piperBinPath())
-      .then(() => true)
-      .catch(() => false);
-    if (!piperReady && opts.waitDownload) {
-      await ensurePiperAssets();
-    }
-    if (piperReady || opts.waitDownload) {
-      const key = cacheKey("piper", piperState.voice, "-", clean);
-      const hit = await readCache(key);
-      if (hit) return { buffer: hit.buffer, ...hit.meta, source: "piper", failures };
-      const r = await synthesizePiper(clean);
-      const out: TtsSynthesis = {
-        buffer: r.buffer,
-        mime: r.mime,
-        source: "piper",
+    try {
+      const info = piperDirInfo();
+      if (!info) {
+        // Hosting tanpa dir writable: langsung pesan ramah (bukan 423 —
+        // "ketuk lagi utk unduh" akan menyesatkan di hosting read-only).
+        throw new Error(NO_WRITABLE_DIR_MESSAGE);
+      }
+      // "Siap" = biner + model + konfigurasi LENGKAP (bukan sekadar biner —
+      // unduhan yang terputus di tengah harus dicoba ulang, bukan gagal
+      // sintesis dengan ENOENT access model.onnx).
+      const assetExists = (p: string) =>
+        fsp.access(p).then(
+          () => true,
+          () => false
+        );
+      const piperReady =
+        (await assetExists(path.join(info.dir, "piper", "piper"))) &&
+        (await assetExists(path.join(info.dir, "voice", "model.onnx"))) &&
+        (await assetExists(path.join(info.dir, "voice", "model.onnx.json")));
+      if (!piperReady && opts.waitDownload) {
+        await ensurePiperAssets();
+      }
+      if (piperReady || opts.waitDownload) {
+        const key = cacheKey("piper", piperState.voice, "-", clean);
+        const hit = await readCache(key);
+        if (hit) return { buffer: hit.buffer, ...hit.meta, source: "piper", failures };
+        const r = await synthesizePiper(clean);
+        const out: TtsSynthesis = {
+          buffer: r.buffer,
+          mime: r.mime,
+          source: "piper",
+          provider: "piper",
+          model: `piper/${piperState.voice}`,
+          voice: piperState.voice,
+          failures,
+        };
+        await writeCache(key, r.buffer, {
+          mime: r.mime,
+          source: "piper",
+          provider: "piper",
+          model: `piper/${piperState.voice}`,
+          voice: piperState.voice,
+        });
+        return out;
+      }
+      // Aset belum ada & tidak boleh menunggu unduhan → sinyal 423.
+      const err = new Error(
+        "Suara AI lokal belum terunduh — ketuk sekali lagi untuk mengunduh (±90 MB, sekali saja)."
+      ) as Error & { needDownload?: boolean };
+      err.needDownload = true;
+      throw err;
+    } catch (e) {
+      const err = e as Error & { needDownload?: boolean };
+      if (err.needDownload) throw err; // sinyal 423 — diteruskan apa adanya
+      failures.push({
         provider: "piper",
         model: `piper/${piperState.voice}`,
-        voice: piperState.voice,
-        failures,
-      };
-      await writeCache(key, r.buffer, {
-        mime: r.mime,
-        source: "piper",
-        provider: "piper",
-        model: `piper/${piperState.voice}`,
-        voice: piperState.voice,
+        detail: friendlyPiperError(err).slice(0, 160),
       });
-      return out;
+      throw new Error(friendlyPiperError(err));
     }
-    // Aset belum ada & tidak boleh menunggu unduhan → sinyal 423.
-    const err = new Error(
-      "Suara AI lokal belum terunduh — ketuk sekali lagi untuk mengunduh (±90 MB, sekali saja)."
-    ) as Error & { needDownload?: boolean };
-    err.needDownload = true;
-    throw err;
   }
 
   throw new Error(

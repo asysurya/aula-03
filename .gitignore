@@ -34,3 +34,7 @@ next-env.d.ts
 /uploads/
 /upload/
 scripts-start-mongo.cjs
+
+# aset TTS lokal Piper (default self-host) + cache audio Bacakan
+.tts-piper/
+.tts-cache/

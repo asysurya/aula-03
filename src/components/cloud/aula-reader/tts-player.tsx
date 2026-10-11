@@ -130,9 +130,32 @@ export function useAulaTts(): UseAulaTts {
         description: "Mohon tunggu, progresnya tampil di tombol Suara AI.",
         duration: 8000,
       });
+      // Task 32: POST /prepare MENUNGGU unduhan selesai — di hosting
+      // serverless unduhan "latar" dibekukan setelah respons, jadi hasil
+      // akhirnya dibaca dari respons POST ini. Polling GET tetap jalan
+      // paralel utk progres (self-host / proses yang sama).
+      let postDone = false;
+      let postReady = false;
+      let postError: string | null = null;
+      const postP = fetch("/api/ai/tts/prepare", { method: "POST" })
+        .then(async (r) => {
+          if (!r.ok) throw new Error("gagal memulai unduhan suara AI");
+          return (await r.json().catch(() => ({}))) as {
+            ready?: boolean;
+            error?: string | null;
+          };
+        })
+        .then((j) => {
+          postDone = true;
+          postReady = j?.ready === true;
+          postError = j?.error ? String(j.error) : null;
+        })
+        .catch((e) => {
+          postDone = true;
+          postError = String((e as Error)?.message ?? e);
+        });
+      void postP;
       try {
-        const start = await fetch("/api/ai/tts/prepare", { method: "POST" });
-        if (!start.ok) throw new Error("gagal memulai unduhan");
         // Polling sampai siap / galat / 15 menit.
         const t0 = Date.now();
         for (;;) {
@@ -154,6 +177,15 @@ export function useAulaTts(): UseAulaTts {
             return;
           }
           if (s.error && !s.downloading) throw new Error(s.error);
+          // Verdict dari POST (penting saat GET lintas-instance serverless
+          // tidak pernah melihat progres).
+          if (postDone) {
+            if (postReady) {
+              toast.success("Suara AI lokal siap — lanjut membacakan.");
+              return;
+            }
+            if (postError) throw new Error(postError);
+          }
           if (Date.now() - t0 > 15 * 60_000) throw new Error("waktu unduhan habis");
         }
       } finally {
@@ -253,7 +285,7 @@ export function useAulaTts(): UseAulaTts {
       } catch (e) {
         setLoading(false);
         toast.error("Suara AI gagal — melanjutkan dengan suara perangkat.", {
-          description: String((e as Error)?.message ?? "").slice(0, 160),
+          description: String((e as Error)?.message ?? "").slice(0, 220),
         });
         speakDevice(chunks, i, onFinish);
         return;
