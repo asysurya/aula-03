@@ -1,6 +1,14 @@
 import { Storage, type MutableFile } from "megajs";
 import { createHash, randomBytes } from "crypto";
 import { db } from "@/lib/db";
+import {
+  megaFakeEnabled,
+  fakeMegaList,
+  fakeMegaStat,
+  fakeMegaDownload,
+  fakeMegaMkdir,
+  fakeMegaUploadTo,
+} from "@/lib/mega-e2e-fake";
 
 // ─────────────────────────────────────────────────────────────────────────
 // MEGA storage adapter — server-only.
@@ -440,6 +448,10 @@ export async function megaUploadTo(
   bytes: Buffer,
   _mimetype: string
 ): Promise<MegaUploadResult> {
+  // E2E fake (env-gated — lihat mega-e2e-fake.ts; tidak aktif di produksi).
+  if (megaFakeEnabled(account)) {
+    return fakeMegaUploadTo(account, parentId, name, bytes);
+  }
   if (!account.email && !account.sessionData) {
     throw new Error("MEGA_NO_CREDENTIALS");
   }
@@ -545,6 +557,9 @@ export async function megaStat(
   account: MegaAccountLike,
   nodeId: string
 ): Promise<MegaStatResult> {
+  if (megaFakeEnabled(account)) {
+    return fakeMegaStat(nodeId);
+  }
   return withSession(account, async (storage) => {
     const node = await resolveNode(storage, nodeId);
     if (!node) throw new Error("MEGA_NODE_NOT_FOUND");
@@ -565,6 +580,9 @@ export async function megaDownload(
   account: MegaAccountLike,
   nodeId: string
 ): Promise<Buffer | null> {
+  if (megaFakeEnabled(account)) {
+    return fakeMegaDownload(nodeId);
+  }
   try {
     return await withSession(account, async (storage) => {
       const file = await resolveNode(storage, nodeId);
@@ -642,6 +660,9 @@ export async function megaMkdir(
   parentId: string | null,
   name: string
 ): Promise<{ nodeId: string }> {
+  if (megaFakeEnabled(account)) {
+    return fakeMegaMkdir(parentId, name);
+  }
   return withSession(account, async (storage) => {
     const parent = await resolveFolder(storage, parentId);
     const folder = await withTimeout(
@@ -878,6 +899,9 @@ export async function megaList(
   account: MegaAccountLike,
   nodeId?: string | null
 ): Promise<MegaListResult> {
+  if (megaFakeEnabled(account)) {
+    return fakeMegaList(nodeId ?? null);
+  }
   return withSession(account, async (storage) => {
     const target = await resolveFolder(storage, nodeId ?? null);
 

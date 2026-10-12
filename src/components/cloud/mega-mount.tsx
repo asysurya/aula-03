@@ -7,6 +7,7 @@ import { id as localeId } from "date-fns/locale";
 import { toast } from "sonner";
 import {
   AlertTriangle,
+  ArchiveRestore,
   CheckSquare,
   ChevronDown,
   ChevronRight,
@@ -14,6 +15,7 @@ import {
   Copy,
   Download,
   Eye,
+  FileArchive,
   FilePlus2,
   Folder,
   FolderPlus,
@@ -80,6 +82,10 @@ import {
 
 import { FilePreview } from "@/components/cloud/file-preview";
 import { MegaLogo } from "@/components/cloud/mega-logo";
+import {
+  ArchiveBrowserDialog,
+  type ArchiveTarget,
+} from "@/components/cloud/archive-browser";
 import { TransferManagerButton } from "@/components/cloud/transfer-modal";
 import { useTransferStore } from "@/lib/transfer-store";
 import {
@@ -87,6 +93,7 @@ import {
   mimetypeFromName,
   type CloudFileItem,
 } from "@/lib/cloud-format";
+import { isArchiveName } from "@/lib/archive-names";
 
 // ───────────────────────── Types ─────────────────────────
 
@@ -160,6 +167,12 @@ export function MegaMountView({
 }) {
   const [nodeId, setNodeId] = useState<string | null>(null);
   const [previewFile, setPreviewFile] = useState<CloudFileItem | null>(null);
+  // Arsip yang sedang dibuka di penjelajah isi-arsip (tanpa ekstrak).
+  const [archiveTarget, setArchiveTarget] = useState<ArchiveTarget | null>(
+    null
+  );
+  // Buka dialog ekstraksi langsung (dari menu konteks "Ekstrak di Sini…").
+  const [archiveAutoExtract, setArchiveAutoExtract] = useState(false);
   // Akun yang sedang dibuka (id; null = biarkan server memilih default).
   const [activeAccountId, setActiveAccountId] = useState<string | null>(
     initialAccountId
@@ -229,6 +242,8 @@ export function MegaMountView({
     setAnchorId(null);
     setClipboard(null);
     setPreviewFile(null);
+    setArchiveTarget(null);
+    setArchiveAutoExtract(false);
     toast.info(
       `Beralih ke akun "${
         switchableAccounts.find((a) => a.id === accountId)?.name ?? "cloud"
@@ -354,6 +369,15 @@ export function MegaMountView({
     if (entry.isFolder) {
       setNodeId(entry.nodeId);
       clearSelection();
+    } else if (isArchiveName(entry.name)) {
+      // Arsip → penjelajah isi arsip (buka berkas di dalamnya tanpa ekstrak).
+      clearSelection();
+      setArchiveAutoExtract(false);
+      setArchiveTarget({
+        nodeId: entry.nodeId,
+        name: entry.name,
+        size: entry.size,
+      });
     } else {
       setPreviewFile(entryToFileItem(entry));
     }
@@ -935,6 +959,22 @@ export function MegaMountView({
                       }
                       onSelectRange={() => selectEntry(entry.nodeId, "range")}
                       onPreview={() => setPreviewFile(entryToFileItem(entry))}
+                      onOpenArchive={() => {
+                        setArchiveAutoExtract(false);
+                        setArchiveTarget({
+                          nodeId: entry.nodeId,
+                          name: entry.name,
+                          size: entry.size,
+                        });
+                      }}
+                      onExtractArchive={() => {
+                        setArchiveAutoExtract(true);
+                        setArchiveTarget({
+                          nodeId: entry.nodeId,
+                          name: entry.name,
+                          size: entry.size,
+                        });
+                      }}
                       onRename={() => setRenameTarget(entry)}
                       onMove={() => setMoveTarget(entry)}
                       onDelete={() => setDeleteTargets([entry])}
@@ -964,6 +1004,26 @@ export function MegaMountView({
 
       {/* Preview file MEGA (semua tipe + fullscreen) */}
       <FilePreview file={previewFile} onClose={() => setPreviewFile(null)} />
+
+      {/* Penjelajah isi ARSIP di mount (buka/ekstrak tanpa keluar dari MEGA) */}
+      <ArchiveBrowserDialog
+        open={!!archiveTarget}
+        onOpenChange={(o) => {
+          if (!o) {
+            setArchiveTarget(null);
+            setArchiveAutoExtract(false);
+          }
+        }}
+        accountId={accountId ?? null}
+        archive={archiveTarget}
+        canWrite={canWrite}
+        targetLabel={
+          data?.path?.[data.path.length - 1]?.name ?? "root MEGA"
+        }
+        targetParentId={nodeId}
+        onExtracted={() => refetch()}
+        autoExtract={archiveAutoExtract}
+      />
 
       {/* Dialog: folder baru */}
       <NameDialog
@@ -1088,6 +1148,8 @@ function MegaRow({
   onToggleSelect,
   onSelectRange,
   onPreview,
+  onOpenArchive,
+  onExtractArchive,
   onDownload,
   onRename,
   onMove,
@@ -1105,6 +1167,8 @@ function MegaRow({
   onToggleSelect: (additive: boolean) => void;
   onSelectRange: () => void;
   onPreview: () => void;
+  onOpenArchive: () => void;
+  onExtractArchive: () => void;
   onDownload: () => void;
   onRename: () => void;
   onMove: () => void;
@@ -1120,6 +1184,7 @@ function MegaRow({
         locale: localeId,
       })
     : "";
+  const isArchive = !entry.isFolder && isArchiveName(entry.name);
 
   // ── Perilaku klik standar explorer/drive ──
   // 1 klik = pilih · Ctrl/Cmd+klik = toggle · Shift+klik = rentang ·
@@ -1175,6 +1240,10 @@ function MegaRow({
             <span className="rounded-md bg-red-500/10 p-1.5 shrink-0">
               <Folder className="size-4 text-red-500" />
             </span>
+          ) : isArchive ? (
+            <span className="rounded-md bg-amber-500/10 p-1.5 shrink-0">
+              <FileArchive className="size-4 text-amber-500" />
+            </span>
           ) : (
             <span className="rounded-md bg-secondary p-1.5 shrink-0 text-muted-foreground">
               <HardDrive className="size-4" />
@@ -1194,7 +1263,10 @@ function MegaRow({
           <RowMenu
             entry={entry}
             canWrite={canWrite}
+            isArchive={isArchive}
             onPreview={onPreview}
+            onOpenArchive={onOpenArchive}
+            onExtractArchive={onExtractArchive}
             onRename={onRename}
             onMove={onMove}
             onDelete={onDelete}
@@ -1208,6 +1280,16 @@ function MegaRow({
 
       {/* Klik kanan — menu explorer lengkap */}
       <ContextMenuContent className="w-52">
+        {isArchive ? (
+          <ContextMenuItem onClick={onOpenArchive} data-mega-open-archive="1">
+            <FileArchive className="size-4" /> Buka Arsip
+          </ContextMenuItem>
+        ) : null}
+        {isArchive && canWrite ? (
+          <ContextMenuItem onClick={onExtractArchive} data-mega-extract-archive="1">
+            <ArchiveRestore className="size-4" /> Ekstrak di Sini…
+          </ContextMenuItem>
+        ) : null}
         <ContextMenuItem onClick={onOpen}>
           {entry.isFolder ? (
             <Folder className="size-4" />
@@ -1260,7 +1342,10 @@ function MegaRow({
 function RowMenu({
   entry,
   canWrite,
+  isArchive,
   onPreview,
+  onOpenArchive,
+  onExtractArchive,
   onRename,
   onMove,
   onDelete,
@@ -1270,7 +1355,10 @@ function RowMenu({
 }: {
   entry: MegaEntry;
   canWrite: boolean;
+  isArchive: boolean;
   onPreview: () => void;
+  onOpenArchive: () => void;
+  onExtractArchive: () => void;
   onRename: () => void;
   onMove: () => void;
   onDelete: () => void;
@@ -1296,6 +1384,16 @@ function RowMenu({
           </Button>
         </DropdownMenuTrigger>
         <DropdownMenuContent align="end" className="w-48">
+          {isArchive ? (
+            <DropdownMenuItem onClick={onOpenArchive}>
+              <FileArchive className="size-4" /> Buka Arsip
+            </DropdownMenuItem>
+          ) : null}
+          {isArchive && canWrite ? (
+            <DropdownMenuItem onClick={onExtractArchive}>
+              <ArchiveRestore className="size-4" /> Ekstrak di Sini…
+            </DropdownMenuItem>
+          ) : null}
           {entry.isFolder ? null : (
             <>
               <DropdownMenuItem onClick={onPreview}>

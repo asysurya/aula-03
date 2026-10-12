@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
+import { ArrowLeft, Eye } from "lucide-react";
 import {
   Download,
   Loader2,
@@ -35,7 +36,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { AiMarkdown } from "@/components/ai/ai-markdown";
 import { filePublicUrl } from "@/lib/file-constants";
-import { formatBytes, type CloudFileItem } from "@/lib/cloud-format";
+import { formatBytes, mimetypeFromName, type CloudFileItem } from "@/lib/cloud-format";
 import {
   keepReaderFile,
   unkeepReaderFile,
@@ -136,10 +137,12 @@ export function PreviewHeader({
   onClose: () => void;
 }) {
   const enqueueDownload = useTransferStore((s) => s.enqueueDownload);
-  // File MEGA mentah (mount) butuh ?name= agar server tahu nama + mimetype.
+  // Berkas dalam arsip mount MEGA memakai previewUrl eksplisit; selain itu
+  // file MEGA mentah (mount) butuh ?name= agar server tahu nama + mimetype.
   const url =
+    file.previewUrl ??
     filePublicUrl(file.storageKey) +
-    (file.raw ? `?name=${encodeURIComponent(file.name)}` : "");
+      (file.raw ? `?name=${encodeURIComponent(file.name)}` : "");
 
   // Tombol cache: simpan file di perangkat (buka ulang tanpa unduh) atau
   // batalkan simpanan. Status mengikuti daftar keep di localStorage.
@@ -360,10 +363,12 @@ export function PreviewBody({
   fullscreen: boolean;
 }) {
   const kind = classify(file.mimetype, file.name);
-  // File MEGA mentah (mount) butuh ?name= agar server tahu nama + mimetype.
+  // Berkas dalam arsip mount MEGA memakai previewUrl eksplisit; selain itu
+  // file MEGA mentah (mount) butuh ?name= agar server tahu nama + mimetype.
   const url =
+    file.previewUrl ??
     filePublicUrl(file.storageKey) +
-    (file.raw ? `?name=${encodeURIComponent(file.name)}` : "");
+      (file.raw ? `?name=${encodeURIComponent(file.name)}` : "");
 
   switch (kind) {
     case "image":
@@ -1228,9 +1233,21 @@ function ArchivePreview({
   const [entries, setEntries] = useState<ZipEntryInfo[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [query, setQuery] = useState("");
+  // Berkas di dalam arsip yang sedang dibuka (dekompresi KLIEN, tanpa
+  // mengekstrak arsipnya — blob URL sementara).
+  const [inner, setInner] = useState<{
+    path: string;
+    name: string;
+    size: number;
+    blobUrl: string;
+  } | null>(null);
+  const [innerBusy, setInnerBusy] = useState(false);
+  const [innerText, setInnerText] = useState<string | null>(null);
   const ext2 = ext(file.name);
   // Batas aman: zip raksasa → kartu info (membaca header pun berat).
   const ZIP_LIST_LIMIT = 60 * 1024 * 1024;
+  // Batas dekompresi klien per berkas dalam arsip (memori browser).
+  const ZIP_ENTRY_OPEN_LIMIT = 25 * 1024 * 1024;
   const isZip =
     (ext2 === "zip" || ext2 === "epub" || file.mimetype === "application/zip") &&
     (file.size || 0) <= ZIP_LIST_LIMIT;
@@ -1261,6 +1278,62 @@ function ArchivePreview({
       cancelled = true;
     };
   }, [isZip, entry]);
+
+  // Lepaskan blob URL berkas-dalam-arsip saat diganti/ditutup.
+  useEffect(() => {
+    return () => {
+      if (inner) URL.revokeObjectURL(inner.blobUrl);
+    };
+  }, [inner]);
+
+  /** Dekompresi SATU berkas di dalam zip (klien) → pratinjau blob. */
+  async function openZipEntry(e: ZipEntryInfo) {
+    if (!entry || innerBusy) return;
+    if (e.size > ZIP_ENTRY_OPEN_LIMIT) {
+      toast.error(
+        `"${e.path.split("/").pop()}" ${formatBytes(e.size)} — terlalu besar untuk dibuka langsung (maks 25 MB).`
+      );
+      return;
+    }
+    setInnerBusy(true);
+    try {
+      const { unzipSync } = await import("fflate");
+      const out = unzipSync(new Uint8Array(entry.buffer), {
+        filter: (f) => f.name === e.path,
+      });
+      const data = out[e.path];
+      if (!data) throw new Error("Berkas tidak ditemukan dalam arsip.");
+      const name = e.path.split("/").pop() || "berkas";
+      const blob = new Blob([new Uint8Array(data)], {
+        type: mimetypeFromName(name),
+      });
+      const blobUrl = URL.createObjectURL(blob);
+      // Pratinjau teks dibaca sekarang (blob terus dipakai img/pdf).
+      const nm = name.toLowerCase();
+      let text: string | null = null;
+      if (
+        "txt md csv tsv json xml yml yaml log js ts html htm css".split(" ").some(
+          (x) => nm.endsWith("." + x)
+        )
+      ) {
+        text = await blob.slice(0, 200 * 1024).text();
+      }
+      setInner({ path: e.path, name, size: data.length, blobUrl });
+      setInnerText(text);
+    } catch (err) {
+      toast.error(
+        err instanceof Error ? err.message : "Gagal membuka berkas dalam arsip"
+      );
+    } finally {
+      setInnerBusy(false);
+    }
+  }
+
+  function closeInner() {
+    if (inner) URL.revokeObjectURL(inner.blobUrl);
+    setInner(null);
+    setInnerText(null);
+  }
 
   if (isZip && bufError) {
     return (
@@ -1340,6 +1413,84 @@ function ArchivePreview({
     );
   }
 
+  // ── Pratinjau berkas DI DALAM arsip (dekompresi klien, tanpa ekstrak) ──
+  if (inner) {
+    const nm = inner.name.toLowerCase();
+    const isImage = /\.(png|jpe?g|webp|gif|bmp|avif)$/.test(nm);
+    const isPdf = nm.endsWith(".pdf");
+    const isAudio = /\.(mp3|wav|ogg|m4a)$/.test(nm);
+    const isVideo = /\.(mp4|webm|mov)$/.test(nm);
+    return (
+      <div className="h-full min-h-[50vh] flex flex-col" data-archive-inner="1">
+        <div className="px-4 py-3 border-b border-border flex items-center gap-2">
+          <Button
+            size="sm"
+            variant="ghost"
+            className="gap-1.5"
+            onClick={closeInner}
+            data-archive-inner-back="1"
+          >
+            <ArrowLeft className="size-4" /> Kembali ke arsip
+          </Button>
+          <p className="text-sm font-medium truncate flex-1 min-w-0" title={inner.path}>
+            {inner.name}
+          </p>
+          <span className="text-[11px] text-muted-foreground tabular-nums shrink-0">
+            {formatBytes(inner.size)}
+          </span>
+          <a
+            href={inner.blobUrl}
+            download={inner.name}
+            className="shrink-0 inline-flex items-center gap-1 h-8 px-3 rounded-md border border-input bg-card text-xs hover:bg-accent"
+            data-archive-inner-download="1"
+          >
+            <Download className="size-3.5" /> Unduh
+          </a>
+        </div>
+        <div className="flex-1 min-h-0">
+          {isImage ? (
+            <div className="flex items-center justify-center p-4 h-full min-h-[40vh]">
+              <img
+                src={inner.blobUrl}
+                alt={inner.name}
+                className="object-contain rounded-md shadow-sm max-h-[70vh]"
+              />
+            </div>
+          ) : isPdf ? (
+            <iframe
+              src={inner.blobUrl}
+              title={inner.name}
+              className="w-full h-[70vh] border-0"
+            />
+          ) : isVideo ? (
+            <div className="flex items-center justify-center p-4 h-full min-h-[40vh] bg-black/5">
+              <video controls src={inner.blobUrl} className="max-h-[70vh] rounded-md" />
+            </div>
+          ) : isAudio ? (
+            <div className="flex items-center justify-center p-8">
+              <audio controls src={inner.blobUrl} className="w-full max-w-xl" />
+            </div>
+          ) : innerText !== null ? (
+            <ScrollArea className="h-[70vh]">
+              <pre className="p-4 text-xs whitespace-pre-wrap break-words font-mono">
+                {innerText}
+                {inner.size > 200 * 1024 ? "\n…[dipotong — berkas panjang]" : ""}
+              </pre>
+            </ScrollArea>
+          ) : (
+            <div className="flex flex-col items-center justify-center gap-3 p-12 text-center min-h-[40vh]">
+              <FileWarning className="size-10 text-muted-foreground/60" />
+              <p className="text-sm font-medium">{inner.name}</p>
+              <p className="text-xs text-muted-foreground">
+                Pratinjau tipe ini belum tersedia — unduh untuk membukanya.
+              </p>
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
+
   const files = entries.filter((e) => e.isFile);
   const folders = entries.filter((e) => !e.isFile).length;
   const totalUncompressed = files.reduce((s, e) => s + e.size, 0);
@@ -1393,15 +1544,35 @@ function ArchivePreview({
             {filtered.map((e) => (
               <div
                 key={e.path}
-                className="flex items-center gap-2 px-2 py-1.5 rounded-md hover:bg-accent/60 text-sm"
+                className="flex items-center gap-2 px-2 py-1.5 rounded-md hover:bg-accent/60 text-sm group"
+                data-archive-zip-file={e.path}
               >
                 <FileText className="size-3.5 text-muted-foreground shrink-0" />
-                <span className="flex-1 min-w-0 truncate font-mono text-xs">
+                <span
+                  className="flex-1 min-w-0 truncate font-mono text-xs cursor-pointer"
+                  title={`Buka "${e.path}" tanpa ekstrak`}
+                  onClick={() => openZipEntry(e)}
+                >
                   {e.path}
                 </span>
                 <span className="text-[11px] text-muted-foreground tabular-nums shrink-0">
                   {formatBytes(e.size)}
                 </span>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  className="h-6 px-2 gap-1 text-[11px] opacity-60 group-hover:opacity-100 shrink-0"
+                  onClick={() => openZipEntry(e)}
+                  disabled={innerBusy}
+                  data-archive-zip-open="1"
+                >
+                  {innerBusy ? (
+                    <Loader2 className="size-3 animate-spin" />
+                  ) : (
+                    <Eye className="size-3" />
+                  )}{" "}
+                  Buka
+                </Button>
               </div>
             ))}
             {hiddenCount > 0 ? (

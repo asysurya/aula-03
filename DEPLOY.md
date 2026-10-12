@@ -51,6 +51,10 @@ bunx prisma db push
 3. Setelah tersambung, semua upload (materi, lampiran chat, jawaban form FILE/GAMBAR, foto profil) otomatis tersimpan ke cloud. Urutan prioritas: MEGA dulu → bila gagal/diblokir, otomatis fallback ke S3. Tanpa akun cloud aktif, upload file ditolak dengan pesan yang jelas.
 4. Guru/admin juga bisa mengelola isi akun MEGA langsung dari aplikasi: **Cloud & Tugas → kartu MEGA (mount)** — unggah file, buat folder, rename, pindah, hapus permanen, unduh, preview.
 
+> **Arsip (ZIP/EPUB/TAR/TAR.GZ/GZ) di mount MEGA**: klik dua kali arsip untuk **menjelajah isinya tanpa mengekstrak** — folder bisa dinavigasi, berkas di dalamnya bisa dibuka/dipratinjau/diunduh satu per satu (server hanya mendekompresi berkas yang dibuka). Tombol **"Ekstrak di Sini…"** menjadikan seluruh arsip folder + berkas asli di mount (butuh hak tulis). Batas: arsip maks 100 MB, berkas dalam arsip maks 100 MB, ekstraksi maks 300 entri / 1 GB total (anti zip-bomb; format RAR/7z tidak didukung — unduh untuk mengekstrak di perangkat). Ekstraksi besar di Vercel dibatasi durasi function — paling optimal di self-host.
+
+> ⚠️ **Env `MEGA_E2E_FAKE_DIR` KHUSUS E2E lokal** — jangan pernah diset di produksi. Env ini mengarahkan operasi MEGA ke folder lokal (untuk uji otomatis tanpa akun MEGA asli) dan hanya aktif untuk akun bernama email tertentu; meski begitu, biarkan kosong di server produksi.
+
 > **Anti rate-limit MEGA**: setelah login password berhasil, session MEGA (sid + master key) disimpan di database — `CloudAccount.sessionData`. Proses berikutnya (termasuk cold-start lambda Vercel) memulihkan session tersebut **tanpa login ulang**, sehingga MEGA tidak lagi menandai aplikasi sebagai login berulang. Login gagal memicu cooldown 60 detik agar akun yang bermasalah tidak terus "dipalu".
 
 > **Akun MEGA kena EBLOCKED (diblokir)?** Itu blokir level akun dari MEGA, bukan bug aplikasi. Solusinya: (a) login ke mega.nz lewat browser — kadang ada captcha/verifikasi yang harus diselesaikan, (b) ganti ke akun MEGA baru lewat Admin Panel, atau (c) pakai S3/Cloudflare R2 (gratis 10 GB, tanpa kartu kredit, tidak pernah memblokir server).

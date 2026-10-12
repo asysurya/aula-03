@@ -90,6 +90,10 @@ export interface CloudFileItem {
   // true untuk file MEGA mentah dari mount MEGA Cloud (tanpa baris
   // CloudFile di DB) — URL preview perlu parameter ?name=.
   raw?: boolean;
+  // Override URL pratinjau (opsional) — dipakai untuk berkas DI DALAM arsip
+  // mount MEGA (dilayani /api/cloud/mega/archive?entry=…), tanpa menyentuh
+  // jalur /api/storage/<storageKey> biasa.
+  previewUrl?: string;
 }
 
 // Granted-user entry returned by the permissions endpoints.
