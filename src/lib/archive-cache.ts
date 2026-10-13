@@ -1,19 +1,33 @@
 // ─────────────────────────────────────────────────────────────────────────
-// Cache DISK untuk arsip besar + sumber byte berkas (Task 34).
+// Cache DISK untuk arsip besar + sumber byte berkas (Task 34 → 35).
 //
 // Mengapa: membuka arsip 5 GB tidak boleh memuat arsip ke RAM. Arsip
 // diunduh/dimaterialkan SEKALI ke berkas sementara di disk (LRU, TTL),
 // lalu mesin arsip membacanya per-rentang (ByteSource).
 //
-// Direktori cache: env AI_ARCHIVE_CACHE_DIR → <aplikasi>/.aula-archive-cache
-// → os.tmpdir()/aula-archive-cache (fallback serverless). Setiap kandidat
-// diuji tulis dulu (meniru tts-piper-paths.ts).
+// ZERO-CONFIG (Task 35): TIDAK PERLU set env apa pun. Direktori cache
+// dipilih otomatis berurutan (setiap kandidat diuji tulis dulu, meniru
+// tts-piper-paths.ts):
+//   1. env AI_ARCHIVE_CACHE_DIR        — OPSIONAL, utk mematok lokasi
+//   2. <aplikasi>/.aula-archive-cache  — self-host: aset bertahan
+//   3. ~/.cache/aula-archive-cache     — (atau $XDG_CACHE_HOME) persisten
+//   4. /var/tmp/aula-archive-cache     — bertahan reboot (Linux)
+//   5. os.tmpdir()/aula-archive-cache  — fallback serverless (Vercel /tmp)
+//
+// Cache juga BERTAHAN HIDUP ANTAR-RESTART: tiap berkas cache disertai
+// sidecar ".key" berisi kunci internal; saat proses baru menyala, berkas
+// lama yang masih segar (TTL) DIADOPSI kembali ke LRU — buka ulang arsip
+// setelah restart/deploy tidak mengunduh ulang.
 //
 // Guard:
 //   · Cek ruang kosong (statfs) SEBELUM produksi — kekurangan ruang →
 //     pesan ramah (kode NO_SPACE), bukan ENOSPC mentah.
-//   · Kap LRU: 6 berkas / 8 GB total / TTL 30 menit; berkas yatim di
-//     direktori (>2 jam, pola nama cache) disapu lazily.
+//   · Kap LRU ADAPTIF: 6 berkas / maks 8 GB, tapi menyusut otomatis
+//     mengikuti ruang disk yang benar-benar tersisa (maks ±¼ ruang bebas,
+//     minimal 64 MB) → di /tmp kecil (serverless) cache tak pernah memenuhi
+//     disk; margin aman ikut menyusut di disk sempit.
+//   · TTL 6 jam; berkas yatim (tanpa pemilik di memori, >2 jam, pola nama
+//     cache) disapu lazily.
 // ─────────────────────────────────────────────────────────────────────────
 
 import { promises as fs } from "fs";
@@ -34,11 +48,18 @@ import {
 // ── Batas cache ──────────────────────────────────────────────────────────
 
 const MAX_DISK_ENTRIES = 6;
-const MAX_DISK_TOTAL_BYTES = 8 * 1024 * 1024 * 1024; // 8 GB
-const DISK_TTL_MS = 30 * 60 * 1000; // 30 menit
+const MAX_DISK_TOTAL_BYTES = 8 * 1024 * 1024 * 1024; // 8 GB (kap atas)
+/** Kap total menyesuaikan ruang bebas: maks ¼ ruang, minimal 64 MB. */
+const MIN_DISK_TOTAL_BYTES = 64 * 1024 * 1024;
+/** Di atas ruang sekasar ini kap atas tetap dipakai (¼-nya sudah > 8 GB). */
+const HUGE_FREE_BYTES = 32 * 1024 * 1024 * 1024;
+const DISK_TTL_MS = 6 * 60 * 60 * 1000; // 6 jam (bertahan sehari sekolah)
 const ORPHAN_SWEEP_MS = 2 * 60 * 60 * 1000; // 2 jam
-/** Margin ruang bebas minimal saat produksi berkas cache. */
+/** Margin ruang bebas minimal saat produksi berkas cache (menyusut di disk sempit). */
 const FREE_MARGIN_BYTES = 256 * 1024 * 1024;
+const MIN_FREE_MARGIN_BYTES = 16 * 1024 * 1024;
+/** Panjang maks kunci internal yang disimpan di sidecar (anti abuse). */
+const MAX_KEY_LENGTH = 4096;
 /** Kap dekompresi gzip whole-stream (tar.gz/gz) saat materialisasi. */
 export const MAX_GUNZIP_BYTES = 5 * 1024 * 1024 * 1024;
 
@@ -55,9 +76,56 @@ export class ArchiveCacheError extends Error {
   }
 }
 
-// ── Direktori cache writable (env → app → tmp) ───────────────────────────
+// ── Direktori cache writable (env → app → home → /var/tmp → tmp) ─────────
 
-let cachedDir: string | null | undefined;
+export type ArchiveCacheDirSource =
+  | "env"
+  | "app"
+  | "home"
+  | "vartmp"
+  | "tmp";
+
+export interface CacheDirCandidate {
+  dir: string;
+  source: ArchiveCacheDirSource;
+}
+
+/**
+ * Bangun daftar kandidat direktori cache (murni — mudah diuji unit).
+ * Urutan: env (opsional) → sebelah aplikasi → cache pengguna (XDG/HOME)
+ * → /var/tmp → tmpdir sistem.
+ */
+export function buildCacheDirCandidates(
+  envDir: string | null | undefined,
+  ctx: {
+    cwd: string;
+    xdgCacheHome?: string | null;
+    home?: string | null;
+    tmpdir: string;
+    varTmp?: string;
+  }
+): CacheDirCandidate[] {
+  const out: CacheDirCandidate[] = [];
+  const seen = new Set<string>();
+  const push = (dir: string, source: ArchiveCacheDirSource) => {
+    const resolved = path.resolve(dir);
+    if (seen.has(resolved)) return;
+    seen.add(resolved);
+    out.push({ dir: resolved, source });
+  };
+  if (envDir && envDir.trim()) push(envDir.trim(), "env");
+  push(path.join(ctx.cwd, ".aula-archive-cache"), "app");
+  const userCache =
+    ctx.xdgCacheHome && ctx.xdgCacheHome.trim()
+      ? path.join(ctx.xdgCacheHome.trim(), "aula-archive-cache")
+      : ctx.home && ctx.home.trim()
+        ? path.join(ctx.home, ".cache", "aula-archive-cache")
+        : null;
+  if (userCache) push(userCache, "home");
+  push(path.join(ctx.varTmp ?? "/var/tmp", "aula-archive-cache"), "vartmp");
+  push(path.join(ctx.tmpdir, "aula-archive-cache"), "tmp");
+  return out;
+}
 
 async function probeWritable(dir: string): Promise<boolean> {
   try {
@@ -71,29 +139,78 @@ async function probeWritable(dir: string): Promise<boolean> {
   }
 }
 
-/** Direktori cache arsip yang bisa ditulis (diuji tulis). null bila semua
- *  kandidat gagal. Memoized per proses. */
-export async function resolveArchiveCacheDir(): Promise<string | null> {
-  if (cachedDir !== undefined) return cachedDir;
-  const candidates: string[] = [];
-  const envDir = process.env.AI_ARCHIVE_CACHE_DIR;
-  if (envDir && envDir.trim()) candidates.push(path.resolve(envDir.trim()));
-  candidates.push(path.join(process.cwd(), ".aula-archive-cache"));
-  candidates.push(path.join(os.tmpdir(), "aula-archive-cache"));
+interface ResolvedCacheDir {
+  dir: string;
+  source: ArchiveCacheDirSource;
+}
+
+let cachedInfo: ResolvedCacheDir | null | undefined;
+
+/** Probe kandidat satu per satu sampai menemukan yang bisa ditulis. */
+export async function resolveArchiveCacheDirFrom(
+  candidates: CacheDirCandidate[]
+): Promise<ResolvedCacheDir | null> {
   for (const c of candidates) {
-    if (await probeWritable(c)) {
-      cachedDir = c;
-      return c;
-    }
+    if (await probeWritable(c.dir)) return { dir: c.dir, source: c.source };
   }
-  cachedDir = null;
   return null;
+}
+
+function currentCandidates(): CacheDirCandidate[] {
+  return buildCacheDirCandidates(process.env.AI_ARCHIVE_CACHE_DIR, {
+    cwd: process.cwd(),
+    xdgCacheHome: process.env.XDG_CACHE_HOME || null,
+    home: os.homedir() || null,
+    tmpdir: os.tmpdir(),
+  });
+}
+
+/**
+ * Direktori cache arsip yang bisa ditulis (diuji tulis) + asalnya.
+ * null bila semua kandidat gagal. Memoized per proses.
+ */
+export async function resolveArchiveCacheDirInfo(): Promise<
+  ResolvedCacheDir | null
+> {
+  if (cachedInfo !== undefined) return cachedInfo;
+  cachedInfo = await resolveArchiveCacheDirFrom(currentCandidates());
+  return cachedInfo;
+}
+
+/** Wrapper kompatibilitas: hanya jalur direktorinya. */
+export async function resolveArchiveCacheDir(): Promise<string | null> {
+  const info = await resolveArchiveCacheDirInfo();
+  return info ? info.dir : null;
 }
 
 function noWritableDirError(): ArchiveCacheError {
   return new ArchiveCacheError(
     "NO_WRITABLE_DIR",
-    "Server tidak punya direktori sementara yang bisa ditulis untuk memproses arsip — set AI_ARCHIVE_CACHE_DIR (self-host) atau gunakan hosting dgn /tmp writable."
+    "Server tidak menemukan lokasi penyimpanan sementara yang bisa ditulis untuk memproses arsip besar. " +
+      "Cache arsip seharusnya bekerja otomatis tanpa setelan (folder aplikasi → folder cache pengguna → /var/tmp → /tmp) — " +
+      "bila pesan ini muncul, semua lokasi tersebut diblokir oleh hosting. " +
+      "Solusi: unduh arsip lalu ekstrak di perangkat, atau (self-host) set AI_ARCHIVE_CACHE_DIR ke disk yang bisa ditulis."
+  );
+}
+
+// ── Kap & margin adaptif (murni — mudah diuji unit) ──────────────────────
+
+/** Kap total cache mengikuti ruang bebas: maks ¼ ruang, dijepit 64 MB–8 GB. */
+export function effectiveTotalCapBytes(free: number | null): number {
+  if (free === null || free >= HUGE_FREE_BYTES) return MAX_DISK_TOTAL_BYTES;
+  const quarter = Math.floor(free / 4);
+  return Math.max(
+    MIN_DISK_TOTAL_BYTES,
+    Math.min(MAX_DISK_TOTAL_BYTES, quarter)
+  );
+}
+
+/** Margin aman sebelum produksi: 256 MB, tapi menyusot di disk sempit. */
+export function freeMarginBytes(free: number | null): number {
+  if (free === null) return FREE_MARGIN_BYTES;
+  return Math.min(
+    FREE_MARGIN_BYTES,
+    Math.max(MIN_FREE_MARGIN_BYTES, Math.floor(free / 8))
   );
 }
 
@@ -109,9 +226,14 @@ const diskCache = new Map<string, DiskEntry>(); // urutan insert = LRU
 const inflightDisk = new Map<string, Promise<DiskFile>>();
 let totalDiskBytes = 0;
 let lastSweep = 0;
+let adoptPromise: Promise<void> | null = null;
 
 function fileNameFor(key: string): string {
   return `${createHash("sha1").update(key).digest("hex").slice(0, 24)}.arch`;
+}
+
+function keySidecarPath(archPath: string): string {
+  return `${archPath}.key`;
 }
 
 async function unlinkQuiet(p: string): Promise<void> {
@@ -128,18 +250,27 @@ function touchDisk(key: string, entry: DiskEntry): void {
   diskCache.set(key, entry);
 }
 
-async function evictDisk(): Promise<void> {
-  while (
-    (diskCache.size > MAX_DISK_ENTRIES || totalDiskBytes > MAX_DISK_TOTAL_BYTES) &&
-    diskCache.size > 0
-  ) {
-    const oldest = diskCache.keys().next().value as string | undefined;
-    if (oldest === undefined) break;
-    const entry = diskCache.get(oldest);
-    diskCache.delete(oldest);
+/**
+ * Eviksi LRU → batas entri + kap byte adaptif. Entri yang sedang AKTIF
+ * (protectKey — baru diproduksi, berkasnya tengah dilayani pemanggil)
+ * TIDAK PERNAH dihapus di sini: menghapusnya membuat pemanggil ENOENT
+ * (pelajaran run-1 t35: kap ¼-ruang-bebas bisa lebih kecil dari satu
+ * arsip besar yang lolos gerbang ruang — berkasnya harus tetap hidup
+ * selama dipakai; ia jadi kandidat eviksi pada putaran berikutnya).
+ */
+async function evictDisk(protectKey?: string): Promise<void> {
+  const info = cachedInfo ?? (await resolveArchiveCacheDirInfo());
+  const free = info ? await freeBytes(info.dir) : null;
+  const cap = effectiveTotalCapBytes(free);
+  for (const k of Array.from(diskCache.keys())) {
+    if (diskCache.size <= MAX_DISK_ENTRIES && totalDiskBytes <= cap) break;
+    if (k === protectKey) continue; // entri aktif — jangan dihapus
+    const entry = diskCache.get(k);
     if (!entry) continue;
+    diskCache.delete(k);
     totalDiskBytes -= entry.size;
     await unlinkQuiet(entry.path);
+    await unlinkQuiet(keySidecarPath(entry.path));
   }
 }
 
@@ -148,27 +279,38 @@ async function sweep(): Promise<void> {
   const now = Date.now();
   if (now - lastSweep < 60_000) return;
   lastSweep = now;
-  const dir = await resolveArchiveCacheDir();
-  if (!dir) return;
+  const info = cachedInfo ?? (await resolveArchiveCacheDirInfo());
+  if (!info) return;
   for (const [key, entry] of diskCache) {
     if (now - entry.at > DISK_TTL_MS) {
       diskCache.delete(key);
       totalDiskBytes -= entry.size;
       await unlinkQuiet(entry.path);
+      await unlinkQuiet(keySidecarPath(entry.path));
     }
   }
   try {
-    const dirents = await fs.readdir(dir);
-    const known = new Set(
-      Array.from(diskCache.values()).map((e) => path.basename(e.path))
-    );
+    const dirents = await fs.readdir(info.dir);
+    // Nama berkas cache yang masih dipegang di memori (+ sidecar-nya)
+    // supaya sidecar entri hidup tidak disapu sebagai "yatim".
+    const known = new Set<string>();
+    for (const e of diskCache.values()) {
+      known.add(path.basename(e.path));
+      known.add(path.basename(keySidecarPath(e.path)));
+    }
     for (const name of dirents) {
-      if (!name.endsWith(".arch") && !name.endsWith(".part")) continue;
+      const isArch = name.endsWith(".arch");
+      const isPart = name.endsWith(".part");
+      const isKey = name.endsWith(".arch.key");
+      if (!isArch && !isPart && !isKey) continue;
       if (known.has(name)) continue;
-      const p = path.join(dir, name);
+      const p = path.join(info.dir, name);
       try {
         const st = await fs.stat(p);
-        if (now - st.mtimeMs > ORPHAN_SWEEP_MS) await unlinkQuiet(p);
+        if (now - st.mtimeMs > ORPHAN_SWEEP_MS) {
+          await unlinkQuiet(p);
+          if (isArch) await unlinkQuiet(keySidecarPath(p));
+        }
       } catch {
         /* berkas hilang di tengah — abaikan */
       }
@@ -177,6 +319,67 @@ async function sweep(): Promise<void> {
     /* readdir gagal — abaikan */
   }
 }
+
+// ── Adopsi berkas cache lama (bertahan antar-restart) ────────────────────
+
+/**
+ * Pindai direktori cache dan adopsi kembali berkas lama yang masih segar
+ * ke LRU di memori — proses baru tidak mengunduh ulang arsip yang sudah
+ * dicache proses sebelumnya (zero-config: tidak perlu env apa pun).
+ */
+async function adoptExistingFiles(dir: string): Promise<void> {
+  let dirents: string[];
+  try {
+    dirents = await fs.readdir(dir);
+  } catch {
+    return;
+  }
+  for (const name of dirents) {
+    if (!name.endsWith(".arch")) continue;
+    const archPath = path.join(dir, name);
+    try {
+      const keyRaw = await fs.readFile(keySidecarPath(archPath), "utf8");
+      const key = keyRaw.trim();
+      if (!key || key.length > MAX_KEY_LENGTH || diskCache.has(key)) continue;
+      const st = await fs.stat(archPath);
+      if (!st.isFile()) continue;
+      if (Date.now() - st.mtimeMs > DISK_TTL_MS) {
+        // Kedaluwarsa sejak proses lama — buang bersama sidecar-nya.
+        await unlinkQuiet(archPath);
+        await unlinkQuiet(keySidecarPath(archPath));
+        continue;
+      }
+      diskCache.set(key, { path: archPath, size: st.size, at: st.mtimeMs });
+      totalDiskBytes += st.size;
+    } catch {
+      /* sidecar hilang / rusak → biarkan orphan sweep menangani */
+    }
+  }
+  // Adopsi TIDAK menegakkan kap byte (berkas sudah ada di disk — tidak
+  // menulis apa pun; gerbang ruang saat produksi berikutnya yang menjaga).
+  // Hanya jumlah entri yang dijepit supaya LRU di memori tetap ramping.
+  while (diskCache.size > MAX_DISK_ENTRIES) {
+    const oldest = diskCache.keys().next().value as string | undefined;
+    if (oldest === undefined) break;
+    const entry = diskCache.get(oldest);
+    diskCache.delete(oldest);
+    if (!entry) continue;
+    totalDiskBytes -= entry.size;
+    await unlinkQuiet(entry.path);
+    await unlinkQuiet(keySidecarPath(entry.path));
+  }
+}
+
+async function ensureAdopted(): Promise<void> {
+  if (adoptPromise) return adoptPromise;
+  adoptPromise = (async () => {
+    const info = await resolveArchiveCacheDirInfo();
+    if (info) await adoptExistingFiles(info.dir);
+  })();
+  return adoptPromise;
+}
+
+// ── Ukuran & ruang disk ──────────────────────────────────────────────────
 
 /** Ukuran total file berkas (undefined bila berkasnya hilang). */
 async function statFileSize(p: string): Promise<number | null> {
@@ -208,15 +411,17 @@ export interface DiskFile {
 /**
  * Ambil berkas cache, atau produksi sekali (pemanggil bersamaan dengan key
  * sama berbagi SATU produksi). sizeHint dipakai untuk cek ruang kosong.
+ * Berhasil dipakai tanpa set env apa pun — direktori dipilih otomatis.
  */
 export async function diskCacheGetOrProduce(
   key: string,
   sizeHint: number,
   produce: (dest: string) => Promise<void>
 ): Promise<DiskFile> {
+  await ensureAdopted();
   await sweep();
-  const dir = await resolveArchiveCacheDir();
-  if (!dir) throw noWritableDirError();
+  const info = cachedInfo ?? (await resolveArchiveCacheDirInfo());
+  if (!info) throw noWritableDirError();
 
   const existing = diskCache.get(key);
   if (existing) {
@@ -228,24 +433,29 @@ export async function diskCacheGetOrProduce(
     // Berkas hilang dari disk — buang dari cache & produksi ulang.
     diskCache.delete(key);
     totalDiskBytes -= existing.size;
+    await unlinkQuiet(keySidecarPath(existing.path));
   }
 
   const running = inflightDisk.get(key);
   if (running) return running;
 
   const p = (async (): Promise<DiskFile> => {
-    // Cek ruang kosong SEBELUM produksi (margin + sizeHint).
-    const free = await freeBytes(dir);
-    if (free !== null && free < sizeHint + FREE_MARGIN_BYTES) {
+    // Cek ruang kosong SEBELUM produksi (margin adaptif + sizeHint).
+    const free = await freeBytes(info.dir);
+    const margin = freeMarginBytes(free);
+    if (free !== null && free < sizeHint + margin) {
       throw new ArchiveCacheError(
         "NO_SPACE",
-        `Ruang penyimpanan sementara server tidak cukup (butuh ±${Math.round(
-          (sizeHint + FREE_MARGIN_BYTES) / 1073741824
-        )} GB, tersedia ${Math.round(free / 1073741824)} GB). Ekstrak di perangkat, atau tambah kapasitas / set AI_ARCHIVE_CACHE_DIR di self-host.`
+        `Ruang penyimpanan sementara server tidak cukup untuk membuka berkas sebesar ini (butuh ±${Math.round(
+          (sizeHint + margin) / 1073741824
+        )} GB, tersedia ${Math.round(free / 1073741824)} GB). ` +
+          "Cache arsip bekerja otomatis dan menyesuaikan diri dengan ruang yang tersedia — " +
+          "berkas sebesar ini lebih cocok diunduh lalu diekstrak di perangkat, " +
+          "atau (self-host) arahkan AI_ARCHIVE_CACHE_DIR ke disk yang lebih besar."
       );
     }
 
-    const finalPath = path.join(dir, fileNameFor(key));
+    const finalPath = path.join(info.dir, fileNameFor(key));
     const partPath = `${finalPath}.${Date.now()}.part`;
     try {
       await produce(partPath);
@@ -255,12 +465,20 @@ export async function diskCacheGetOrProduce(
         throw new Error("PRODUCE_EMPTY");
       }
       await fs.rename(partPath, finalPath);
+      // Sidecar kunci: supaya proses berikutnya (restart/deploy) bisa
+      // mengadopsi berkas ini tanpa mengunduh ulang.
+      try {
+        await fs.writeFile(keySidecarPath(finalPath), key);
+      } catch {
+        /* sidecar opsional — adopsi lintas-restart saja yang melemah */
+      }
       const entry: DiskEntry = { path: finalPath, size: realSize, at: Date.now() };
       const prev = diskCache.get(key);
       if (prev) totalDiskBytes -= prev.size;
       diskCache.set(key, entry);
       totalDiskBytes += realSize;
-      await evictDisk();
+      // Lindungi entri BARU ini dari eviksi (berkas tengah dilayani).
+      await evictDisk(key);
       return { path: finalPath, size: realSize };
     } catch (e) {
       await unlinkQuiet(partPath);
@@ -392,10 +610,22 @@ export function archiveCacheStats(): {
   entries: number;
   totalBytes: number;
   dir: string | null;
+  dirSource: ArchiveCacheDirSource | null;
 } {
   return {
     entries: diskCache.size,
     totalBytes: totalDiskBytes,
-    dir: cachedDir ?? null,
+    dir: cachedInfo ? cachedInfo.dir : null,
+    dirSource: cachedInfo ? cachedInfo.source : null,
   };
+}
+
+/** Khusus unit-test: reset seluruh state cache (mensimulasikan restart). */
+export function __resetArchiveCacheForTest(): void {
+  cachedInfo = undefined;
+  diskCache.clear();
+  inflightDisk.clear();
+  totalDiskBytes = 0;
+  lastSweep = 0;
+  adoptPromise = null;
 }

@@ -64,9 +64,10 @@ import { isSupportedArchiveName } from "@/lib/archive-names";
 //     memori proses tetap kecil.
 //
 // Implementasi disk-backed: arsip diunduh SEKALI ke cache disk (LRU,
-// AI_ARCHIVE_CACHE_DIR) lalu dibaca per-rentang (FileByteSource) —
-// arsip 5 GB tidak pernah dimuat utuh ke RAM. Format tar.gz/gz
-// dimaterialkan hasil gunzipnya (streaming ber-cap 5 GB).
+// direktori dipilih otomatis tanpa env: app → ~/.cache → /var/tmp → /tmp)
+// lalu dibaca per-rentang (FileByteSource) — arsip 5 GB tidak pernah
+// dimuat utuh ke RAM. Cache bertahan antar-restart (sidecar .key).
+// Format tar.gz/gz dimaterialkan hasil gunzipnya (streaming ber-cap 5 GB).
 // ─────────────────────────────────────────────────────────────────────────
 
 export const runtime = "nodejs";
