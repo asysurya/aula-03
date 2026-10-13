@@ -22,12 +22,28 @@
 // Guard:
 //   · Cek ruang kosong (statfs) SEBELUM produksi — kekurangan ruang →
 //     pesan ramah (kode NO_SPACE), bukan ENOSPC mentah.
+//   · BUAT RUANG DULU, BARU TOLAK (Task 37): bila ruang kurang, entri
+//     cache LAMA di-eviksi secukupnya (LRU, entri aktif dijamin selamat)
+//     + .part basi (>10 mnt) disapu — instance hangat di /tmp serverless
+//     ~1 GB jadi bisa berganti-ganti arsip besar tanpa env apa pun.
+//   · Margin gerbang PROPORSIONAL UKURAN BERKAS (Task 37): sizeHint/64
+//     dijepit 8 MB..256 MB. Margin lama (⅛ ruang bebas, min 16 MB)
+//     terlalu gemuk di /tmp ~1 GB: arsip ~0,9 GB yang sebenarnya muat
+//     ditolak padahal tertulis "butuh ±1 GB, tersedia 1 GB".
+//   · Angka butuh/tersedia pada pesan galat ditampilkan JUJUR (MB /
+//     GB 1 desimal) — bukan pembulatan GB yang menyamarkan selisih tipis.
+//   · ENOSPC di tengah unduhan (disk dibagi request lain) → bersihkan
+//     cache milik kita, cek ulang, COBA SEKALI lagi, baru tolak ramah.
 //   · Kap LRU ADAPTIF: 6 berkas / maks 8 GB, tapi menyusut otomatis
 //     mengikuti ruang disk yang benar-benar tersisa (maks ±¼ ruang bebas,
 //     minimal 64 MB) → di /tmp kecil (serverless) cache tak pernah memenuhi
-//     disk; margin aman ikut menyusut di disk sempit.
+//     disk.
 //   · TTL 6 jam; berkas yatim (tanpa pemilik di memori, >2 jam, pola nama
 //     cache) disapu lazily.
+//   · KHUSUS TEST (jangan diset di produksi): AI_ARCHIVE_TEST_FREE_FILE
+//     berisi kapasitas disk virtual (byte); ruang bebas = kapasitas −
+//     ukuran berkas nyata di direktori cache — meniru disk sempit tanpa
+//     root/tmpfs (sandbox E2E).
 // ─────────────────────────────────────────────────────────────────────────
 
 import { promises as fs } from "fs";
@@ -55,9 +71,11 @@ const MIN_DISK_TOTAL_BYTES = 64 * 1024 * 1024;
 const HUGE_FREE_BYTES = 32 * 1024 * 1024 * 1024;
 const DISK_TTL_MS = 6 * 60 * 60 * 1000; // 6 jam (bertahan sehari sekolah)
 const ORPHAN_SWEEP_MS = 2 * 60 * 60 * 1000; // 2 jam
-/** Margin ruang bebas minimal saat produksi berkas cache (menyusut di disk sempit). */
+/** Margin ruang bebas saat produksi: PROPORSIONAL UKURAN BERKAS (Task 37). */
 const FREE_MARGIN_BYTES = 256 * 1024 * 1024;
-const MIN_FREE_MARGIN_BYTES = 16 * 1024 * 1024;
+const MIN_FREE_MARGIN_BYTES = 8 * 1024 * 1024;
+/** .part yang lebih tua dari ini disapu saat butuh ruang (produksi mati). */
+const STALE_PART_MS = 10 * 60 * 1000;
 /** Panjang maks kunci internal yang disimpan di sidecar (anti abuse). */
 const MAX_KEY_LENGTH = 4096;
 /** Kap dekompresi gzip whole-stream (tar.gz/gz) saat materialisasi. */
@@ -205,13 +223,91 @@ export function effectiveTotalCapBytes(free: number | null): number {
   );
 }
 
-/** Margin aman sebelum produksi: 256 MB, tapi menyusot di disk sempit. */
-export function freeMarginBytes(free: number | null): number {
-  if (free === null) return FREE_MARGIN_BYTES;
-  return Math.min(
-    FREE_MARGIN_BYTES,
-    Math.max(MIN_FREE_MARGIN_BYTES, Math.floor(free / 8))
+/**
+ * Margin aman sebelum produksi — PROPORSIONAL UKURAN BERKAS (Task 37):
+ * sizeHint/64 dijepit 8 MB..256 MB. Margin lama (⅛ ruang bebas, min 16 MB)
+ * terlalu gemuk di /tmp serverless ~1 GB: arsip ~0,9 GB yang sebenarnya
+ * muat ditolak padahal "butuh ±1 GB, tersedia 1 GB" (laporan user).
+ */
+export function freeMarginBytes(sizeHint: number): number {
+  if (!Number.isFinite(sizeHint) || sizeHint <= 0) {
+    return MIN_FREE_MARGIN_BYTES;
+  }
+  return Math.max(
+    MIN_FREE_MARGIN_BYTES,
+    Math.min(FREE_MARGIN_BYTES, Math.floor(sizeHint / 64))
   );
+}
+
+/** Angka jujur untuk pesan galat: MB di bawah 1 GB, GB 1 desimal < 10 GB. */
+export function fmtApproxBytes(bytes: number): string {
+  const MB = 1048576;
+  const GB = 1073741824;
+  if (!Number.isFinite(bytes) || bytes <= 0) return "0 MB";
+  if (bytes >= 10 * GB) return `${Math.round(bytes / GB)} GB`;
+  if (bytes >= GB) return `${(bytes / GB).toFixed(1)} GB`;
+  return `${Math.max(1, Math.round(bytes / MB))} MB`;
+}
+
+/** Galat I/O kehabisan ruang (ENOSPC/EDQUOT) dari stream/fs Node. */
+export function isNoSpaceIoError(e: unknown): boolean {
+  return (
+    !!e &&
+    typeof e === "object" &&
+    "code" in e &&
+    ((e as { code?: unknown }).code === "ENOSPC" ||
+      (e as { code?: unknown }).code === "EDQUOT")
+  );
+}
+
+// ── Rencana "buat ruang" (murni — mudah diuji unit) ──────────────────────
+
+export interface RoomEntry {
+  key: string;
+  size: number;
+  at: number; // terakhir dipakai — LRU
+}
+
+export interface RoomPlan {
+  ok: boolean;
+  need: number;
+  margin: number;
+  evictKeys: string[];
+  reclaimed: number;
+}
+
+/**
+ * Rencana eviksi agar produksi sizeHint muat (Task 37): bila
+ * free < sizeHint + margin, entri LRU TERTUA di-eviksi SECUKUPNYA
+ * (berhenti begitu muat), tanpa menyentuh entri aktif (protectKey).
+ * Bila semua entri evictable pun tidak menutup defisit → ok=false dan
+ * TIDAK ada yang di-eviksi (permintaan pasti gagal — cache lama tetap
+ * hangat untuk arsip lain yang lebih kecil).
+ */
+export function planRoomFor(
+  free: number,
+  sizeHint: number,
+  entries: RoomEntry[],
+  protectKey?: string
+): RoomPlan {
+  const margin = freeMarginBytes(sizeHint);
+  const need = sizeHint + margin;
+  if (free >= need) {
+    return { ok: true, need, margin, evictKeys: [], reclaimed: 0 };
+  }
+  const evictable = entries
+    .filter((e) => e.key !== protectKey)
+    .sort((a, b) => a.at - b.at); // tertua duluan
+  const evictKeys: string[] = [];
+  let reclaimed = 0;
+  for (const e of evictable) {
+    if (free + reclaimed >= need) break;
+    evictKeys.push(e.key);
+    reclaimed += e.size;
+  }
+  const ok = free + reclaimed >= need;
+  if (!ok) return { ok: false, need, margin, evictKeys: [], reclaimed: 0 };
+  return { ok, need, margin, evictKeys, reclaimed };
 }
 
 // ── LRU disk cache ───────────────────────────────────────────────────────
@@ -272,6 +368,63 @@ async function evictDisk(protectKey?: string): Promise<void> {
     await unlinkQuiet(entry.path);
     await unlinkQuiet(keySidecarPath(entry.path));
   }
+}
+
+/** Buang SATU entri dari LRU + berkas & sidecar-nya di disk. */
+async function dropEntry(key: string): Promise<void> {
+  const entry = diskCache.get(key);
+  if (!entry) return;
+  diskCache.delete(key);
+  totalDiskBytes -= entry.size;
+  await unlinkQuiet(entry.path);
+  await unlinkQuiet(keySidecarPath(entry.path));
+}
+
+/** Hapus .part basi (produksi yang mati > 10 mnt) dari direktori cache. */
+async function removeStaleParts(dir: string): Promise<void> {
+  const now = Date.now();
+  let dirents: string[];
+  try {
+    dirents = await fs.readdir(dir);
+  } catch {
+    return;
+  }
+  for (const name of dirents) {
+    if (!name.endsWith(".part")) continue;
+    const p = path.join(dir, name);
+    try {
+      const st = await fs.stat(p);
+      if (now - st.mtimeMs > STALE_PART_MS) await unlinkQuiet(p);
+    } catch {
+      /* hilang di tengah — abaikan */
+    }
+  }
+}
+
+/**
+ * BUAT RUANG sebelum menolak (Task 37): sapu .part basi + eviksi entri
+ * LRU SECUKUPNYA agar sizeHint muat. Entri aktif (protectKey) tidak
+ * pernah disinggung. Pemanggil wajib mengecek ulang ruang setelah ini
+ * (eviksi sungguhan menaikkan ruang bebas; di mode test-virtual angkanya
+ * ikut bergerak karena dihitung dari isi direktori).
+ */
+async function makeRoom(protectKey: string, sizeHint: number): Promise<void> {
+  const info = cachedInfo ?? (await resolveArchiveCacheDirInfo());
+  if (!info) return;
+  await removeStaleParts(info.dir);
+  const free = await freeBytes(info.dir);
+  if (free === null) return;
+  const plan = planRoomFor(
+    free,
+    sizeHint,
+    Array.from(diskCache.entries()).map(([key, e]) => ({
+      key,
+      size: e.size,
+      at: e.at,
+    })),
+    protectKey
+  );
+  for (const k of plan.evictKeys) await dropEntry(k);
 }
 
 /** Sapu berkas kadaluarsa (TTL) + yatim (>2 jam) — lazy, maks 1×/menit. */
@@ -391,8 +544,40 @@ async function statFileSize(p: string): Promise<number | null> {
   }
 }
 
-/** Ruang kosong direktori (statfs); null bila tak terbaca. */
+/**
+ * Ruang kosong direktori (statfs); null bila tak terbaca.
+ * KHUSUS TEST E2E (sandbox tak punya root utk tmpfs/loopback — disk
+ * sempit tak bisa dibuat sungguhan): bila AI_ARCHIVE_TEST_FREE_FILE
+ * diset, isinya dibaca sebagai KAPASITAS disk virtual (byte) dan ruang
+ * bebas = kapasitas − total ukuran berkas nyata di direktori cache —
+ * meniru disk sungguhan (produksi menurunkan, eviksi menaikkan).
+ * JANGAN diset di produksi.
+ */
 async function freeBytes(dir: string): Promise<number | null> {
+  const testFile = process.env.AI_ARCHIVE_TEST_FREE_FILE;
+  if (testFile) {
+    try {
+      const cap = parseInt((await fs.readFile(testFile, "utf8")).trim(), 10);
+      if (Number.isFinite(cap) && cap >= 0) {
+        let used = 0;
+        try {
+          for (const name of await fs.readdir(dir)) {
+            try {
+              const st = await fs.stat(path.join(dir, name));
+              if (st.isFile()) used += st.size;
+            } catch {
+              /* berkas hilang di tengah — abaikan */
+            }
+          }
+        } catch {
+          /* readdir gagal — anggap kosong */
+        }
+        return Math.max(0, cap - used);
+      }
+    } catch {
+      /* angka tak terbaca → statfs sungguhan */
+    }
+  }
   try {
     const st = await (fs as unknown as {
       statfs: (p: string) => Promise<{ bavail: number; bsize: number }>;
@@ -406,6 +591,25 @@ async function freeBytes(dir: string): Promise<number | null> {
 export interface DiskFile {
   path: string;
   size: number;
+}
+
+/** Pesan galat ruang: angka JUJUR + arahan (Task 37). */
+function noSpaceError(
+  need: number,
+  free: number,
+  midDownload: boolean
+): ArchiveCacheError {
+  return new ArchiveCacheError(
+    "NO_SPACE",
+    (midDownload
+      ? "Ruang penyimpanan sementara server HABIS di tengah proses berkas ini "
+      : "Ruang penyimpanan sementara server tidak cukup untuk membuka berkas sebesar ini ") +
+      `(butuh ±${fmtApproxBytes(need)}, tersedia ${fmtApproxBytes(free)}). ` +
+      "Cache arsip bekerja otomatis dan menyesuaikan diri dengan ruang yang tersedia — " +
+      "berkas cache lama sudah dibersihkan lebih dulu agar muat. " +
+      "Berkas yang lebih besar dari ruang server sebaiknya diunduh lalu diekstrak di perangkat, " +
+      "atau (self-host) arahkan AI_ARCHIVE_CACHE_DIR ke disk yang lebih besar."
+  );
 }
 
 /**
@@ -440,50 +644,80 @@ export async function diskCacheGetOrProduce(
   if (running) return running;
 
   const p = (async (): Promise<DiskFile> => {
-    // Cek ruang kosong SEBELUM produksi (margin adaptif + sizeHint).
-    const free = await freeBytes(info.dir);
-    const margin = freeMarginBytes(free);
+    try {
+    // ── Gerbang ruang (Task 37): cek → bila kurang, BUAT RUANG dulu
+    // (eviksi LRU secukupnya + sapu .part basi) → cek ulang → baru tolak
+    // dgn angka jujur. Margin proporsional ukuran berkas (8 MB..256 MB)
+    // — /tmp serverless ~1 GB kini memuat arsip hingga ±ruang−8 MB.
+    const margin = freeMarginBytes(sizeHint);
+    let free = await freeBytes(info.dir);
     if (free !== null && free < sizeHint + margin) {
-      throw new ArchiveCacheError(
-        "NO_SPACE",
-        `Ruang penyimpanan sementara server tidak cukup untuk membuka berkas sebesar ini (butuh ±${Math.round(
-          (sizeHint + margin) / 1073741824
-        )} GB, tersedia ${Math.round(free / 1073741824)} GB). ` +
-          "Cache arsip bekerja otomatis dan menyesuaikan diri dengan ruang yang tersedia — " +
-          "berkas sebesar ini lebih cocok diunduh lalu diekstrak di perangkat, " +
-          "atau (self-host) arahkan AI_ARCHIVE_CACHE_DIR ke disk yang lebih besar."
-      );
+      await makeRoom(key, sizeHint);
+      free = await freeBytes(info.dir);
+    }
+    if (free !== null && free < sizeHint + margin) {
+      throw noSpaceError(sizeHint + margin, free, false);
     }
 
     const finalPath = path.join(info.dir, fileNameFor(key));
-    const partPath = `${finalPath}.${Date.now()}.part`;
-    try {
-      await produce(partPath);
-      // Ukuran aktual hasil produksi (sizeHint bisa beda tipis).
-      const realSize = await statFileSize(partPath);
-      if (realSize === null) {
-        throw new Error("PRODUCE_EMPTY");
-      }
-      await fs.rename(partPath, finalPath);
-      // Sidecar kunci: supaya proses berikutnya (restart/deploy) bisa
-      // mengadopsi berkas ini tanpa mengunduh ulang.
+    const attempt = async (): Promise<{ partPath: string; size: number }> => {
+      const partPath = `${finalPath}.${Date.now()}.part`;
       try {
-        await fs.writeFile(keySidecarPath(finalPath), key);
-      } catch {
-        /* sidecar opsional — adopsi lintas-restart saja yang melemah */
+        await produce(partPath);
+        // Ukuran aktual hasil produksi (sizeHint bisa beda tipis).
+        const realSize = await statFileSize(partPath);
+        if (realSize === null) {
+          throw new Error("PRODUCE_EMPTY");
+        }
+        return { partPath, size: realSize };
+      } catch (e) {
+        await unlinkQuiet(partPath);
+        throw e;
       }
-      const entry: DiskEntry = { path: finalPath, size: realSize, at: Date.now() };
-      const prev = diskCache.get(key);
-      if (prev) totalDiskBytes -= prev.size;
-      diskCache.set(key, entry);
-      totalDiskBytes += realSize;
-      // Lindungi entri BARU ini dari eviksi (berkas tengah dilayani).
-      await evictDisk(key);
-      return { path: finalPath, size: realSize };
+    };
+
+    let res: { partPath: string; size: number };
+    try {
+      res = await attempt();
     } catch (e) {
-      await unlinkQuiet(partPath);
-      throw e;
+      if (!isNoSpaceIoError(e)) throw e;
+      // Disk penuh DI TENGAH unduhan (mis. /tmp serverless dipakai bareng
+      // request lain di instance hangat) → kosongkan cache milik kita,
+      // cek ulang ruang, lalu COBA SEKALI lagi (unduhan diulang).
+      await makeRoom(key, sizeHint);
+      const free2 = await freeBytes(info.dir);
+      if (free2 !== null && free2 < sizeHint + margin) {
+        throw noSpaceError(sizeHint + margin, free2, true);
+      }
+      try {
+        res = await attempt();
+      } catch (e2) {
+        if (isNoSpaceIoError(e2)) {
+          throw noSpaceError(sizeHint + margin, free2 ?? 0, true);
+        }
+        throw e2;
+      }
+    }
+
+    await fs.rename(res.partPath, finalPath);
+    // Sidecar kunci: supaya proses berikutnya (restart/deploy) bisa
+    // mengadopsi berkas ini tanpa mengunduh ulang.
+    try {
+      await fs.writeFile(keySidecarPath(finalPath), key);
+    } catch {
+      /* sidecar opsional — adopsi lintas-restart saja yang melemah */
+    }
+    const entry: DiskEntry = { path: finalPath, size: res.size, at: Date.now() };
+    const prev = diskCache.get(key);
+    if (prev) totalDiskBytes -= prev.size;
+    diskCache.set(key, entry);
+    totalDiskBytes += res.size;
+    // Lindungi entri BARU ini dari eviksi (berkas tengah dilayani).
+    await evictDisk(key);
+    return { path: finalPath, size: res.size };
     } finally {
+      // Wajib: bersihkan inflight apa pun hasilnya — promise gagal yang
+      // tertinggal akan meracuni permintaan berikutnya utk key sama.
       inflightDisk.delete(key);
     }
   })();

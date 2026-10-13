@@ -22,6 +22,7 @@ import {
   materializeEntry,
   FileByteSource,
   ArchiveCacheError,
+  MAX_GUNZIP_BYTES,
 } from "@/lib/archive-cache";
 import {
   openArchive,
@@ -67,6 +68,9 @@ import { isSupportedArchiveName } from "@/lib/archive-names";
 // direktori dipilih otomatis tanpa env: app → ~/.cache → /var/tmp → /tmp)
 // lalu dibaca per-rentang (FileByteSource) — arsip 5 GB tidak pernah
 // dimuat utuh ke RAM. Cache bertahan antar-restart (sidecar .key).
+// Disk sempit (Task 37): bila ruang kurang, cache lama di-eviksi otomatis
+// (LRU) supaya arsip baru muat; margin gerbang proporsional ukuran berkas;
+// ENOSPC di tengah unduhan di-retry sekali setelah cache dikosongkan.
 // Format tar.gz/gz dimaterialkan hasil gunzipnya (streaming ber-cap 5 GB).
 // ─────────────────────────────────────────────────────────────────────────
 
@@ -163,7 +167,11 @@ async function loadArchive(
   const file = isGz
     ? await diskCacheGetOrProduce(
         `archgz:${account.id}:${nodeId}`,
-        Math.min(stat.size * 4, 5 * 1024 * 1024 * 1024),
+        // Hint GABUNGAN (Task 37): berkas gz mentah + hasil gunzip-nya
+        // KEDUANYA menetap di cache (yang mentah dipakai ulang antar-buka)
+        // → gerbang ruang harus menghitung keduanya, bukan decompressed
+        // saja — kalau tidak, disk bisa penuh di tengah gunzip.
+        stat.size + Math.min(stat.size * 4, MAX_GUNZIP_BYTES),
         async (dest) => {
           // Unduh gz mentah ke berkas sementara → gunzip streaming ke dest.
           const tmp = await diskCacheGetOrProduce(
