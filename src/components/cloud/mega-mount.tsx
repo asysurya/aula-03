@@ -288,8 +288,8 @@ export function MegaMountView({
 
   const onPickUpload = (f: File | null | undefined) => {
     if (!f) return;
-    if (f.size > 100 * 1024 * 1024) {
-      toast.error("File maksimal 100 MB");
+    if (f.size > 1024 * 1024 * 1024) {
+      toast.error("File maksimal 1 GB");
       return;
     }
     enqueueUpload({
@@ -896,8 +896,8 @@ export function MegaMountView({
               if (isReadOnly) return;
               const files = Array.from(e.dataTransfer.files ?? []);
               files.forEach((f) => {
-                if (f.size > 100 * 1024 * 1024) {
-                  toast.error(`"${f.name}" melebihi 100 MB`);
+                if (f.size > 1024 * 1024 * 1024) {
+                  toast.error(`"${f.name}" melebihi 1 GB`);
                   return;
                 }
                 onPickUpload(f);

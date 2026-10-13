@@ -2,17 +2,20 @@ import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { db } from "@/lib/db";
 import { requireUser } from "@/lib/session";
-import { MAX_FILE_SIZE } from "@/lib/storage";
+import { MAX_FILE_SIZE, MAX_FILE_SIZE_LABEL } from "@/lib/storage";
 import { resolveMime } from "@/lib/file-constants";
 
 // POST /api/upload/init — mulai sesi upload berchunk untuk file besar.
 //
 // Kenapa perlu: serverless Vercel membatasi request body ± 4.5 MB. File
-// lebih besar dari itu (mis. PDF modul ajar 10 MB) akan ditolak (413).
+// lebih besar dari itu (mis. video 500 MB) akan ditolak (413).
 // Solusi: client memecah file jadi chunk ± 4 MB, tiap chunk dikirim
 // terpisah ke /api/upload/chunk, lalu /api/upload/complete merakitnya
 // dan menjalankan logika upload yang sama seperti endpoint biasa
 // (MEGA/S3 + baris CloudFile/Submission/dst).
+//
+// Batas ukuran file: 1 GB (Task 34) — upload 1 GB = ±256 chunk; jalur
+// ini juga yang membuat upload besar mungkin di self-host.
 //
 // Chunk disimpan sementara di MongoDB (UploadSession + UploadChunk),
 // otomatis dibersihkan saat kadaluarsa (6 jam) / setelah complete.
@@ -74,7 +77,7 @@ export async function POST(req: NextRequest) {
   if (size > MAX_FILE_SIZE) {
     return NextResponse.json(
       {
-        error: `FILE_TOO_LARGE (maks ${Math.round(MAX_FILE_SIZE / 1024 / 1024)} MB)`,
+        error: `FILE_TOO_LARGE (maks ${MAX_FILE_SIZE_LABEL})`,
         maxBytes: MAX_FILE_SIZE,
       },
       { status: 413 }

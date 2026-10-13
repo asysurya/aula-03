@@ -810,7 +810,7 @@ function SubmissionUpload({
             <p className="text-sm font-medium">
               Tarik file tugas di sini atau klik untuk pilih
             </p>
-            <p className="text-xs text-muted-foreground">Maksimal 100 MB.</p>
+            <p className="text-xs text-muted-foreground">Maksimal 1 GB.</p>
           </>
         )}
       </div>

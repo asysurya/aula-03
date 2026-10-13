@@ -1245,9 +1245,11 @@ function ArchivePreview({
   const [innerText, setInnerText] = useState<string | null>(null);
   const ext2 = ext(file.name);
   // Batas aman: zip raksasa → kartu info (membaca header pun berat).
-  const ZIP_LIST_LIMIT = 60 * 1024 * 1024;
+  // Task 34: naik 60 MB → 256 MB (upload kini 1 GB; zip lebih besar tetap
+  // bisa dibuka isinya lewat mount MEGA — dekompresi di server).
+  const ZIP_LIST_LIMIT = 256 * 1024 * 1024;
   // Batas dekompresi klien per berkas dalam arsip (memori browser).
-  const ZIP_ENTRY_OPEN_LIMIT = 25 * 1024 * 1024;
+  const ZIP_ENTRY_OPEN_LIMIT = 64 * 1024 * 1024;
   const isZip =
     (ext2 === "zip" || ext2 === "epub" || file.mimetype === "application/zip") &&
     (file.size || 0) <= ZIP_LIST_LIMIT;
@@ -1291,7 +1293,7 @@ function ArchivePreview({
     if (!entry || innerBusy) return;
     if (e.size > ZIP_ENTRY_OPEN_LIMIT) {
       toast.error(
-        `"${e.path.split("/").pop()}" ${formatBytes(e.size)} — terlalu besar untuk dibuka langsung (maks 25 MB).`
+        `"${e.path.split("/").pop()}" ${formatBytes(e.size)} — terlalu besar untuk dibuka langsung (maks 64 MB).`
       );
       return;
     }

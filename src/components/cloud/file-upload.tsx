@@ -4,7 +4,7 @@ import { useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import { ArrowUpDown, UploadCloud } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { MAX_FILE_SIZE_MB } from "@/lib/constants";
+import { MAX_FILE_SIZE_MB, MAX_FILE_SIZE_LABEL } from "@/lib/constants";
 import { useTransferStore } from "@/lib/transfer-store";
 import { formatBytes } from "@/lib/cloud-format";
 
@@ -49,7 +49,7 @@ export function FileUpload({
     }
     if (file.size > MAX_BYTES) {
       toast.error(
-        `Ukuran file ${MAX_FILE_SIZE_MB} MB maksimal. File kamu terlalu besar.`
+        `Ukuran file ${MAX_FILE_SIZE_LABEL} maksimal. File kamu terlalu besar.`
       );
       return;
     }
@@ -167,7 +167,7 @@ export function FileUpload({
               Tarik file ke sini atau klik untuk pilih
             </p>
             <p className="text-xs text-muted-foreground">
-              Maksimal {MAX_FILE_SIZE_MB} MB per file · berjalan di latar
+              Maksimal {MAX_FILE_SIZE_LABEL} per file · berjalan di latar
               belakang.
             </p>
           </>

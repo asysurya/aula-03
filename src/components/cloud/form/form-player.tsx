@@ -2486,7 +2486,7 @@ function QuestionCard({
                     : "Unggah file jawaban (klik / tarik file)"}
               </p>
               <p className="text-xs text-muted-foreground">
-                Maks 100 MB · tersimpan di cloud MEGA
+                Maks 1 GB · tersimpan di cloud MEGA
               </p>
               <input
                 type="file"

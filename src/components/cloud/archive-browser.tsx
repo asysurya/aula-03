@@ -558,8 +558,8 @@ export function ArchiveBrowserDialog({
                   />
                 </div>
                 <p className="text-[11px] text-muted-foreground">
-                  Batas: 300 entri · 1 GB total · 100 MB per berkas. Berkas
-                  yang lebih besar dilewati.
+                  Batas: 1000 entri · 4 GB total isi · 1 GB per berkas.
+                  Berkas terlalu besar otomatis dilewati.
                 </p>
               </div>
             </AlertDialogDescription>

@@ -81,8 +81,9 @@ export interface AiAttachFileMeta {
   origin?: string;
 }
 
-/** Batas ukuran lampiran — SAMA dengan lampiran chat (100 MB). */
-const MAX_FILE_MB = 100;
+/** Batas ukuran lampiran — SAMA dengan lampiran chat (1 GB, Task 34). */
+const MAX_FILE_MB = 1024;
+const MAX_FILE_LABEL = "1 GB";
 
 export interface AiAttachProgress {
   name: string;
@@ -127,7 +128,7 @@ export function useAiAttachments(): AiAttachmentsState {
     try {
       for (const f of list) {
         if (f.size > MAX_FILE_MB * 1024 * 1024) {
-          toast.error(`"${f.name}" terlalu besar (maks ${MAX_FILE_MB} MB)`);
+          toast.error(`"${f.name}" terlalu besar (maks ${MAX_FILE_LABEL})`);
           continue;
         }
         try {
@@ -1278,7 +1279,7 @@ export function AiAttachments({
                 </span>
                 <span>
                   Format apa pun (PDF, DOCX, XLSX, ZIP, EPUB, teks, kode,
-                  gambar…) — maks 100 MB per berkas
+                  gambar…) — maks 1 GB per berkas
                 </span>
                 <span className="text-[10px]">
                   Berkas besar otomatis diunggah ter-pecah (seperti lampiran
@@ -1333,7 +1334,7 @@ export function AiAttachments({
                 Mendukung tautan berbagi Google Drive, Dropbox, OneDrive,
                 berkas GitHub, maupun URL langsung. Pastikan izin berbagi
                 "siapa saja yang punya tautan". Berkas diunduh dan dibaca di
-                server (maks 100 MB).
+                server (maks 1 GB).
               </p>
             </TabsContent>
 

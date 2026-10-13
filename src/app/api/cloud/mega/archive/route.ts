@@ -1,34 +1,48 @@
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
+import { Readable } from "node:stream";
+import { createReadStream } from "node:fs";
+import { createHash } from "crypto";
 import { db } from "@/lib/db";
 import { requireUser } from "@/lib/session";
 import { canViewMount, canWriteMount } from "@/lib/mount-access";
 import {
   megaStat,
   megaList,
-  megaDownload,
   megaMkdir,
   megaUploadTo,
+  megaUploadStreamTo,
+  megaDownloadToFile,
   describeMegaError,
   type MegaAccountLike,
 } from "@/lib/mega-storage";
-import { fileCacheGetOrLoad } from "@/lib/file-cache";
-import { resolveMime } from "@/lib/file-constants";
-import { mimetypeFromName } from "@/lib/cloud-format";
+import {
+  diskCacheGetOrProduce,
+  gunzipFileCapped,
+  materializeEntry,
+  FileByteSource,
+  ArchiveCacheError,
+} from "@/lib/archive-cache";
 import {
   openArchive,
-  listArchive,
   planExtraction,
   ArchiveError,
-  MAX_ARCHIVE_BYTES,
+  MAX_ARCHIVE_OPEN_BYTES,
+  MAX_ARCHIVE_EXTRACT_BYTES,
+  MAX_LISTED_ENTRIES,
+  RAM_ENTRY_THRESHOLD,
+  fmtBytes,
+  type OpenedArchive,
 } from "@/lib/archive";
+import { resolveMime } from "@/lib/file-constants";
+import { mimetypeFromName } from "@/lib/cloud-format";
 import { isSupportedArchiveName } from "@/lib/archive-names";
 
 // ─────────────────────────────────────────────────────────────────────────
 // /api/cloud/mega/archive — arsip di mount MEGA Cloud.
 //
 //   GET  ?accountId&nodeId                → daftar isi arsip (METADATA saja,
-//                                           tanpa dekompresi apa pun untuk zip)
+//                                           tanpa dekompresi isi untuk zip)
 //   GET  ?accountId&nodeId&entry=<path>   → SAJIKAN SATU berkas di dalam
 //                                           arsip — "buka tanpa ekstrak"
 //                                           (bisa dipratinjau/diunduh)
@@ -41,9 +55,18 @@ import { isSupportedArchiveName } from "@/lib/archive-names";
 //     isi akun MEGA).
 //   · ekstraksi             → canWriteMount (menulis folder/berkas baru).
 //
-// Batas: arsip maks 100 MB (selaras lampiran); entri dibuka maks 100 MB;
-// ekstraksi maks 300 entri / 1 GB total / 100 MB per berkas (anti
-// zip-bomb, pesan galat ramah). Semua dekompresi di-cap streaming.
+// Batas (Task 34):
+//   · BUKA  : arsip maks 5 GB — listing zip hanya membaca central
+//     directory; pratinjau entri hanya mendekompresi entri itu.
+//   · EKSTRAK: arsip maks 2 GB; maks 1000 entri · 4 GB total · 1 GB
+//     per berkas.
+//   · Entri besar (> 64 MB) dilayani/diunggah STREAMING dari disk —
+//     memori proses tetap kecil.
+//
+// Implementasi disk-backed: arsip diunduh SEKALI ke cache disk (LRU,
+// AI_ARCHIVE_CACHE_DIR) lalu dibaca per-rentang (FileByteSource) —
+// arsip 5 GB tidak pernah dimuat utuh ke RAM. Format tar.gz/gz
+// dimaterialkan hasil gunzipnya (streaming ber-cap 5 GB).
 // ─────────────────────────────────────────────────────────────────────────
 
 export const runtime = "nodejs";
@@ -89,6 +112,9 @@ async function pickAccount(
 }
 
 function archiveErrorStatus(e: unknown): { status: number; message: string } {
+  if (e instanceof ArchiveCacheError) {
+    return { status: 507, message: e.message };
+  }
   if (e instanceof ArchiveError) {
     switch (e.code) {
       case "ARCHIVE_TOO_LARGE":
@@ -113,14 +139,61 @@ function archiveErrorStatus(e: unknown): { status: number; message: string } {
   };
 }
 
-/** Unduh arsip (≤100 MB) sekali per proses via LRU cache blob. */
-async function getArchiveBytes(
+// ── Sumber arsip disk-backed ─────────────────────────────────────────────
+
+interface ArchiveSource {
+  opened: OpenedArchive;
+  src: FileByteSource;
+}
+
+/**
+ * Unduh arsip ke cache disk SEKALI + buka (zip/tar: berkas apa adanya;
+ * tgz/gz: hasil gunzip dimaterialkan dulu, ber-cap 5 GB).
+ * Pemanggil WAJIB memanggil done() di akhir (menutup fd).
+ */
+async function loadArchive(
   account: MegaAccountLike,
-  nodeId: string
-): Promise<Buffer | null> {
-  return fileCacheGetOrLoad(`mega:${account.id}:${nodeId}`, () =>
-    megaDownload(account, nodeId)
-  );
+  nodeId: string,
+  stat: { name: string; size: number }
+): Promise<ArchiveSource & { done: () => Promise<void> }> {
+  const ext = stat.name.split(".").pop()?.toLowerCase() ?? "";
+  const isGz = ext === "tgz" || ext === "gz";
+
+  const file = isGz
+    ? await diskCacheGetOrProduce(
+        `archgz:${account.id}:${nodeId}`,
+        Math.min(stat.size * 4, 5 * 1024 * 1024 * 1024),
+        async (dest) => {
+          // Unduh gz mentah ke berkas sementara → gunzip streaming ke dest.
+          const tmp = await diskCacheGetOrProduce(
+            `arch:${account.id}:${nodeId}`,
+            stat.size,
+            async (gzDest) => {
+              const ok = await megaDownloadToFile(account, nodeId, gzDest);
+              if (!ok) throw new Error("MEGA_DOWNLOAD_FAILED");
+            }
+          );
+          await gunzipFileCapped(tmp.path, dest);
+        }
+      )
+    : await diskCacheGetOrProduce(
+        `arch:${account.id}:${nodeId}`,
+        stat.size,
+        async (dest) => {
+          const ok = await megaDownloadToFile(account, nodeId, dest);
+          if (!ok) throw new Error("MEGA_DOWNLOAD_FAILED");
+        }
+      );
+
+  const src = await FileByteSource.open(file.path);
+  const opened = await openArchive(stat.name, src);
+  return {
+    opened,
+    src,
+    done: async () => {
+      await src.close();
+    },
+  };
 }
 
 // ── GET: listing + sajian entri ──────────────────────────────────────────
@@ -185,12 +258,12 @@ export async function GET(req: NextRequest) {
       { status: 400 }
     );
   }
-  if (stat.size > MAX_ARCHIVE_BYTES) {
+  if (stat.size > MAX_ARCHIVE_OPEN_BYTES) {
     return NextResponse.json(
       {
-        error: `Arsip ${Math.round(stat.size / 1048576)} MB — melebihi batas ${Math.round(
-          MAX_ARCHIVE_BYTES / 1048576
-        )} MB untuk dibuka langsung. Unduh lalu ekstrak di perangkat.`,
+        error: `Arsip ${fmtBytes(stat.size)} — melebihi batas ${fmtBytes(
+          MAX_ARCHIVE_OPEN_BYTES
+        )} untuk dibuka langsung. Unduh lalu ekstrak di perangkat.`,
       },
       { status: 413 }
     );
@@ -204,96 +277,191 @@ export async function GET(req: NextRequest) {
     );
   }
 
-  const buf = await getArchiveBytes(accountLike, nodeId);
-  if (!buf) {
-    return NextResponse.json(
-      {
-        error: "Gagal mengunduh arsip dari MEGA — coba lagi atau unduh langsung.",
-      },
-      { status: 502 }
-    );
-  }
-
-  // ── Mode 1: listing metadata ──
-  if (entryPath === null) {
-    try {
-      const listing = listArchive(stat.name, buf);
-      return NextResponse.json({
-        ok: true,
-        name: stat.name,
-        size: stat.size,
-        format: listing.format,
-        entryCount: listing.entryCount,
-        truncated: listing.truncated,
-        totalBytes: listing.totalBytes,
-        canWrite: canWriteMount(account, role, userId),
-        entries: listing.entries,
-      });
-    } catch (e) {
-      const { status, message } = archiveErrorStatus(e);
-      return NextResponse.json({ error: message }, { status });
-    }
-  }
-
-  // ── Mode 2: sajikan SATU berkas di dalam arsip (tanpa ekstrak) ──
-  let data: Buffer;
+  // ── Muat arsip (disk-backed) ──
+  let handle: Awaited<ReturnType<typeof loadArchive>>;
   try {
-    const opened = openArchive(stat.name, buf);
-    data = await opened.read(entryPath);
+    handle = await loadArchive(accountLike, nodeId, stat);
   } catch (e) {
+    if (e instanceof Error && e.message === "MEGA_DOWNLOAD_FAILED") {
+      return NextResponse.json(
+        {
+          error: "Gagal mengunduh arsip dari MEGA — coba lagi atau unduh langsung.",
+        },
+        { status: 502 }
+      );
+    }
     const { status, message } = archiveErrorStatus(e);
     return NextResponse.json({ error: message }, { status });
   }
 
-  const baseName = entryPath.split(/[\\/]/).pop() || "berkas";
-  const mime = resolveMime(baseName, "");
-  const asciiName =
-    baseName.replace(/[\r\n"\\]/g, "_").replace(/[^\x20-\x7e]/g, "_") ||
-    "berkas";
-  const headers = new Headers({
-    "Content-Type": mime,
-    "Content-Length": String(data.length),
-    "Content-Disposition": `${download ? "attachment" : "inline"}; filename="${asciiName}"; filename*=UTF-8''${encodeURIComponent(baseName)}`,
-    "X-Content-Type-Options": "nosniff",
-    "Cache-Control": "private, max-age=0, must-revalidate",
-    ETag: `"arch-${nodeId}-${entryPath.length}-${data.length}"`,
-  });
-
-  // Dukungan Range tunggal (video/audio dalam arsip bisa seek).
-  const range = req.headers.get("range");
-  if (range) {
-    const m = /^bytes=(\d*)-(\d*)$/.exec(range.trim());
-    if (m) {
-      const start = m[1] ? parseInt(m[1], 10) : 0;
-      const end = m[2]
-        ? Math.min(parseInt(m[2], 10), data.length - 1)
-        : data.length - 1;
-      if (
-        Number.isFinite(start) &&
-        Number.isFinite(end) &&
-        start <= end &&
-        start < data.length
-      ) {
-        const chunk = data.subarray(start, end + 1);
-        return new NextResponse(
-          new Uint8Array(chunk) as unknown as BodyInit,
-          {
-            status: 206,
-            headers: new Headers({
-              ...Object.fromEntries(headers.entries()),
-              "Content-Range": `bytes ${start}-${end}/${data.length}`,
-              "Content-Length": String(chunk.length),
-            }),
-          }
-        );
+  try {
+    // ── Mode 1: listing metadata ──
+    if (entryPath === null) {
+      try {
+        const truncated = handle.opened.entryCount > MAX_LISTED_ENTRIES;
+        const listing = {
+          ok: true,
+          name: stat.name,
+          size: stat.size,
+          format: handle.opened.format,
+          entryCount: handle.opened.entryCount,
+          truncated,
+          totalBytes: handle.opened.totalBytes,
+          canWrite: canWriteMount(account, role, userId),
+          entries: truncated
+            ? handle.opened.entries.slice(0, MAX_LISTED_ENTRIES)
+            : handle.opened.entries,
+        };
+        return NextResponse.json(listing);
+      } catch (e) {
+        const { status, message } = archiveErrorStatus(e);
+        return NextResponse.json({ error: message }, { status });
       }
     }
-  }
 
-  return new NextResponse(new Uint8Array(data) as unknown as BodyInit, {
-    status: 200,
-    headers,
-  });
+    // ── Mode 2: sajikan SATU berkas di dalam arsip (tanpa ekstrak) ──
+    let entrySize = 0;
+    try {
+      const r = await handle.opened.rawRange(entryPath);
+      entrySize = r.size;
+    } catch (e) {
+      const { status, message } = archiveErrorStatus(e);
+      return NextResponse.json({ error: message }, { status });
+    }
+
+    const baseName = entryPath.split(/[\\/]/).pop() || "berkas";
+    const mime = resolveMime(baseName, "");
+    const asciiName =
+      baseName.replace(/[\r\n"\\]/g, "_").replace(/[^\x20-\x7e]/g, "_") ||
+      "berkas";
+    const etag = `"arch-${nodeId}-${createHash("sha1")
+      .update(entryPath)
+      .digest("hex")
+      .slice(0, 10)}-${entrySize}"`;
+    const disposition = `${download ? "attachment" : "inline"}; filename="${asciiName}"; filename*=UTF-8''${encodeURIComponent(baseName)}`;
+
+    // Entri KECIL → buffer RAM (jalur cepat, mayoritas kasus).
+    if (entrySize <= RAM_ENTRY_THRESHOLD) {
+      let data: Buffer;
+      try {
+        data = await handle.opened.read(entryPath);
+      } catch (e) {
+        const { status, message } = archiveErrorStatus(e);
+        return NextResponse.json({ error: message }, { status });
+      }
+      const headers = new Headers({
+        "Content-Type": mime,
+        "Content-Length": String(data.length),
+        "Content-Disposition": disposition,
+        "X-Content-Type-Options": "nosniff",
+        "Cache-Control": "private, max-age=0, must-revalidate",
+        ETag: etag,
+      });
+      // Dukungan Range tunggal (video/audio dalam arsip bisa seek).
+      const range = req.headers.get("range");
+      if (range) {
+        const m = /^bytes=(\d*)-(\d*)$/.exec(range.trim());
+        if (m) {
+          const start = m[1] ? parseInt(m[1], 10) : 0;
+          const end = m[2]
+            ? Math.min(parseInt(m[2], 10), data.length - 1)
+            : data.length - 1;
+          if (
+            Number.isFinite(start) &&
+            Number.isFinite(end) &&
+            start <= end &&
+            start < data.length
+          ) {
+            const chunk = data.subarray(start, end + 1);
+            return new NextResponse(
+              new Uint8Array(chunk) as unknown as BodyInit,
+              {
+                status: 206,
+                headers: new Headers({
+                  ...Object.fromEntries(headers.entries()),
+                  "Content-Range": `bytes ${start}-${end}/${data.length}`,
+                  "Content-Length": String(chunk.length),
+                }),
+              }
+            );
+          }
+        }
+      }
+      return new NextResponse(new Uint8Array(data) as unknown as BodyInit, {
+        status: 200,
+        headers,
+      });
+    }
+
+    // Entri BESAR → materialisasi ke disk cache + saji per-rentang (RAM kecil).
+    let entryFile: { path: string; size: number };
+    try {
+      const key = `archent:${account.id}:${nodeId}:${createHash("sha1")
+        .update(entryPath)
+        .digest("hex")
+        .slice(0, 16)}`;
+      entryFile = await materializeEntry(key, handle.opened, entryPath);
+    } catch (e) {
+      const { status, message } = archiveErrorStatus(e);
+      return NextResponse.json({ error: message }, { status });
+    }
+
+    const total = entryFile.size;
+    const range = req.headers.get("range");
+    if (range) {
+      const m = /^bytes=(\d*)-(\d*)$/.exec(range.trim());
+      if (m) {
+        const start = m[1] ? parseInt(m[1], 10) : 0;
+        const end = m[2]
+          ? Math.min(parseInt(m[2], 10), total - 1)
+          : total - 1;
+        if (
+          Number.isFinite(start) &&
+          Number.isFinite(end) &&
+          start <= end &&
+          start < total
+        ) {
+          const stream = createReadStream(entryFile.path, { start, end });
+          return new NextResponse(
+            ReadableToBody(stream) as unknown as BodyInit,
+            {
+              status: 206,
+              headers: new Headers({
+                "Content-Type": mime,
+                "Content-Length": String(end - start + 1),
+                "Content-Disposition": disposition,
+                "X-Content-Type-Options": "nosniff",
+                "Cache-Control": "private, max-age=0, must-revalidate",
+                ETag: etag,
+                "Content-Range": `bytes ${start}-${end}/${total}`,
+                "Accept-Ranges": "bytes",
+              }),
+            }
+          );
+        }
+      }
+    }
+    const stream = createReadStream(entryFile.path);
+    return new NextResponse(ReadableToBody(stream) as unknown as BodyInit, {
+      status: 200,
+      headers: new Headers({
+        "Content-Type": mime,
+        "Content-Length": String(total),
+        "Content-Disposition": disposition,
+        "X-Content-Type-Options": "nosniff",
+        "Cache-Control": "private, max-age=0, must-revalidate",
+        ETag: etag,
+        "Accept-Ranges": "bytes",
+      }),
+    });
+  } finally {
+    await handle.done();
+  }
+}
+
+/** Node Readable → Web ReadableStream (body Response) tanpa buffer utuh. */
+function ReadableToBody(stream: import("node:stream").Readable) {
+  return Readable.toWeb(stream) as unknown as ReadableStream<Uint8Array>;
 }
 
 // ── POST: ekstraksi arsip ke folder di mount ─────────────────────────────
@@ -400,12 +568,12 @@ export async function POST(req: NextRequest) {
       { status: 400 }
     );
   }
-  if (stat.size > MAX_ARCHIVE_BYTES) {
+  if (stat.size > MAX_ARCHIVE_EXTRACT_BYTES) {
     return NextResponse.json(
       {
-        error: `Arsip ${Math.round(stat.size / 1048576)} MB — melebihi batas ekstraksi ${Math.round(
-          MAX_ARCHIVE_BYTES / 1048576
-        )} MB.`,
+        error: `Arsip ${fmtBytes(stat.size)} — melebihi batas ekstraksi ${fmtBytes(
+          MAX_ARCHIVE_EXTRACT_BYTES
+        )}. Dapat dibuka (pratinjau isi) tapi untuk mengekstrak penuh, unduh lalu ekstrak di perangkat.`,
       },
       { status: 413 }
     );
@@ -419,25 +587,24 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  const buf = await getArchiveBytes(accountLike, op.nodeId);
-  if (!buf) {
-    return NextResponse.json(
-      { error: "Gagal mengunduh arsip dari MEGA — coba lagi." },
-      { status: 502 }
-    );
-  }
-
-  // Buka + rencanakan (sanitasi path + batas jumlah/total/per-entri).
-  let opened: ReturnType<typeof openArchive>;
+  // Muat arsip (disk-backed) + rencanakan (sanitasi + batas).
+  let handle: Awaited<ReturnType<typeof loadArchive>>;
   let plan: ReturnType<typeof planExtraction>;
   try {
-    opened = openArchive(stat.name, buf);
-    plan = planExtraction(opened.entries);
+    handle = await loadArchive(accountLike, op.nodeId, stat);
+    plan = planExtraction(handle.opened.entries);
   } catch (e) {
+    if (e instanceof Error && e.message === "MEGA_DOWNLOAD_FAILED") {
+      return NextResponse.json(
+        { error: "Gagal mengunduh arsip dari MEGA — coba lagi." },
+        { status: 502 }
+      );
+    }
     const { status, message } = archiveErrorStatus(e);
     return NextResponse.json({ error: message }, { status });
   }
   if (plan.items.length === 0) {
+    await handle.done();
     return NextResponse.json(
       { error: "Arsip kosong / tidak ada entri yang bisa diekstrak." },
       { status: 422 }
@@ -469,6 +636,7 @@ export async function POST(req: NextRequest) {
     );
     rootId = made.nodeId;
   } catch (e) {
+    await handle.done();
     return NextResponse.json(
       { error: `Gagal membuat folder ekstraksi: ${describeMegaError(e)}` },
       { status: 502 }
@@ -519,16 +687,35 @@ export async function POST(req: NextRequest) {
       const parentId = dirIds.get(dirPath) ?? rootId;
       const baseName = item.path.slice(idx + 1).slice(0, 120) || "berkas";
       try {
-        // Baca lewat path ASLI arsip (rawPath) — hasil sanitasi hanya
-        // dipakai untuk penamaan tujuan.
-        const data = await opened.read(item.rawPath);
-        await megaUploadTo(
-          accountLike,
-          parentId,
-          baseName,
-          data,
-          mimetypeFromName(baseName)
-        );
+        if (item.size <= RAM_ENTRY_THRESHOLD) {
+          // Baca lewat path ASLI arsip (rawPath) — sanitasi hanya penamaan.
+          const data = await handle.opened.read(item.rawPath);
+          await megaUploadTo(
+            accountLike,
+            parentId,
+            baseName,
+            data,
+            mimetypeFromName(baseName)
+          );
+        } else {
+          // Berkas besar: materialisasi ke disk + unggah STREAMING.
+          const key = `archent:${account.id}:${op.nodeId}:${createHash("sha1")
+            .update(item.rawPath)
+            .digest("hex")
+            .slice(0, 16)}`;
+          const entryFile = await materializeEntry(
+            key,
+            handle.opened,
+            item.rawPath
+          );
+          await megaUploadStreamTo(
+            accountLike,
+            parentId,
+            baseName,
+            entryFile.size,
+            createReadStream(entryFile.path)
+          );
+        }
         fileCount++;
       } catch {
         failed++;
@@ -543,6 +730,8 @@ export async function POST(req: NextRequest) {
       },
       { status: 502 }
     );
+  } finally {
+    await handle.done();
   }
 
   return NextResponse.json({

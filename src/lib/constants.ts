@@ -9,7 +9,8 @@ export const PRESENCE_POLL_INTERVAL = 15000;
 export const PRESENCE_TIMEOUT = 45000; // online if pinged within last 45s
 
 // File upload
-export const MAX_FILE_SIZE_MB = 100;
+export const MAX_FILE_SIZE_MB = 1024; // 1 GB (Task 34 — naik dari 100 MB)
+export const MAX_FILE_SIZE_LABEL = "1 GB";
 
 // Avatar fallback color palette (Tailwind classes)
 export const AVATAR_COLORS = [

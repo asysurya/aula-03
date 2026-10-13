@@ -402,7 +402,7 @@ export function MessageInput({
       }
       if (f.size > MAX_FILE_SIZE) {
         toast.error(
-          `File "${f.name}" melebihi ${Math.round(MAX_FILE_SIZE / 1024 / 1024)}MB`
+          `File "${f.name}" melebihi 1 GB`
         );
         continue;
       }
@@ -693,7 +693,7 @@ export function MessageInput({
           <div className="flex flex-col items-center gap-2 text-primary">
             <UploadCloud className="h-10 w-10" />
             <p className="font-medium text-sm">Lepaskan file untuk melampirkan</p>
-            <p className="text-xs text-muted-foreground">Maks {MAX_ATTACHMENTS_PER_MESSAGE} file · {Math.round(MAX_FILE_SIZE / 1024 / 1024)}MB per file · tersimpan di cloud</p>
+            <p className="text-xs text-muted-foreground">Maks {MAX_ATTACHMENTS_PER_MESSAGE} file · 1 GB per file · tersimpan di cloud</p>
           </div>
         </div>
       ) : null}

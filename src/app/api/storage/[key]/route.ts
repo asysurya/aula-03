@@ -1,12 +1,20 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createHash } from "crypto";
+import { createReadStream } from "node:fs";
+import { Readable } from "node:stream";
 import { db } from "@/lib/db";
 import { deleteFile, getFile } from "@/lib/storage";
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
-import { parseMegaKey, megaDownloadStream } from "@/lib/mega-storage";
+import {
+  parseMegaKey,
+  megaDownloadStream,
+  megaDownloadToFile,
+} from "@/lib/mega-storage";
 import { mimetypeFromName } from "@/lib/cloud-format";
 import { fileCacheGetOrLoad } from "@/lib/file-cache";
+import { diskCacheGetOrProduce } from "@/lib/archive-cache";
+import { RAM_ENTRY_THRESHOLD } from "@/lib/archive";
 import { s3Stream } from "@/lib/s3-storage";
 import { s3AccountOf, checkStorageAccess } from "@/lib/storage-access";
 
@@ -347,27 +355,65 @@ export async function GET(
     }
   }
 
-  // ── JALUR CEPAT 2: MEGA tanpa Range & file besar → stream megajs ──
-  // (Range MEGA tetap lewat buffer — unduhan paralel per-range dari MEGA
-  // hanya membuang bandwidth; buffer + LRU menghandle seek video.)
+  // ── JALUR CEPAT 2: MEGA file besar (≥ 4 MB) → stream / cache disk ──
+  // Task 34 (batas upload 1 GB): file besar dari MEGA TIDAK lagi dibuffer
+  // utuh di RAM — tanpa Range di-stream megajs; dengan Range (seek video)
+  // dimaterialkan SEKALI ke cache disk lalu disajikan per-rentang.
   const mega = parseMegaKey(key);
-  if (mega && !rangeHeader && !forceDownload && (size === 0 || size >= 4 * 1024 * 1024)) {
+  if (mega && (size === 0 || size >= 4 * 1024 * 1024)) {
     const account = await db.cloudAccount.findUnique({
       where: { id: mega.accountId },
       select: { id: true, email: true, password: true, sessionData: true },
     });
     if (account) {
-      const r = await megaDownloadStream(account, mega.nodeId);
-      if (r) {
-        return new NextResponse(r.stream, {
-          status: 200,
-          headers: {
-            ...baseHeaders,
-            ...(r.size ? { "Content-Length": String(r.size) } : {}),
-          },
-        });
+      const range = parseRangeHeader(rangeHeader, size);
+
+      // 2a. Range + file BESAR (≥ 64 MB): cache disk → irisan per-rentang.
+      if (range && size >= RAM_ENTRY_THRESHOLD) {
+        try {
+          const cached = await diskCacheGetOrProduce(
+            `stor:${key}`,
+            size,
+            async (dest) => {
+              const ok = await megaDownloadToFile(account, mega.nodeId, dest);
+              if (!ok) throw new Error("MEGA_DOWNLOAD_FAILED");
+            }
+          );
+          const end = Math.min(range.end, cached.size - 1);
+          if (range.start <= end) {
+            return new NextResponse(
+              Readable.toWeb(
+                createReadStream(cached.path, { start: range.start, end })
+              ) as unknown as ReadableStream<Uint8Array>,
+              {
+                status: 206,
+                headers: {
+                  ...baseHeaders,
+                  "Content-Range": `bytes ${range.start}-${end}/${cached.size}`,
+                  "Content-Length": String(end - range.start + 1),
+                },
+              }
+            );
+          }
+        } catch {
+          // Cache disk tak tersedia (ruang / dir) → jalur buffer lama.
+        }
       }
-      // Stream gagal → jalur buffer (unduhan penuh + sniff) di bawah.
+
+      // 2b. Tanpa Range (preview MAUPUN unduh) → stream langsung megajs.
+      if (!rangeHeader) {
+        const r = await megaDownloadStream(account, mega.nodeId);
+        if (r) {
+          return new NextResponse(r.stream, {
+            status: 200,
+            headers: {
+              ...baseHeaders,
+              ...(r.size ? { "Content-Length": String(r.size) } : {}),
+            },
+          });
+        }
+        // Stream gagal → jalur buffer (unduhan penuh + sniff) di bawah.
+      }
     }
   }
 

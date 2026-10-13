@@ -11,7 +11,7 @@ import {
   type ClassroomRole,
   type UserRole,
 } from "@/lib/cloud-perms";
-import { MAX_FILE_SIZE, saveFile, deleteFile } from "@/lib/storage";
+import { MAX_FILE_SIZE, MAX_FILE_SIZE_LABEL, saveFile, deleteFile } from "@/lib/storage";
 import { resolveMime } from "@/lib/file-constants";
 import { megaUploadTo, describeMegaError, type MegaAccountLike } from "@/lib/mega-storage";
 import { canWriteMount } from "@/lib/mount-access";
@@ -585,7 +585,7 @@ export async function uploadAnswerFileAction(
 
 // ───────────────────────── 8. Lampiran materi AI ─────────────────────────
 // Sama dengan POST /api/ai/attachments, tapi dipanggil dari jalur chunked
-// (/api/upload/complete) untuk berkas besar (≤ 100 MB, sama dengan lampiran
+// (/api/upload/complete) untuk berkas besar (≤ 1 GB, sama dengan lampiran
 // chat). File TIDAK disimpan ke cloud — isinya di-extract teksnya lalu
 // disimpan ke AiAttachment (persis perilaku route aslinya).
 
@@ -597,9 +597,7 @@ export async function uploadAiAttachmentAction(
   if (file.size === 0) return fail("FILE_EMPTY", 400);
   if (file.size > MAX_FILE_SIZE) {
     return fail(
-      `Berkas terlalu besar (maks ${Math.round(
-        MAX_FILE_SIZE / 1024 / 1024
-      )} MB): ${file.name}`,
+      `Berkas terlalu besar (maks ${MAX_FILE_SIZE_LABEL}): ${file.name}`,
       413
     );
   }

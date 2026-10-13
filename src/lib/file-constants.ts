@@ -2,8 +2,10 @@
 // Kept in a separate file so client components can import without pulling in
 // the Prisma/megajs server-only modules.
 
-export const MAX_FILE_SIZE = 100 * 1024 * 1024; // 100 MB
-export const MAX_FILE_SIZE_MB = 100;
+export const MAX_FILE_SIZE = 1024 * 1024 * 1024; // 1 GB (Task 34 — naik dari 100 MB)
+export const MAX_FILE_SIZE_MB = 1024;
+/** Label ramah untuk tampilan UI/pesan galat ("1 GB", bukan "1024 MB"). */
+export const MAX_FILE_SIZE_LABEL = "1 GB";
 
 export const MAX_ATTACHMENTS_PER_MESSAGE = 5;
 

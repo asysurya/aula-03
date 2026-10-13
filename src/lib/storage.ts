@@ -34,7 +34,7 @@ import {
 // See DEPLOY.md (MongoDB + Cloud Storage section) for production notes.
 
 const UPLOAD_DIR = path.join(process.cwd(), "uploads");
-const MAX_SIZE = 100 * 1024 * 1024; // 100 MB
+const MAX_SIZE = 1024 * 1024 * 1024; // 1 GB (Task 34 — naik dari 100 MB)
 
 export const MAX_FILE_SIZE = MAX_SIZE;
 
@@ -340,6 +340,6 @@ export async function deleteFile(storageKey: string): Promise<void> {
   await deleteLocal(storageKey);
 }
 
-export { filePublicUrl } from "@/lib/file-constants";
+export { filePublicUrl, MAX_FILE_SIZE_LABEL } from "@/lib/file-constants";
 
 export { isImage };

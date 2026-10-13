@@ -31,7 +31,9 @@ import {
 // client tidak perlu tahu bedanya.
 
 export const runtime = "nodejs";
-export const maxDuration = 60;
+// 300 dtk — perakitan + unggah berkas besar (hingga 1 GB) ke MEGA/S3
+// butuh waktu; di Vercel hobby dipotong lebih dulu oleh batas platform.
+export const maxDuration = 300;
 
 const targetSchema = z.discriminatedUnion("kind", [
   z.object({

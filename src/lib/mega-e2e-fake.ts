@@ -153,6 +153,58 @@ export async function fakeMegaDownload(
   }
 }
 
+/** "Unduh" berkas fake ke disk — hardlink (instant, sparse tetap sparse),
+ *  jatuh ke salinan bila hardlink tak mungkin (lintas FS). */
+export async function fakeMegaDownloadToFile(
+  nodeId: string,
+  destPath: string
+): Promise<boolean> {
+  const abs = fakePath(nodeId);
+  if (!abs) return false;
+  try {
+    const st = await fs.stat(abs);
+    if (!st.isFile()) return false;
+    await fs.mkdir(path.dirname(destPath), { recursive: true });
+    try {
+      await fs.link(abs, destPath);
+    } catch {
+      await fs.copyFile(abs, destPath);
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Unggah berkas fake dari stream — mirror megaUploadStreamTo. */
+export async function fakeMegaUploadStreamTo(
+  account: MegaAccountLike,
+  parentNodeId: string | null | undefined,
+  name: string,
+  size: number,
+  readable: import("node:stream").Readable
+): Promise<MegaUploadResult> {
+  const parentAbs = fakePath(parentNodeId);
+  if (!parentAbs || !(await existsDir(parentAbs))) {
+    throw new Error("MEGA_FOLDER_NOT_FOUND");
+  }
+  const abs = path.join(parentAbs, name);
+  const { createWriteStream } = await import("node:fs");
+  const ws = createWriteStream(abs);
+  await new Promise<void>((resolve, reject) => {
+    ws.on("error", reject);
+    readable.on("error", reject);
+    readable.pipe(ws);
+    ws.on("finish" as string, () => resolve());
+  });
+  const rel = path.relative(fakeRoot(), abs);
+  return {
+    storageKey: `mega:${account.id}:${encNodeId(rel)}`,
+    size,
+    nodeId: encNodeId(rel),
+  } as MegaUploadResult;
+}
+
 /** Buat folder fake; kembalikan node id folder baru. */
 export async function fakeMegaMkdir(
   parentNodeId: string | null | undefined,

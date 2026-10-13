@@ -6,8 +6,10 @@ import {
   fakeMegaList,
   fakeMegaStat,
   fakeMegaDownload,
+  fakeMegaDownloadToFile,
   fakeMegaMkdir,
   fakeMegaUploadTo,
+  fakeMegaUploadStreamTo,
 } from "@/lib/mega-e2e-fake";
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -27,8 +29,9 @@ import {
 // ─────────────────────────────────────────────────────────────────────────
 
 const DEFAULT_TIMEOUT_MS = 30_000;
-// 5 minutes for uploads — large files (up to 100MB) take time over slow connections.
-const UPLOAD_TIMEOUT_MS = 5 * 60_000;
+// 30 minutes for uploads — file besar (hingga 1 GB) butuh waktu di tautan
+// lambat; di Vercel maxDuration function memotong lebih dulu.
+const UPLOAD_TIMEOUT_MS = 30 * 60_000;
 // Cooldown setelah login gagal — jangan "palu" akun yang sedang diblokir.
 const LOGIN_FAILURE_COOLDOWN_MS = 60_000;
 
@@ -629,6 +632,88 @@ export async function megaDownloadStream(
   } catch {
     return null;
   }
+}
+
+/**
+ * Download MEGA langsung ke BERKAS di disk (streaming, tanpa buffer utuh
+ * di RAM) — dipakai jalur arsip besar (arsip hingga 5 GB bisa dibuka
+ * tanpa meledakkan memori). Timeout panjang (30 menit) karena arsip
+ * besar butuh waktu di tautan lambat.
+ */
+export async function megaDownloadToFile(
+  account: MegaAccountLike,
+  nodeId: string,
+  destPath: string
+): Promise<boolean> {
+  if (megaFakeEnabled(account)) {
+    return fakeMegaDownloadToFile(nodeId, destPath);
+  }
+  try {
+    return await withSession(account, async (storage) => {
+      const file = await resolveNode(storage, nodeId);
+      if (!file || file.directory) return false;
+      const node = file as MutableFile & {
+        download: (opts: Record<string, unknown>) => NodeJS.ReadableStream;
+      };
+      const readable = node.download({ maxConnections: 4 }) as NodeJS.ReadableStream;
+      const { createWriteStream } = await import("fs");
+      const { pipeline } = await import("stream/promises");
+      await pipeline(
+        readable as unknown as import("stream").Readable,
+        createWriteStream(destPath)
+      );
+      return true;
+    });
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Unggah ke MEGA dari Node Readable (streaming — berkas besar hasil
+ * ekstraksi arsip tidak perlu dimuat utuh ke RAM).
+ */
+export async function megaUploadStreamTo(
+  account: MegaAccountLike,
+  parentId: string | null,
+  name: string,
+  size: number,
+  readable: import("stream").Readable
+): Promise<MegaUploadResult> {
+  if (megaFakeEnabled(account)) {
+    return fakeMegaUploadStreamTo(account, parentId, name, size, readable);
+  }
+  if (!account.email && !account.sessionData) {
+    throw new Error("MEGA_NO_CREDENTIALS");
+  }
+  return withMutatingSession(account, async (storage) => {
+    const parent = await resolveFolder(storage, parentId);
+    const stream = parent.upload({ name, size });
+    const donePromise = stream.complete as Promise<MutableFile>;
+    await new Promise<void>((resolve, reject) => {
+      const w = stream as unknown as NodeJS.WritableStream & {
+        on: (e: string, cb: (...args: unknown[]) => void) => void;
+      };
+      w.on("error", reject);
+      readable.on("error", reject);
+      (readable as unknown as NodeJS.ReadableStream).pipe(w as unknown as NodeJS.WritableStream);
+      // 'end'/'finish' → resolve; megajs menyelesaikan complete sendiri.
+      w.on("finish" as string, () => resolve());
+      readable.on("end", () => {
+        // Writable megajs selesai menulis segera setelah sumber habis.
+        resolve();
+      });
+    });
+    const file = await withTimeout(donePromise, UPLOAD_TIMEOUT_MS);
+    if (!file.nodeId) {
+      throw new Error("MEGA_NO_NODE_ID");
+    }
+    return {
+      storageKey: `mega:${account.id}:${file.nodeId}`,
+      size,
+      nodeId: file.nodeId,
+    };
+  });
 }
 
 /**
