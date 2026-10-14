@@ -19,6 +19,7 @@ import {
   FilePlus2,
   Folder,
   FolderPlus,
+  FolderUp,
   HardDrive,
   Loader2,
   MoreVertical,
@@ -94,6 +95,17 @@ import {
   type CloudFileItem,
 } from "@/lib/cloud-format";
 import { isArchiveName } from "@/lib/archive-names";
+import {
+  entriesFromFileList,
+  snapEntriesFromDataTransfer,
+  validateFolderUpload,
+  walkSnappedEntries,
+  type FolderEntry,
+} from "@/lib/folder-upload";
+import {
+  MAX_FILE_SIZE_LABEL,
+  MAX_FOLDER_UPLOAD_TOTAL_LABEL,
+} from "@/lib/constants";
 
 // ───────────────────────── Types ─────────────────────────
 
@@ -188,6 +200,7 @@ export function MegaMountView({
   const [mkdirOpen, setMkdirOpen] = useState(false);
   const [dragOver, setDragOver] = useState(false);
   const uploadInputRef = useRef<HTMLInputElement>(null);
+  const folderInputRef = useRef<HTMLInputElement>(null);
 
   const { data, isLoading, error, refetch, isFetching } =
     useQuery<MegaTreeResponse>({
@@ -302,6 +315,61 @@ export function MegaMountView({
       `"${f.name}" diunggah ke MEGA di latar belakang — pantau di tombol Transfer.`
     );
   };
+
+  // ── Unggah FOLDER (Task 38) ──
+  // Satu job di Manajer Transfer untuk seluruh folder: folder bertingkat
+  // dibuat otomatis & idempoten (folder bernama sama digabung), berkas
+  // diunggah berurutan. Batas: 1 GB per berkas (berkas lebih besar
+  // DILEWATI dengan toast), 2 GB total folder, maks 500 berkas.
+  const enqueueFolderUpload = useTransferStore((s) => s.enqueueFolderUpload);
+
+  function startFolderUpload(entries: FolderEntry[]) {
+    if (entries.length === 0) {
+      toast.info("Folder kosong — tidak ada yang diunggah.");
+      return;
+    }
+    const v = validateFolderUpload(entries);
+    for (const s of v.skipped) {
+      if (s.reason === "LARGE") {
+        toast.error(
+          `"${s.name}" terlalu besar — maks ${MAX_FILE_SIZE_LABEL} per berkas; berkas ini dilewati.`
+        );
+      } else {
+        toast.info(`"${s.name}" kosong (0 byte) — dilewati.`);
+      }
+    }
+    if (!v.ok) {
+      if (v.code === "TOO_LARGE_TOTAL") {
+        toast.error(
+          `Total folder ${formatBytes(v.totalBytes)} melebihi ${MAX_FOLDER_UPLOAD_TOTAL_LABEL} — pecah folder atau unggah sebagian isinya.`
+        );
+      } else if (v.code === "TOO_MANY_FILES") {
+        toast.error(
+          `Terlalu banyak berkas (${v.valid.length}) — maks 500 per unggahan folder.`
+        );
+      } else {
+        toast.info("Tidak ada berkas yang bisa diunggah dari folder ini.");
+      }
+      return;
+    }
+    if (v.rootName) {
+      enqueueFolderUpload({
+        entries: v.valid,
+        rootName: v.rootName,
+        target: { kind: "mega", parentId: nodeId, accountId },
+        context: "Mount MEGA",
+        onFileOps: () => refetch(),
+      });
+      toast.info(
+        `"${v.rootName}/" — ${v.valid.length} berkas (${formatBytes(
+          v.totalBytes
+        )}) diunggah di latar belakang — pantau di tombol Transfer.`
+      );
+    } else {
+      // Semua berkas tanpa folder (drop file lepas) → jalur per-berkas lama.
+      v.valid.forEach((e) => onPickUpload(e.file));
+    }
+  }
 
   const usagePct =
     data?.account.spaceTotal && data.account.spaceUsed != null
@@ -731,6 +799,34 @@ export function MegaMountView({
             size="sm"
             variant="outline"
             className="gap-1.5"
+            onClick={() => folderInputRef.current?.click()}
+            disabled={!data}
+            title="Pilih satu folder — seluruh isinya (sub-folder ikut) diunggah. Maks 1 GB per berkas, 2 GB total."
+          >
+            <FolderUp className="size-4" />
+            <span className="hidden sm:inline">Unggah Folder</span>
+          </Button>
+          <input
+            ref={(el) => {
+              folderInputRef.current = el;
+              // webkitdirectory bukan atribut React standar — pasang manual.
+              if (el) {
+                el.setAttribute("webkitdirectory", "");
+                el.setAttribute("directory", "");
+              }
+            }}
+            type="file"
+            multiple
+            className="hidden"
+            onChange={(e) => {
+              startFolderUpload(entriesFromFileList(e.target.files));
+              e.target.value = "";
+            }}
+          />
+          <Button
+            size="sm"
+            variant="outline"
+            className="gap-1.5"
             onClick={() => setMkdirOpen(true)}
             disabled={!data}
           >
@@ -894,6 +990,29 @@ export function MegaMountView({
               e.preventDefault();
               setDragOver(false);
               if (isReadOnly) return;
+              // SNAP sinkron: webkitGetAsEntry() harus dipanggil sebelum
+              // handler drop kembali (entry kadaluarsa setelah itu di
+              // Chromium). Folder → walker rekursif → job unggah folder.
+              const snapped = snapEntriesFromDataTransfer(e.dataTransfer);
+              if (snapped.hasDirectory) {
+                toast.info("Membaca isi folder…");
+                void walkSnappedEntries(snapped.entries).then((entries) => {
+                  startFolderUpload(entries);
+                });
+                return;
+              }
+              if (snapped.entries.length > 0) {
+                // Drop berkas lepas via entry (Firefox/Safari) — ambil File
+                // langsung supaya relPath benar.
+                void walkSnappedEntries(snapped.entries).then((entries) => {
+                  if (entries.some((en) => en.relPath.includes("/"))) {
+                    startFolderUpload(entries);
+                    return;
+                  }
+                  entries.forEach((en) => onPickUpload(en.file));
+                });
+                return;
+              }
               const files = Array.from(e.dataTransfer.files ?? []);
               files.forEach((f) => {
                 if (f.size > 1024 * 1024 * 1024) {
@@ -931,7 +1050,7 @@ export function MegaMountView({
                   <div className="flex flex-col items-center gap-2 py-6">
                     <UploadCloud className="size-10 text-primary animate-bounce" />
                     <p className="font-medium text-foreground">
-                      Lepaskan file untuk diunggah ke folder ini
+                      Lepaskan file atau folder untuk diunggah ke sini
                     </p>
                   </div>
                 ) : (

@@ -25,6 +25,11 @@
 import { create } from "zustand";
 import { toast } from "sonner";
 import type { SmartUploadTarget } from "@/lib/upload-client";
+import {
+  dirOf,
+  pathSegments,
+  type FolderEntry,
+} from "@/lib/folder-upload";
 
 export type TransferKind = "upload" | "download";
 export type TransferStatus =
@@ -57,6 +62,20 @@ export interface TransferJob {
 }
 
 // ── Runtime job (di luar state React — tidak ikut render) ──
+
+/** State khusus job unggah FOLDER (Task 38) — berkas diproses berurutan
+ *  dalam SATU job (progress = total seluruh berkas; pause/cancel/retry
+ *  bekerja di batas berkas). */
+interface FolderJobRuntime {
+  entries: FolderEntry[];
+  rootName: string;
+  /** index berkas yang sudah tuntas — retry TIDAK mengunggah ulang */
+  doneIdx: Set<number>;
+  /** cache nodeId MEGA per jalur direktori relatif (idempoten antar berkas) */
+  dirCache: Map<string, string>;
+  /** total byte berkas yang sudah tuntas (basis progress lintas berkas) */
+  doneBytes: number;
+}
 
 interface JobRuntime {
   id: string;
@@ -103,6 +122,8 @@ interface JobRuntime {
   /** unduhan bersegmen: total byte file & state tiap segmen */
   segTotal?: number;
   segs?: DownloadSeg[];
+  /** job unggah folder: seluruh berkas + progres agregatnya */
+  folder?: FolderJobRuntime;
 }
 
 /** Satu segmen unduhan paralel (rentang byte inklusif). */
@@ -141,6 +162,19 @@ interface TransferState {
   jobs: TransferJob[];
   enqueueUpload: (opts: {
     file: File;
+    target: SmartUploadTarget;
+    context?: string;
+    onDoneFile?: (fileId: string, extra: Record<string, unknown>) => void;
+    onFileOps?: () => void;
+  }) => string;
+  /** Antrean unggah SATU FOLDER utuh (Task 38) — satu job, berkas diproses
+   *  berurutan: folder bertingkat dibuat idempoten via aksi "mkdir-path",
+   *  tiap berkas menyusul lewat jalur upload biasa (kecil = langsung,
+   *  besar = chunked). Batas sudah divalidasi pemanggil (1 GB per berkas,
+   *  2 GB total, maks 500 berkas). */
+  enqueueFolderUpload: (opts: {
+    entries: FolderEntry[];
+    rootName: string;
     target: SmartUploadTarget;
     context?: string;
     onDoneFile?: (fileId: string, extra: Record<string, unknown>) => void;
@@ -195,6 +229,55 @@ export const useTransferStore = create<TransferState>((set, get) => ({
           kind: "upload",
           name: fmtName(file.name),
           size: file.size,
+          loaded: 0,
+          status: "queued",
+          error: null,
+          speed: 0,
+          createdAt: Date.now(),
+          context,
+        },
+      ],
+    }));
+    pump();
+    return id;
+  },
+
+  enqueueFolderUpload({ entries, rootName, target, context = "Mount MEGA", onDoneFile, onFileOps }) {
+    const id = newId();
+    const totalBytes = entries.reduce((a, e) => a + e.file.size, 0);
+    runtimes.set(id, {
+      id,
+      kind: "upload",
+      target,
+      folder: {
+        entries,
+        rootName,
+        doneIdx: new Set(),
+        dirCache: new Map(),
+        doneBytes: 0,
+      },
+      onDoneFile,
+      onFileOps,
+      liveLoaded: 0,
+      lastFlushLoaded: 0,
+      lastFlushAt: Date.now(),
+      cancelled: false,
+      pauseRequested: false,
+      paused: false,
+      running: false,
+      phase: "uploading",
+      abortCurrent: () => {},
+      waitResume: () => Promise.resolve(),
+      notifyResume: null,
+    });
+    set((s) => ({
+      jobs: [
+        ...s.jobs,
+        {
+          id,
+          kind: "upload",
+          name: fmtName(rootName ? `${rootName}/` : entries[0]?.file.name ?? "folder", 44),
+          size: totalBytes,
           loaded: 0,
           status: "queued",
           error: null,
@@ -333,21 +416,24 @@ export const useTransferStore = create<TransferState>((set, get) => ({
     const rt = runtimes.get(id);
     const job = get().jobs.find((j) => j.id === id);
     if (!rt || !job || job.status !== "error") return;
-    // Reset runtime progres; eksekusi ulang dari awal.
+    // Reset runtime progres; eksekusi ulang dari awal. Job FOLDER tidak
+    // mengunggah ulang berkas yang sudah tuntas (doneIdx dipertahankan) —
+    // progres lanjut dari byte berkas yang berhasil.
     rt.cancelled = false;
     rt.pauseRequested = false;
     rt.paused = false;
-    rt.liveLoaded = 0;
-    rt.lastFlushLoaded = 0;
+    rt.liveLoaded = rt.folder ? rt.folder.doneBytes : 0;
+    rt.lastFlushLoaded = rt.folder ? rt.folder.doneBytes : 0;
     rt.lastFlushAt = Date.now();
     rt.parts = [];
     rt.segs = undefined;
     rt.segTotal = undefined;
     rt.phase = "uploading";
+    const loadedNow = rt.folder ? rt.folder.doneBytes : 0;
     set((s) => ({
       jobs: s.jobs.map((j) =>
         j.id === id
-          ? { ...j, status: "queued", loaded: 0, speed: 0, error: null, phase: undefined }
+          ? { ...j, status: "queued", loaded: loadedNow, speed: 0, error: null, phase: undefined }
           : j
       ),
     }));
@@ -431,9 +517,12 @@ function pump() {
   }));
 
   rt.running = true;
-  rt.execPromise = (rt.kind === "upload"
-    ? runUpload(rt)
-    : runDownload(rt)
+  rt.execPromise = (
+    rt.kind === "upload"
+      ? rt.folder
+        ? runFolderUpload(rt)
+        : runUpload(rt)
+      : runDownload(rt)
   )
     .then(() => {
       rt.running = false;
@@ -483,7 +572,8 @@ function finishJob(id: string, status: "done" | "error" | "cancelled", error?: s
     rt.segs = undefined;
     // Toast ringan tanpa memblokir.
     if (rt.kind === "upload") {
-      toast.success(`Upload selesai: ${rt.file?.name ?? "file"}`);
+      const label = rt.file?.name ?? (rt.folder ? `${rt.folder.rootName}/` : "file");
+      toast.success(`Upload selesai: ${label}`);
     } else if (rt.autoSave) {
       toast.success(`Unduhan selesai: ${rt.url?.split("/").pop()?.slice(0, 40) ?? "file"}`);
     }
@@ -663,10 +753,29 @@ function buildDirectForm(file: File, target: SmartUploadTarget): { url: string; 
   }
 }
 
-async function runUpload(rt: JobRuntime) {
-  const file = rt.file;
-  const target = rt.target;
+/**
+ * Unggah SATU berkas (dipakai runner file tunggal DAN runner folder).
+ * `base` = byte berkas lain yang sudah tuntas (job folder — progress
+ * agregat); `onDone`/`onOps` = callback khusus pemanggil (runner folder
+ * memakainya per berkas; runner tunggal meneruskan callback job).
+ */
+async function runUpload(
+  rt: JobRuntime,
+  fileArg?: File,
+  targetArg?: SmartUploadTarget,
+  base = 0,
+  onDone?: (fileId: string, json: Record<string, unknown>) => void,
+  onOps?: () => void
+) {
+  const file = fileArg ?? rt.file;
+  const target = targetArg ?? rt.target;
   if (!file || !target) throw new Error("Upload tidak valid");
+  // Default callback = milik job (dipakai runner file tunggal); runner folder
+  // meneruskan callback sendiri supaya dipanggil PER BERKAS.
+  const notifyDone =
+    onDone ??
+    ((fileId: string, json: Record<string, unknown>) => rt.onDoneFile?.(fileId, json));
+  const notifyOps = onOps ?? (() => rt.onFileOps?.());
 
   // ── Jalur 1: file kecil → POST langsung ──
   if (file.size <= DIRECT_THRESHOLD) {
@@ -676,7 +785,7 @@ async function runUpload(rt: JobRuntime) {
       await ensureNotPausedOrCancelled(rt);
       try {
         const res = await xhrPost(url, form, rt, (loaded) => {
-          rt.liveLoaded = Math.min(loaded, file.size);
+          rt.liveLoaded = base + Math.min(loaded, file.size);
           // Semua byte terkirim tapi respons belum balas → server sedang
           // menyimpan ke cloud → tampilkan "Menyimpan ke cloud…".
           setJobPhase(rt, loaded >= file.size ? "finalizing" : "uploading");
@@ -688,12 +797,12 @@ async function runUpload(rt: JobRuntime) {
             throw new Error(lastErr);
           throw new Error(lastErr);
         }
-        rt.liveLoaded = file.size;
+        rt.liveLoaded = base + file.size;
         const fileId =
           (res.json.fileId as string | undefined) ??
           ((res.json.file as { id?: string } | undefined)?.id ?? "");
-        rt.onDoneFile?.(fileId, res.json);
-        rt.onFileOps?.();
+        notifyDone(fileId, res.json);
+        notifyOps();
         return;
       } catch (e) {
         const msg = e instanceof Error ? e.message : "";
@@ -753,7 +862,7 @@ async function runUpload(rt: JobRuntime) {
     let loaded = 0;
     for (const idx of done) loaded += chunkLen(idx);
     for (const prog of inFlight.values()) loaded += prog;
-    rt.liveLoaded = Math.min(loaded, file.size);
+    rt.liveLoaded = base + Math.min(loaded, file.size);
   };
 
   /** Kirim satu chunk — retry mandiri (chunk lain tidak ikut gagal). */
@@ -892,12 +1001,90 @@ async function runUpload(rt: JobRuntime) {
   if (!complete.ok) {
     throw new Error((complete.json.error as string) || "Finalisasi upload gagal");
   }
-  rt.liveLoaded = file.size;
+  rt.liveLoaded = base + file.size;
   const fileId =
     (complete.json.fileId as string) ??
     ((complete.json.file as { id?: string } | undefined)?.id ?? "");
-  rt.onDoneFile?.(fileId, complete.json);
-  rt.onFileOps?.();
+  notifyDone(fileId, complete.json);
+  notifyOps();
+}
+
+// ── Runner: UPLOAD FOLDER (Task 38) ──────────────────────────────────────
+// Satu job = satu folder: folder bertingkat dibuat idempoten (aksi server
+// "mkdir-path", di-cache per jalur), lalu berkas diunggah BERURUTAN lewat
+// jalur yang sama dengan upload biasa (kecil = POST langsung, besar =
+// chunked). Pause/cancel berhenti di batas berkas; retry melanjutkan dari
+// berkas yang belum tuntas (doneIdx). Berkas di akar drop (tanpa folder)
+// mendarat langsung di direktori yang sedang dibuka.
+
+/** Pastikan jalur direktori relatif ada di MEGA; kembalikan nodeId-nya. */
+async function ensureFolderDir(
+  rt: JobRuntime,
+  dir: string
+): Promise<string | null | undefined> {
+  const folder = rt.folder;
+  const target = rt.target;
+  if (!folder || !target) throw new Error("Upload folder tidak valid");
+  if (!dir) return target.parentId ?? null; // file tanpa folder → direktori aktif
+  const cached = folder.dirCache.get(dir);
+  if (cached) return cached;
+  const segments = pathSegments(dir);
+  if (segments.length === 0) return target.parentId ?? null;
+  // mkdir-path idempoten: folder yang sudah ada dipakai ulang (gabung).
+  let lastErr = "";
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    if (rt.cancelled) throw new Error("__CANCELLED__");
+    const res = await postJson("/api/cloud/mega/ops", {
+      action: "mkdir-path",
+      accountId: target.accountId ?? undefined,
+      parentNodeId: target.parentId ?? null,
+      path: segments,
+    });
+    if (res.ok) {
+      const nodeId = res.json.nodeId as string | undefined;
+      if (!nodeId) throw new Error("NodeId folder tidak diterima");
+      folder.dirCache.set(dir, nodeId);
+      return nodeId;
+    }
+    lastErr = (res.json.error as string) || `Gagal menyiapkan folder (${res.status})`;
+    // Error fungsional (4xx: nama terlarang, akses ditolak, dll) — jangan ulang.
+    if (res.status >= 400 && res.status < 500 && res.status !== 408 && res.status !== 429) {
+      throw new Error(lastErr);
+    }
+    if (attempt < 3) await new Promise((r) => setTimeout(r, 700 * attempt));
+  }
+  throw new Error(lastErr || "Gagal menyiapkan folder");
+}
+
+async function runFolderUpload(rt: JobRuntime) {
+  const folder = rt.folder;
+  const target = rt.target;
+  if (!folder || !target) throw new Error("Upload folder tidak valid");
+
+  for (let i = 0; i < folder.entries.length; i++) {
+    if (folder.doneIdx.has(i)) continue; // retry: berkas ini sudah tuntas
+    const entry = folder.entries[i];
+    await ensureNotPausedOrCancelled(rt);
+
+    const dir = dirOf(entry.relPath);
+    const parentId = await ensureFolderDir(rt, dir);
+    const fileTarget: SmartUploadTarget = { ...target, parentId: parentId ?? null };
+
+    await runUpload(
+      rt,
+      entry.file,
+      fileTarget,
+      folder.doneBytes,
+      (fileId, json) => rt.onDoneFile?.(fileId, json),
+      () => rt.onFileOps?.()
+    );
+
+    folder.doneIdx.add(i);
+    folder.doneBytes += entry.file.size;
+    rt.liveLoaded = folder.doneBytes;
+    // Antar berkas: hormati pause yang diminta saat finalisasi berkas tadi.
+    await ensureNotPausedOrCancelled(rt);
+  }
 }
 
 // ── Runner: DOWNLOAD (paralel bersegmen + fallback single-stream) ──

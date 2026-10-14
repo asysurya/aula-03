@@ -4,8 +4,10 @@ import { db } from "@/lib/db";
 import { requireUser } from "@/lib/session";
 import { fileCacheDelete } from "@/lib/file-cache";
 import { canViewMount, canWriteMount } from "@/lib/mount-access";
+import { MAX_FOLDER_PATH_DEPTH } from "@/lib/constants";
 import {
   megaMkdir,
+  megaMkdirPath,
   megaRename,
   megaMove,
   megaDeleteNode,
@@ -18,11 +20,17 @@ import { hardDeleteCloudFilesByIds } from "@/lib/hard-delete";
 // POST /api/cloud/mega/ops
 //
 // Operasi full-akses pada mount MEGA Cloud:
-//   { action: "mkdir",  accountId?, parentNodeId?, name }
-//   { action: "rename", accountId?, nodeId, name }
-//   { action: "move",   accountId?, nodeId, targetParentId }
-//   { action: "copy",   accountId?, nodeId, targetParentId, name? }
-//   { action: "delete", accountId?, nodeId }
+//   { action: "mkdir",     accountId?, parentNodeId?, name }
+//   { action: "mkdir-path", accountId?, parentNodeId?, path: string[] }
+//   { action: "rename",     accountId?, nodeId, name }
+//   { action: "move",       accountId?, nodeId, targetParentId }
+//   { action: "copy",       accountId?, nodeId, targetParentId, name? }
+//   { action: "delete",     accountId?, nodeId }
+//
+// "mkdir-path" (Task 38) membuat folder bertingkat secara IDEMPOTEN untuk
+// unggah folder: segmen yang sudah ada dipakai ulang (gabung, bukan
+// duplikat). path maks MAX_FOLDER_PATH_DEPTH segmen, tiap segmen divalidasi
+// seperti nama folder biasa.
 //
 // Hak akses: akun harus mountMode=WRITE untuk user ini (diatur di Admin
 // Panel). Mount baca-saja (READ) menolak semua operasi tulis.
@@ -48,6 +56,15 @@ const opsSchema = z.discriminatedUnion("action", [
     accountId: z.string().optional(),
     parentNodeId: z.string().nullable().optional(),
     name: nameSchema,
+  }),
+  z.object({
+    action: z.literal("mkdir-path"),
+    accountId: z.string().optional(),
+    parentNodeId: z.string().nullable().optional(),
+    path: z
+      .array(nameSchema)
+      .min(1, "Path folder kosong")
+      .max(MAX_FOLDER_PATH_DEPTH, `Kedalaman folder maksimal ${MAX_FOLDER_PATH_DEPTH} tingkat`),
   }),
   z.object({
     action: z.literal("rename"),
@@ -167,6 +184,18 @@ export async function POST(req: NextRequest) {
           op.name
         );
         return NextResponse.json({ ok: true, nodeId: res.nodeId });
+      }
+      case "mkdir-path": {
+        const res = await megaMkdirPath(
+          account,
+          op.parentNodeId ?? null,
+          op.path
+        );
+        return NextResponse.json({
+          ok: true,
+          nodeId: res.nodeId,
+          createdCount: res.createdCount,
+        });
       }
       case "rename": {
         await megaRename(account, op.nodeId, op.name);

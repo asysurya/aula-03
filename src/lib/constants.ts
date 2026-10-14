@@ -12,6 +12,17 @@ export const PRESENCE_TIMEOUT = 45000; // online if pinged within last 45s
 export const MAX_FILE_SIZE_MB = 1024; // 1 GB (Task 34 — naik dari 100 MB)
 export const MAX_FILE_SIZE_LABEL = "1 GB";
 
+// Folder upload (Task 38) — unggah satu folder utuh (tombol "Unggah Folder"
+// + tarik-lepas folder) ke mount MEGA. Batas:
+//   · per BERKAS tetap 1 GB (sama dengan upload file biasa);
+//   · TOTAL seluruh berkas dalam satu folder maks 2 GB;
+//   · maks 500 berkas per unggahan (guard, samakan batas "salin folder");
+//   · kedalaman sub-folder relatif maks 30 (guard abuse path panjang).
+export const MAX_FOLDER_UPLOAD_TOTAL_BYTES = 2 * 1024 * 1024 * 1024; // 2 GB
+export const MAX_FOLDER_UPLOAD_TOTAL_LABEL = "2 GB";
+export const MAX_FOLDER_UPLOAD_FILES = 500;
+export const MAX_FOLDER_PATH_DEPTH = 30;
+
 // Avatar fallback color palette (Tailwind classes)
 export const AVATAR_COLORS = [
   "bg-emerald-500",

@@ -8,6 +8,7 @@ import {
   fakeMegaDownload,
   fakeMegaDownloadToFile,
   fakeMegaMkdir,
+  fakeMegaMkdirPath,
   fakeMegaUploadTo,
   fakeMegaUploadStreamTo,
 } from "@/lib/mega-e2e-fake";
@@ -758,6 +759,51 @@ export async function megaMkdir(
     // Tree disegarkan lewat evict session (withMutatingSession) — reload()
     // di sini justru menambah listener 'sc' ganda yang merusak tree.
     return { nodeId: folder.nodeId };
+  });
+}
+
+/**
+ * Buat folder bertingkat ("a/b/c") di dalam parentId (null = root),
+ * IDEMPOTEN: segmen yang sudah ada sebagai folder anak dengan nama sama
+ * DIPAKAI ULANG (semantik "gabung" — dipakai unggah folder Task 38: MEGA
+ * mengizinkan dua folder bernama sama, tanpa ini unggah ulang folder yang
+ * sama akan menduplikasi strukturnya). Kembalikan node id folder terdalam
+ * + jumlah folder yang benar-benar dibuat.
+ */
+export async function megaMkdirPath(
+  account: MegaAccountLike,
+  parentId: string | null,
+  segments: string[]
+): Promise<{ nodeId: string; createdCount: number }> {
+  if (segments.length === 0) throw new Error("MEGA_EMPTY_PATH");
+  if (megaFakeEnabled(account)) {
+    return fakeMegaMkdirPath(parentId, segments);
+  }
+  return withMutatingSession(account, async (storage) => {
+    const start = await resolveFolder(storage, parentId);
+    let cur = start;
+    let createdCount = 0;
+    for (const seg of segments) {
+      // Cari folder anak bernama sama (folder hasil mkdir baru punya array
+      // children sendiri — kosong; reuse hanya relevan untuk node termuat).
+      const existing = (cur.children ?? []).find(
+        (c) => c.directory && c.name === seg
+      );
+      if (existing) {
+        cur = existing;
+        continue;
+      }
+      const made = await withTimeout(
+        cur.mkdir({ name: seg }) as Promise<MutableFile>,
+        DEFAULT_TIMEOUT_MS
+      );
+      if (!made.nodeId) throw new Error("MEGA_NO_NODE_ID");
+      cur = made;
+      createdCount++;
+    }
+    const nodeId = cur.nodeId;
+    if (!nodeId) throw new Error("MEGA_NO_NODE_ID");
+    return { nodeId, createdCount };
   });
 }
 

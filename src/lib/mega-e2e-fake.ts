@@ -220,6 +220,30 @@ export async function fakeMegaMkdir(
   return { nodeId: encNodeId(rel) };
 }
 
+/** Buat folder bertingkat fake — mirror megaMkdirPath (idempoten by nature:
+ * node id fake = path relatif, jadi mkdir rekursif memakai folder yang ada). */
+export async function fakeMegaMkdirPath(
+  parentNodeId: string | null | undefined,
+  segments: string[]
+): Promise<{ nodeId: string; createdCount: number }> {
+  if (segments.length === 0) throw new Error("MEGA_EMPTY_PATH");
+  const parentAbs = fakePath(parentNodeId);
+  if (!parentAbs || !(await existsDir(parentAbs))) {
+    throw new Error("MEGA_FOLDER_NOT_FOUND");
+  }
+  const parentRel = path.relative(fakeRoot(), parentAbs);
+  let created = 0;
+  let rel = parentRel;
+  for (const seg of segments) {
+    const nextRel = rel ? `${rel}/${seg}` : seg;
+    const abs = path.join(fakeRoot(), nextRel);
+    if (!(await existsDir(abs))) created++;
+    await fs.mkdir(abs, { recursive: true });
+    rel = nextRel;
+  }
+  return { nodeId: encNodeId(rel), createdCount: created };
+}
+
 /** Unggah berkas fake; kembalikan hasil mirror megaUploadTo. */
 export async function fakeMegaUploadTo(
   account: MegaAccountLike,
